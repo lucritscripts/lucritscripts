@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Make an old Windows PC feel fast again — LucritScripts</title>
+<meta name="description" content="What actually moves the needle, in order of impact — and what's placebo.">
+<link rel="stylesheet" href="../assets/css/style.css">
+<script src="../assets/js/config.js"></script>
+<script src="../assets/js/linkvertise.js"></script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="../">Lucrit<span>Scripts</span></a>
+    <nav class="nav">
+      <a href="../#guides">Guides</a>
+      <a href="../#about">About</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <article class="article">
+    <h1>Make an old Windows PC feel fast again</h1>
+    <p class="meta">Windows · 7 min read</p>
+
+    <p>Ranked by how much you'll actually notice. Do them in order and stop when it feels fine.</p>
+
+    <h2>1. Swap the hard drive for an SSD</h2>
+    <p>Nothing else comes close. A spinning disk is the bottleneck on essentially every slow machine from before ~2018. Boot times drop from ninety seconds to twelve. Check Task Manager → Performance → Disk; if it says HDD, this is your fix.</p>
+
+    <h2>2. Cut the startup list</h2>
+    <p>Task Manager → Startup apps. Disable everything that isn't your antivirus or a driver utility. Updaters, launchers, and cloud sync clients can all start on demand.</p>
+
+    <h2>3. Check what's actually eating RAM</h2>
+    <p>8&nbsp;GB is the practical floor now. If you sit at 90% memory use with a browser open, more RAM beats any software tweak. Chrome tabs and Electron apps are usually the culprits.</p>
+
+    <h2>4. Clean out heat, not files</h2>
+    <p>A dust-clogged laptop throttles its CPU to a fraction of rated speed. Compressed air through the fan intake takes five minutes and often recovers more performance than any setting.</p>
+
+    <div class="callout">
+      <strong>Placebo, mostly:</strong> registry cleaners, "RAM boosters", defragging an SSD (actively harmful), and disabling visual effects on anything with a real GPU. None of these produce a measurable change.
+    </div>
+
+    <!-- ============ LOCKED SECTION ============ -->
+    <section data-gate="cheatsheet"
+             data-lock-title="Get the tune-up checklist"
+             data-lock-desc="A printable one-pager with the exact settings, plus the PowerShell one-liners for the steps that are faster from a terminal."
+             data-lock-cta="Unlock the checklist">
+
+      <h2>The checklist</h2>
+      <ol>
+        <li>Confirm drive type — <code>Get-PhysicalDisk | Select FriendlyName, MediaType</code></li>
+        <li>List startup impact — <code>Get-CimInstance Win32_StartupCommand | Select Name, Command</code></li>
+        <li>Check memory pressure — <code>Get-Counter '\Memory\Available MBytes'</code></li>
+        <li>Verify thermal throttling — HWiNFO64, watch <em>CPU Package</em> temperature under load.</li>
+      </ol>
+      <p><a href="../assets/downloads/tuneup-checklist.pdf">Download the printable version</a></p>
+    </section>
+    <!-- ========== END LOCKED SECTION ========== -->
+
+    <h2>5. Reinstall, last resort</h2>
+    <p>Settings → System → Recovery → Reset this PC. Keeps your files, wipes the accumulated cruft. Budget an afternoon for reinstalling software.</p>
+
+    <p><a href="../">← All guides</a></p>
+  </article>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap"><span>© <span id="yr"></span> LucritScripts</span><span>Reader-supported</span></div>
+</footer>
+
+<script>document.getElementById('yr').textContent = new Date().getFullYear();</script>
+<script src="../assets/js/lootlabs.js"></script>
+<script src="../assets/js/monetize.js"></script>
+</body>
+</html>
