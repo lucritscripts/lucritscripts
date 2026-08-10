@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LucritScripts — practical guides, no fluff</title>
+<meta name="description" content="Short, practical guides you can actually follow. Free, reader-supported.">
+<meta property="og:title" content="LucritScripts">
+<meta property="og:description" content="Short, practical guides you can actually follow.">
+<meta property="og:type" content="website">
+<link rel="stylesheet" href="assets/css/style.css">
+<script src="assets/js/config.js"></script>
+<script src="assets/js/linkvertise.js"></script>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="wrap">
+    <a class="brand" href="./">Lucrit<span>Scripts</span></a>
+    <nav class="nav">
+      <a href="#guides">Guides</a>
+      <a href="#about">About</a>
+      <a href="https://github.com/lucritscripts" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <h1>Guides that get to the point.</h1>
+      <p>No 2,000-word preamble before the actual answer. Every guide here is written to be finished in one sitting — and it's free, funded by a single optional sponsor step.</p>
+    </div>
+  </section>
+
+  <section id="guides">
+    <div class="wrap">
+      <div class="grid">
+
+        <a class="card" href="guides/github-pages-setup.html">
+          <span class="tag">Web</span>
+          <h3>Ship a site on GitHub Pages in 10 minutes</h3>
+          <p>Repo to live URL, custom domain, and the three settings people always get wrong.</p>
+        </a>
+
+        <a class="card" href="guides/speed-up-your-pc.html">
+          <span class="tag">Windows</span>
+          <h3>Make an old Windows PC feel fast again</h3>
+          <p>What actually moves the needle, in order of impact — and what's placebo.</p>
+        </a>
+
+        <a class="card" href="guides/github-pages-setup.html#resources">
+          <span class="tag">Bonus</span>
+          <h3>The starter pack</h3>
+          <p>Templates and checklists that pair with the guides. Unlock once, keep forever.</p>
+        </a>
+
+      </div>
+    </div>
+  </section>
+
+  <section id="about">
+    <div class="wrap" style="padding-bottom:60px;max-width:720px">
+      <h2>How this site stays free</h2>
+      <p style="color:var(--ink-dim)">Guides are fully readable. Only the downloadable extras — templates, checklists, config files — sit behind a one-step sponsor unlock. One unlock covers you for 24 hours on this browser. No account, no email.</p>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="wrap">
+    <span>© <span id="yr"></span> LucritScripts</span>
+    <span>Reader-supported · <a href="#about">how it works</a></span>
+  </div>
+</footer>
+
+<script>document.getElementById('yr').textContent = new Date().getFullYear();</script>
+<script src="assets/js/lootlabs.js"></script>
+<script src="assets/js/monetize.js"></script>
+</body>
+</html>
