@@ -1,0 +1,16 @@
+name = "lootlabs-proxy"
+main = "worker.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+# Your GitHub Pages origin — locks CORS down to your site only.
+ALLOWED_ORIGIN = "https://lucritscripts.github.io"
+
+# Create with:  npx wrangler kv namespace create UNLOCKS
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "UNLOCKS"
+id = "PASTE_KV_NAMESPACE_ID"
+
+# Set the token as a secret (never commit it):
+#   npx wrangler secret put LOOTLABS_TOKEN
