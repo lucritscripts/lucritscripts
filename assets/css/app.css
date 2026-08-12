@@ -1566,3 +1566,54 @@ html.no-webgl .panel { background: rgba(10, 15, 26, 0.86); }
   .gamehead { gap: 13px; }
   .library__all { margin-left: 0; }
 }
+
+/* ============================================================
+   Assistant — model answers
+   ============================================================ */
+
+.assistant .bubble p { margin: 0 0 9px; }
+.assistant .bubble p:last-child { margin-bottom: 0; }
+.assistant .bubble code {
+  font-family: var(--mono); font-size: 0.82em;
+  background: rgba(255, 255, 255, 0.07); border-radius: 5px; padding: 1px 5px;
+}
+
+.acode {
+  position: relative; margin: 10px 0;
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: rgba(2, 4, 9, 0.72); overflow: hidden;
+}
+.acode pre {
+  margin: 0; padding: 12px 13px; overflow-x: auto;
+  font-family: var(--mono); font-size: 0.76rem; line-height: 1.6;
+  scrollbar-width: thin; scrollbar-color: var(--line-2) transparent;
+}
+.acode code { background: none; padding: 0; font-size: inherit; }
+
+.acode__copy {
+  position: absolute; top: 7px; right: 7px; z-index: 1;
+  padding: 4px 9px; cursor: pointer;
+  font-family: var(--mono); font-size: 0.64rem;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--ink-2); background: rgba(9, 13, 24, 0.92);
+  border: 1px solid var(--line-2); border-radius: 6px;
+  opacity: 0; transition: opacity 0.15s, color 0.15s, border-color 0.15s;
+}
+.acode:hover .acode__copy, .acode__copy:focus-visible { opacity: 1; }
+.acode__copy:hover { color: var(--ink); border-color: var(--blue); }
+
+/* A fence still being streamed gets a live edge, so a half-written script
+   reads as "still coming" rather than as the finished answer. */
+.acode.is-open::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--blue), transparent);
+  animation: acodeflow 1.1s linear infinite;
+}
+@keyframes acodeflow {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
+}
+
+@media (pointer: coarse) {
+  .acode__copy { opacity: 1; }
+}
