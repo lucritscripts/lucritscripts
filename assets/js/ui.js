@@ -5,8 +5,9 @@ import { SCRIPTS, CATEGORIES, SORTS, BOARDS, categoryOf } from "./data/scripts.j
 import { BANDS } from "./engine/world.js";
 import { account } from "./account.js";
 import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLeaderboard } from "./pages.js";
-import { totals as scriptTotals } from "./stats.js";
+import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import { createGamePicker } from "./gamepicker.js";
+import { tileGames, searchGames, searchScripts, gameArt, allGames } from "./games.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -67,6 +68,7 @@ const wordCount = (s) => String(s || "").trim().split(/\s+/).filter(Boolean).len
 
 export function cardMarkup(script, { large = false } = {}) {
   const cat = categoryOf(script.category);
+  const t = scriptTotals(script.id);
   return `
     <article class="card${large ? " card--lg" : ""}" data-id="${esc(script.id)}" style="--cat:${cat.accent}">
       <div class="card__glow" aria-hidden="true"></div>
@@ -82,7 +84,13 @@ export function cardMarkup(script, { large = false } = {}) {
         <div class="card__meta">
           <span class="by">@${esc(script.author)}</span>
           <span class="dot" aria-hidden="true"></span>
-          <span>${fmt(scriptTotals(script.id).views)} views</span>
+          <span>${fmt(t.views)} views</span>
+          <span class="dot" aria-hidden="true"></span>
+          <span>${fmt(t.likes)} like${t.likes === 1 ? "" : "s"}</span>
+          <span class="dot" aria-hidden="true"></span>
+          <span class="card__rating">${script.rating
+            ? `<b>${Number(script.rating).toFixed(1)}</b>★`
+            : "unrated"}</span>
         </div>
         <div class="card__actions">
           <button class="btn btn--sm btn--primary" data-act="get">Get Script</button>
@@ -124,8 +132,16 @@ function attachTilt(root, strength = 8) {
    Search
    ============================================================ */
 
-export function createLibraryPanel({ id, onOpen, onPublish }) {
-  const state = { query: "", cats: new Set(), sort: "popular" };
+/**
+ * Find a script.
+ *
+ * People arrive knowing the game they play, not the abstract category a
+ * script belongs to — so the section leads with games. Combat stays pinned
+ * as the one category shortcut worth having up front; everything else is
+ * reachable through search, the Library, or a game's own page.
+ */
+export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLibrary }) {
+  const state = { query: "", cat: "" };
   const root = el("div", { class: "library", id });
 
   root.innerHTML = `
@@ -134,124 +150,167 @@ export function createLibraryPanel({ id, onOpen, onPublish }) {
         <circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path>
       </svg>
       <input class="library__input" type="search" autocomplete="off" spellcheck="false"
-             placeholder="Search scripts, games, categories..." aria-label="Search scripts">
+             placeholder="Search any game or script..." aria-label="Search games and scripts">
+      <button class="library__clear" type="button" aria-label="Clear search" hidden>&times;</button>
       <kbd class="library__kbd">/</kbd>
     </div>
 
-    <div class="library__controls">
-      <div class="filters" role="group" aria-label="Filter by category"></div>
-      <label class="sort">
-        <span class="sort__label">Sort</span>
-        <select class="sort__select" aria-label="Sort scripts">
-          ${SORTS.map((s) => `<option value="${s.id}">${s.label}</option>`).join("")}
-        </select>
-      </label>
+    <div class="library__pinned">
+      <button class="filter filter--pin" type="button" data-cat="combat" style="--cat:${esc(categoryOf("combat").accent)}">Combat</button>
+      <span class="library__pinnote">Pinned category</span>
+      <button class="btn btn--ghost btn--xs library__all" type="button" data-more>Browse all games</button>
     </div>
 
     <p class="library__count" aria-live="polite"></p>
     <div class="library__results" data-native-scroll></div>`;
 
   const input = $(".library__input", root);
-  const filters = $(".filters", root);
-  const select = $(".sort__select", root);
+  const clear = $(".library__clear", root);
+  const pin = $(".filter--pin", root);
   const results = $(".library__results", root);
   const count = $(".library__count", root);
 
-  filters.appendChild(el("button", { class: "filter is-on", type: "button", "data-cat": "" }, "All"));
-  for (const c of CATEGORIES) {
-    filters.appendChild(el("button", {
-      class: "filter", type: "button", "data-cat": c.id, style: `--cat:${c.accent}`,
-    }, c.label));
+  /* ------------------------------------------------------------ views */
+
+  function gamesView() {
+    const { tiles, overflow, total } = tileGames(library);
+
+    count.textContent = total === 1 ? "1 game" : `${total} games`;
+    results.innerHTML = `
+      <div class="games">
+        ${tiles.map(gameTileMarkup).join("")}
+        ${overflow ? `
+          <button class="gtile gtile--more" type="button" data-more
+                  aria-label="Browse all ${total} games in the Library">
+            <span class="gtile__bubble">+${overflow}</span>
+            <span class="gtile__name">More games</span>
+            <span class="gtile__count">Open the Library</span>
+          </button>` : ""}
+      </div>`;
   }
 
-  function matches(s) {
-    if (state.cats.size && !state.cats.has(s.category)) return false;
-    const q = state.query.trim().toLowerCase();
-    if (!q) return true;
-    const hay = [s.title, s.game, s.desc, s.author, s.category, ...(s.tags || [])]
-      .join(" ").toLowerCase();
-    return q.split(/\s+/).every((t) => hay.includes(t));
+  function categoryView() {
+    const cat = categoryOf(state.cat);
+    const list = library.filter((s) => s.category === state.cat);
+
+    count.innerHTML = `${list.length} ${cat.label} script${list.length === 1 ? "" : "s"}
+      <button class="library__undo" type="button" data-clear-cat>clear</button>`;
+
+    results.innerHTML = list.length
+      ? `<div class="results__grid">${list.map((s) => cardMarkup(s)).join("")}</div>`
+      : emptyState(`No ${cat.label.toLowerCase()} scripts yet.`,
+          "Be the first to publish one and it sits at the top of this list.");
   }
 
-  function sorted(list) {
-    const by = {
-      popular: (a, b) => (b.copies + b.views * 0.1) - (a.copies + a.views * 0.1),
-      newest: (a, b) => String(b.added).localeCompare(String(a.added)),
-      rated: (a, b) => (b.rating || 0) - (a.rating || 0) || b.views - a.views,
-      viewed: (a, b) => b.views - a.views,
-    }[state.sort];
-    return list.slice().sort(by);
-  }
+  function searchView() {
+    const q = state.query.trim();
+    const games = searchGames(library, q, 12);
+    const scripts = searchScripts(library, q);
 
-  function render() {
-    const list = sorted(library.filter(matches));
+    count.textContent = `${games.length} game${games.length === 1 ? "" : "s"} · ${scripts.length} script${scripts.length === 1 ? "" : "s"}`;
 
-    if (!library.length) {
-      count.textContent = "0 scripts";
-      results.innerHTML = `
-        <div class="empty empty--lg">
-          <strong>The library is empty — for now.</strong>
-          <span>Every script here is published by a creator. Be the first and you're at the top of the leaderboard by default.</span>
-          <button class="btn btn--primary btn--sm" data-act="publish">Publish the first script</button>
-        </div>`;
+    if (!games.length && !scripts.length) {
+      results.innerHTML = emptyState(
+        `Nothing matched “${esc(q)}”.`,
+        "Search covers every game on the site and every published script — try a shorter word."
+      );
       return;
     }
 
-    count.textContent = list.length === library.length
-      ? `${list.length} script${list.length === 1 ? "" : "s"}`
-      : `${list.length} of ${library.length} scripts`;
-
-    results.innerHTML = list.length
-      ? list.map((s) => cardMarkup(s)).join("")
-      : `<div class="empty">
-           <strong>Nothing matched that.</strong>
-           <span>Try a different word, or clear the category filters.</span>
-         </div>`;
+    results.innerHTML = `
+      ${games.length ? `
+        <h3 class="results__head">Games</h3>
+        <div class="games games--compact">${games.map(gameTileMarkup).join("")}</div>` : ""}
+      ${scripts.length ? `
+        <h3 class="results__head">Scripts</h3>
+        <div class="results__grid">${scripts.map((s) => cardMarkup(s)).join("")}</div>` : ""}`;
   }
+
+  function render() {
+    pin.classList.toggle("is-on", state.cat === "combat");
+    clear.hidden = !state.query;
+
+    if (state.query.trim()) searchView();
+    else if (state.cat) categoryView();
+    else gamesView();
+  }
+
+  function emptyState(title, line) {
+    return `
+      <div class="empty empty--lg">
+        <strong>${title}</strong>
+        <span>${line}</span>
+        <button class="btn btn--primary btn--sm" data-act="publish">Publish a script</button>
+      </div>`;
+  }
+
+  /* ---------------------------------------------------------- events */
 
   input.addEventListener("input", () => { state.query = input.value; render(); });
 
-  filters.addEventListener("click", (e) => {
-    const btn = e.target.closest(".filter");
-    if (!btn) return;
-    const cat = btn.dataset.cat;
-    if (!cat) state.cats.clear();
-    else if (state.cats.has(cat)) state.cats.delete(cat);
-    else state.cats.add(cat);
-
-    $$(".filter", filters).forEach((b) => {
-      b.classList.toggle("is-on", b.dataset.cat ? state.cats.has(b.dataset.cat) : state.cats.size === 0);
-    });
+  clear.addEventListener("click", () => {
+    input.value = "";
+    state.query = "";
+    input.focus();
     render();
   });
 
-  select.addEventListener("change", () => { state.sort = select.value; render(); });
+  pin.addEventListener("click", () => {
+    state.cat = state.cat === "combat" ? "" : "combat";
+    state.query = "";
+    input.value = "";
+    render();
+  });
 
-  results.addEventListener("click", (e) => {
+  root.addEventListener("click", (e) => {
+    if (e.target.closest("[data-more]")) { onOpenLibrary?.(); return; }
+    if (e.target.closest("[data-clear-cat]")) { state.cat = ""; render(); return; }
     if (e.target.closest('[data-act="publish"]')) { onPublish?.(); return; }
+
+    const tile = e.target.closest("[data-game]");
+    if (tile) { onOpenGame?.(tile.dataset.game); return; }
+
     const card = e.target.closest(".card");
-    if (!card) return;
-    const script = library.find((s) => s.id === card.dataset.id);
-    if (script) onOpen?.(script);
+    if (card) {
+      const script = library.find((s) => s.id === card.dataset.id);
+      if (script) onOpen?.(script);
+    }
   });
 
   attachTilt(results, 6);
   onLibraryChange(render);
+  onStatsChange(() => { if (!state.query && !state.cat) render(); });
   render();
 
   return {
     node: root,
     focus: () => input.focus(),
+    search(q) { state.cat = ""; state.query = q; input.value = q; render(); },
     setCategory(cat) {
-      state.cats.clear();
-      if (cat) state.cats.add(cat);
-      $$(".filter", filters).forEach((b) => {
-        b.classList.toggle("is-on", b.dataset.cat ? state.cats.has(b.dataset.cat) : state.cats.size === 0);
-      });
+      state.query = "";
+      input.value = "";
+      state.cat = cat || "";
       render();
     },
     refresh: render,
   };
+}
+
+/** One game tile: art, name, and how many scripts it has. */
+export function gameTileMarkup(game) {
+  const art = gameArt(game);
+  return `
+    <button class="gtile" type="button" data-game="${esc(game.id)}" style="--h:${art.hue}">
+      <span class="gtile__art" aria-hidden="true">
+        ${game.thumbnail
+          ? `<img src="${esc(game.thumbnail)}" alt="" loading="lazy">`
+          : `<span class="gtile__mono">${esc(art.initials)}</span>`}
+      </span>
+      <span class="gtile__name">${esc(game.name)}</span>
+      <span class="gtile__count">${game.scripts
+        ? `${fmt(game.scripts)} script${game.scripts === 1 ? "" : "s"}`
+        : "No scripts yet"}</span>
+    </button>`;
 }
 
 /* ============================================================
@@ -295,6 +354,8 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
   content.innerHTML = [
     chapter("hero", "01 / Origin", CHAPTERS[0].len, `
       <div class="hero">
+        <img class="hero__logo" src="assets/img/logo.png" alt="Lucrit Script"
+             width="460" height="236" fetchpriority="high" decoding="async">
         <h1 class="hero__title">
           <span class="line">The ultimate</span>
           <span class="line">Roblox script</span>
@@ -327,7 +388,7 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
       <div class="panel panel--wide" id="search-mount">
         <header class="panel__head">
           <h2>Find a script</h2>
-          <p>Filter by what it does, sort by what people actually use.</p>
+          <p>Start with the game you play. Search reaches every game and every script on the site.</p>
         </header>
       </div>`),
 
@@ -637,19 +698,20 @@ function buildPublishForm({ onAuth, onPublished }) {
    Chrome — nav, top progress bar, floating dashboard button
    ============================================================ */
 
-export function buildChrome({ onJump, onSearch, onDashboard, onAuth }) {
+export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary }) {
   const nav = el("header", { class: "nav" });
   nav.innerHTML = `
     <div class="progress" role="presentation">
       <span class="progress__fill"></span>
       <span class="progress__label" data-label></span>
     </div>
-    <a class="nav__brand" href="#ch-hero" data-jump="hero">
-      <span class="nav__mark" aria-hidden="true"></span>
-      <span>Lucrit<b>Script</b></span>
+    <a class="nav__brand" href="#ch-hero" data-jump="hero" aria-label="Lucrit Script — home">
+      <img class="nav__mark" src="assets/img/mark.png" alt="" width="184" height="123" decoding="async">
+      <span aria-hidden="true">Lucrit<b>Script</b></span>
     </a>
     <nav class="nav__links" aria-label="Sections">
       <button data-jump="search">Scripts</button>
+      <button data-library>Library</button>
       <button data-jump="categories">Categories</button>
       <button data-jump="featured">Trending</button>
       <button data-jump="community">Leaderboard</button>
@@ -663,6 +725,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth }) {
   nav.addEventListener("click", (e) => {
     const jump = e.target.closest("[data-jump]");
     if (jump) { e.preventDefault(); onJump(jump.dataset.jump); return; }
+    if (e.target.closest("[data-library]")) { onLibrary?.(); return; }
     if (e.target.closest(".nav__search")) onSearch();
   });
 

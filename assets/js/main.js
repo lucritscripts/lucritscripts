@@ -4,8 +4,9 @@ import { World, BANDS } from "./engine/world.js";
 import { SmoothScroll } from "./engine/scroll.js";
 import {
   createLibraryPanel, buildChapters, buildChrome, createChoreography,
-  CHAPTERS, library, onLibraryChange, removeScript,
+  CHAPTERS, library, onLibraryChange, removeScript, cardMarkup,
 } from "./ui.js";
+import { createGameLibrary, createGamePage } from "./browse.js";
 import {
   createAuth, createDashboard, createInfoPage, createScriptPage, toast,
 } from "./pages.js";
@@ -78,12 +79,32 @@ const dashboard = createDashboard({
   onDeleteScript: (s) => removeScript(s.id),
 });
 
+/* --------------------------------------------------------------- browse */
+
+const gamePage = createGamePage({
+  getLibrary: () => library,
+  onOpenScript: (s) => scriptPage.open(s),
+  onPublish: () => jumpTo("submit"),
+  cardMarkup,
+});
+
+const gameLibrary = createGameLibrary({
+  getLibrary: () => library,
+  onOpenGame: (id) => gamePage.open(id),
+  onPublish: () => jumpTo("submit"),
+});
+
+// "All games" on a game page walks back to the Library rather than nowhere.
+document.addEventListener("lucrit:library", () => gameLibrary.open());
+
 /* ------------------------------------------------------------------ UI */
 
 const libraryPanel = createLibraryPanel({
   id: "library-main",
   onOpen: (script) => scriptPage.open(script),
   onPublish: () => jumpTo("submit"),
+  onOpenGame: (id) => gamePage.open(id),
+  onOpenLibrary: () => gameLibrary.open(),
 });
 
 const scroller = new SmoothScroll({ reducedMotion: caps.reducedMotion });
@@ -102,6 +123,7 @@ const chrome = buildChrome({
   onSearch: () => { jumpTo("search"); setTimeout(() => libraryPanel.focus(), 420); },
   onDashboard: () => dashboard.open(),
   onAuth: () => auth.open("signup"),
+  onLibrary: () => gameLibrary.open(),
 });
 
 choreography = createChoreography({ chrome });
@@ -123,7 +145,11 @@ createAssistant({
 document.addEventListener("lucrit:publish", () => jumpTo("submit"));
 
 // Chapter heights change when the library fills, so the bands must re-measure.
-onLibraryChange(() => setTimeout(() => choreography.measure(), 60));
+onLibraryChange(() => {
+  gameLibrary.refresh();
+  gamePage.refresh();
+  setTimeout(() => choreography.measure(), 60);
+});
 
 /* --------------------------------------------------------------- input */
 
@@ -188,9 +214,13 @@ if (deep) {
   if (s) scriptPage.open(s);
 }
 
+const deepGame = /#game=([\w-]+)/.exec(location.hash);
+if (deepGame) gamePage.open(deepGame[1]);
+else if (location.hash === "#library") gameLibrary.open();
+
 window.__lucrit = {
   world, scroller, library, account,
-  auth, dashboard, info, scriptPage, libraryPanel,
+  auth, dashboard, info, scriptPage, libraryPanel, gamePage, gameLibrary,
   ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography,
   snap() {
     smoothed = progress;
