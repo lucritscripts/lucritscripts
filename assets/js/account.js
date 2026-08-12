@@ -1,15 +1,17 @@
 // Account model.
 //
-// Every method here is async and returns { ok, error?, data? } so that
-// swapping the local shell for Supabase is a body-only change — no caller
-// has to be touched.
+// Every method returns { ok, error?, data? }, so a caller never has to know
+// where the account actually lives.
 //
-//   const { data, error } = await supabase.auth.signUp({ email, password })
+// Two backends live behind that shape:
+//   firebase  real accounts, cross-device, real password-reset emails
+//   local     browser-only fallback for when the SDK cannot load
 //
-// UNTIL THEN: this is a local-only shell for building and demoing the UI.
-// Passwords are PBKDF2-hashed with a per-user salt (never stored in the
-// clear), but browser storage is not a security boundary — real credential
-// storage starts the moment Supabase is wired in.
+// The local one hashes passwords with PBKDF2 and a per-user salt, but browser
+// storage is not a security boundary. It exists so the site still works
+// offline, not as a place to keep real credentials.
+
+import { USE_FIREBASE } from "./firebase.js";
 
 const KEY_USERS = "lucrit:users";
 const KEY_SESSION = "lucrit:session";
@@ -90,12 +92,24 @@ export function validateSignUp({ username, email, password }) {
 /* ---------------------------------------------------------------- model */
 
 const listeners = new Set();
-let session = readJSON(KEY_SESSION, null);
+
+// When Firebase is in play it is the source of truth for who is signed in, so
+// we do not seed from storage — a stale browser-only session must never look
+// like a real login. Firebase resolves the real one a moment later.
+let session = USE_FIREBASE ? null : readJSON(KEY_SESSION, null);
 
 function emit() {
   for (const fn of listeners) {
     try { fn(session); } catch (e) { console.error(e); }
   }
+}
+
+/** The one place the session changes, whichever backend is in charge. */
+function setSession(next) {
+  session = next;
+  if (next) store.set(KEY_SESSION, JSON.stringify(next));
+  else store.del(KEY_SESSION);
+  emit();
 }
 
 function allUsers() { return readJSON(KEY_USERS, {}); }
@@ -108,15 +122,14 @@ function publicUser(u) {
   return rest;
 }
 
-export const account = {
-  get session() { return session; },
-  get isSignedIn() { return Boolean(session); },
+/* --------------------------------------------------------- local backend */
 
-  onChange(fn) {
-    listeners.add(fn);
-    fn(session);
-    return () => listeners.delete(fn);
-  },
+// The original browser-only implementation. It is the fallback now rather
+// than the default: it still runs when Firebase cannot load, so the site
+// works offline and on a blocked network.
+
+const local = {
+  kind: "local",
 
   async signUp({ username, email, password, captcha }) {
     const problem = validateSignUp({ username, email, password });
@@ -148,10 +161,7 @@ export const account = {
 
     users[user.id] = user;
     saveUsers(users);
-
-    session = publicUser(user);
-    store.set(KEY_SESSION, JSON.stringify(session));
-    emit();
+    setSession(publicUser(user));
     return { ok: true, data: session };
   },
 
@@ -167,27 +177,22 @@ export const account = {
     const hash = await hashPassword(password, user.salt);
     if (hash !== user.passwordHash) return generic;
 
-    session = publicUser(user);
-    store.set(KEY_SESSION, JSON.stringify(session));
-    emit();
+    setSession(publicUser(user));
     return { ok: true, data: session };
   },
 
   async signOut() {
-    session = null;
-    store.del(KEY_SESSION);
-    emit();
+    setSession(null);
     return { ok: true };
   },
 
-  /** Supabase sends the real email; here we only confirm the request shape. */
   async requestPasswordReset(email) {
     if (!RULES.email.test(email || ""))
       return { ok: false, error: "That email address doesn't look right." };
     return {
       ok: true,
       data: { pending: true },
-      note: "Reset emails start working once Supabase auth is connected.",
+      note: "Reset emails need the Firebase backend — this browser-only mode cannot send mail.",
     };
   },
 
@@ -209,50 +214,45 @@ export const account = {
     return { ok: true };
   },
 
-  /** Days remaining before the username can change again (0 = allowed now). */
-  usernameCooldownDays() {
-    if (!session?.usernameChangedAt) return 0;
-    const elapsed = Date.now() - new Date(session.usernameChangedAt).getTime();
+  usernameCooldownDays(current) {
+    if (!current?.usernameChangedAt) return 0;
+    const elapsed = Date.now() - new Date(current.usernameChangedAt).getTime();
     const left = USERNAME_COOLDOWN_DAYS - elapsed / 86400000;
     return left > 0 ? Math.ceil(left) : 0;
   },
 
-  async changeUsername(username) {
-    if (!session) return { ok: false, error: "You need to be signed in." };
+  async changeUsername(username, current) {
+    if (!current) return { ok: false, error: "You need to be signed in." };
     const name = String(username || "").trim();
     if (!name) return { ok: false, error: "Pick a username." };
     if (name.length > 32) return { ok: false, error: "Username can be at most 32 characters." };
     if (!RULES.username.test(name))
       return { ok: false, error: "Username can use letters, numbers, spaces, dots, dashes and underscores." };
-    username = name;
 
-    const days = this.usernameCooldownDays();
+    const days = this.usernameCooldownDays(current);
     if (days > 0)
       return { ok: false, error: `You can change your username again in ${days} day${days === 1 ? "" : "s"}.` };
 
     const users = allUsers();
     if (Object.values(users).some(
-      (u) => u.id !== session.id && u.username.toLowerCase() === username.toLowerCase()
+      (u) => u.id !== current.id && u.username.toLowerCase() === name.toLowerCase()
     )) return { ok: false, error: "That username is already taken." };
 
-    const user = users[session.id];
+    const user = users[current.id];
     if (!user) return { ok: false, error: "Account not found." };
 
-    user.username = username;
+    user.username = name;
     user.usernameChangedAt = new Date().toISOString();
     saveUsers(users);
-
-    session = publicUser(user);
-    store.set(KEY_SESSION, JSON.stringify(session));
-    emit();
+    setSession(publicUser(user));
     return { ok: true, data: session };
   },
 
-  async updateProfile({ bio, avatar, youtube, tiktok }) {
-    if (!session) return { ok: false, error: "You need to be signed in." };
+  async updateProfile({ bio, avatar, youtube, tiktok }, current) {
+    if (!current) return { ok: false, error: "You need to be signed in." };
 
     const users = allUsers();
-    const user = users[session.id];
+    const user = users[current.id];
     if (!user) return { ok: false, error: "Account not found." };
 
     if (bio !== undefined) user.bio = String(bio).slice(0, 300);
@@ -261,25 +261,73 @@ export const account = {
     if (tiktok !== undefined) user.tiktok = normaliseUrl(tiktok, "tiktok.com");
 
     saveUsers(users);
-    session = publicUser(user);
-    store.set(KEY_SESSION, JSON.stringify(session));
-    emit();
+    setSession(publicUser(user));
     return { ok: true, data: session };
   },
 
-  /** Records a publish against the signed-in account. */
-  async addPublish(scriptId) {
-    if (!session) return { ok: false, error: "You need to be signed in." };
+  async addPublish(scriptId, current) {
+    if (!current) return { ok: false, error: "You need to be signed in." };
     const users = allUsers();
-    const user = users[session.id];
+    const user = users[current.id];
     if (!user) return { ok: false, error: "Account not found." };
     user.publishes = Array.from(new Set([...(user.publishes || []), scriptId]));
     saveUsers(users);
-    session = publicUser(user);
-    store.set(KEY_SESSION, JSON.stringify(session));
-    emit();
+    setSession(publicUser(user));
     return { ok: true };
   },
+};
+
+/* -------------------------------------------------------------- backend */
+
+let backend = local;
+
+/**
+ * Resolves once the backend is chosen and, for Firebase, once the first auth
+ * state has arrived. Await it before trusting `account.isSignedIn` on load.
+ */
+export const ready = (async () => {
+  if (!USE_FIREBASE) return backend.kind;
+  try {
+    const { createFirebaseBackend } = await import("./account-firebase.js");
+    const remote = await createFirebaseBackend({ setSession, validateSignUp, RULES });
+    if (remote) {
+      backend = remote;
+      store.del(KEY_SESSION);   // Firebase owns the session now
+      return backend.kind;
+    }
+  } catch (err) {
+    console.warn("[lucrit] falling back to local accounts:", err?.message || err);
+  }
+
+  // Firebase is not taking over, so the stored session is the real one again.
+  // Skipping this would sign people out of the offline mode on every reload.
+  const saved = readJSON(KEY_SESSION, null);
+  if (saved) setSession(saved);
+  return backend.kind;
+})();
+
+export const account = {
+  get session() { return session; },
+  get isSignedIn() { return Boolean(session); },
+  /** "firebase" or "local" — the dashboard shows this so it is never a mystery. */
+  get backend() { return backend.kind; },
+  ready,
+
+  onChange(fn) {
+    listeners.add(fn);
+    fn(session);
+    return () => listeners.delete(fn);
+  },
+
+  signUp: (details) => backend.signUp(details),
+  signIn: (details) => backend.signIn(details),
+  signOut: () => backend.signOut(),
+  requestPasswordReset: (email) => backend.requestPasswordReset(email),
+  changePassword: (details) => backend.changePassword(details),
+  usernameCooldownDays: () => backend.usernameCooldownDays(session),
+  changeUsername: (username) => backend.changeUsername(username, session),
+  updateProfile: (patch) => backend.updateProfile(patch, session),
+  addPublish: (scriptId) => backend.addPublish(scriptId, session),
 };
 
 function normaliseUrl(value, host) {
