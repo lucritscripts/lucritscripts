@@ -106,6 +106,10 @@ const chrome = buildChrome({
 
 choreography = createChoreography({ chrome });
 
+// Once input goes quiet, ease onto the nearest chapter instead of resting
+// half-faded between two of them.
+scroller.setSnap((p, dir) => choreography.snapTarget(p, dir));
+
 createAssistant({
   getLibrary: () => library,
   onJump: jumpTo,
@@ -187,7 +191,7 @@ if (deep) {
 window.__lucrit = {
   world, scroller, library, account,
   auth, dashboard, info, scriptPage, libraryPanel,
-  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast,
+  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography,
   snap() {
     smoothed = progress;
     world?.setProgress(choreography.toCameraProgress(smoothed));

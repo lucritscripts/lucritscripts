@@ -750,6 +750,56 @@ export function createChoreography({ chrome, onCategoryIndex }) {
     return sections[i].a + (sections[i].b - sections[i].a) * 0.45;
   }
 
+  /* --------------------------------------------------------- settling */
+
+  // A chapter is fully readable between the end of its fade-in and the start
+  // of its fade-out (local 0.22 → 0.78 in update()). SETTLE sits just inside
+  // that, so a settled chapter is unambiguously at full opacity. Anywhere in
+  // between two of these ranges is the half-faded limbo we glide out of.
+  const SETTLE = 0.26;
+
+  function restZones() {
+    const last = sections.length - 1;
+    return sections.map((s, i) => {
+      const span = Math.max(1e-6, s.b - s.a);
+      return {
+        key: s.key,
+        from: i === 0 ? s.a : s.a + span * SETTLE,
+        to: i === last ? s.b : s.b - span * SETTLE,
+      };
+    });
+  }
+
+  /**
+   * Where the page should come to rest. Returns null when the current
+   * position is already a comfortable one — the common case, so ordinary
+   * scrolling inside a chapter is never interfered with.
+   */
+  function snapTarget(progress, direction = 0) {
+    const zones = restZones();
+
+    for (const z of zones) {
+      if (progress >= z.from && progress <= z.to) return null;
+    }
+
+    let prev = null;
+    let next = null;
+    for (const z of zones) {
+      if (z.to < progress) prev = z;
+      else if (!next) next = z;
+    }
+
+    if (!prev) return next ? next.from : null;
+    if (!next) return prev.to;
+
+    // Favour the chapter being scrolled towards: reversing someone's
+    // direction feels like the page arguing with them.
+    const gap = Math.max(1e-6, next.from - prev.to);
+    const t = (progress - prev.to) / gap;
+    const tipping = direction > 0 ? 0.3 : direction < 0 ? 0.7 : 0.5;
+    return t >= tipping ? next.from : prev.to;
+  }
+
   function update(progress) {
     let active = 0;
 
@@ -795,5 +845,5 @@ export function createChoreography({ chrome, onCategoryIndex }) {
     chrome.update(progress, active);
   }
 
-  return { update, targetFor, toCameraProgress, measure };
+  return { update, targetFor, toCameraProgress, measure, snapTarget, restZones };
 }
