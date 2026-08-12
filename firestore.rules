@@ -1,0 +1,13 @@
+rules_version = '2';
+
+// Every collection the backend touches is written by Cloud Functions using
+// the Admin SDK, which bypasses these rules. Nothing here should be readable
+// or writable straight from a browser — a visitor who could write to
+// `unlocks` could mark their own paywall as complete.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
