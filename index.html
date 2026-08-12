@@ -2,80 +2,45 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LucritScripts — practical guides, no fluff</title>
-<meta name="description" content="Short, practical guides you can actually follow. Free, reader-supported.">
-<meta property="og:title" content="LucritScripts">
-<meta property="og:description" content="Short, practical guides you can actually follow.">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Lucrit Script — the ultimate Roblox script library</title>
+<meta name="description" content="Discover, explore, and build with thousands of Roblox scripts. A searchable library of readable, production-grade Luau modules.">
+
 <meta property="og:type" content="website">
-<link rel="stylesheet" href="assets/css/style.css">
-<script src="assets/js/config.js"></script>
-<script src="assets/js/linkvertise.js"></script>
+<meta property="og:title" content="Lucrit Script">
+<meta property="og:description" content="Discover, explore, and build with thousands of Roblox scripts.">
+<meta name="theme-color" content="#05060a">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" media="print" onload="this.media='all'">
+<noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"></noscript>
+
+<link rel="stylesheet" href="assets/css/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%233d9bff'/%3E%3Cpath d='M10 8v16h12' stroke='%23fff' stroke-width='3.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 </head>
+
 <body>
 
-<header class="site-header">
-  <div class="wrap">
-    <a class="brand" href="./">Lucrit<span>Scripts</span></a>
-    <nav class="nav">
-      <a href="#guides">Guides</a>
-      <a href="#about">About</a>
-      <a href="https://github.com/lucritscripts" rel="noopener">GitHub</a>
-    </nav>
+<!-- Persistent 3D world. Purely presentational: every word lives in the DOM. -->
+<canvas id="scene" aria-hidden="true"></canvas>
+<div id="grain" aria-hidden="true"></div>
+
+<a class="sr-only" href="#ch-search">Skip to the script library</a>
+
+<noscript>
+  <div style="position:relative;z-index:20;max-width:720px;margin:120px auto;padding:28px;
+              border:1px solid rgba(140,175,225,.28);border-radius:18px;background:rgba(10,15,26,.9)">
+    <h1 style="margin:0 0 10px;font:600 1.6rem/1.1 system-ui">Lucrit Script</h1>
+    <p style="margin:0;color:#a8b6cd;font:400 1rem/1.6 system-ui">
+      This library needs JavaScript to search and display scripts. Enable it, or browse the
+      source directly on GitHub.
+    </p>
   </div>
-</header>
+</noscript>
 
-<main>
-  <section class="hero">
-    <div class="wrap">
-      <h1>Guides that get to the point.</h1>
-      <p>No 2,000-word preamble before the actual answer. Every guide here is written to be finished in one sitting — and it's free, funded by a single optional sponsor step.</p>
-    </div>
-  </section>
+<script type="module" src="assets/js/main.js"></script>
 
-  <section id="guides">
-    <div class="wrap">
-      <div class="grid">
-
-        <a class="card" href="guides/github-pages-setup.html">
-          <span class="tag">Web</span>
-          <h3>Ship a site on GitHub Pages in 10 minutes</h3>
-          <p>Repo to live URL, custom domain, and the three settings people always get wrong.</p>
-        </a>
-
-        <a class="card" href="guides/speed-up-your-pc.html">
-          <span class="tag">Windows</span>
-          <h3>Make an old Windows PC feel fast again</h3>
-          <p>What actually moves the needle, in order of impact — and what's placebo.</p>
-        </a>
-
-        <a class="card" href="guides/github-pages-setup.html#resources">
-          <span class="tag">Bonus</span>
-          <h3>The starter pack</h3>
-          <p>Templates and checklists that pair with the guides. Unlock once, keep forever.</p>
-        </a>
-
-      </div>
-    </div>
-  </section>
-
-  <section id="about">
-    <div class="wrap" style="padding-bottom:60px;max-width:720px">
-      <h2>How this site stays free</h2>
-      <p style="color:var(--ink-dim)">Guides are fully readable. Only the downloadable extras — templates, checklists, config files — sit behind a one-step sponsor unlock. One unlock covers you for 24 hours on this browser. No account, no email.</p>
-    </div>
-  </section>
-</main>
-
-<footer class="site-footer">
-  <div class="wrap">
-    <span>© <span id="yr"></span> LucritScripts</span>
-    <span>Reader-supported · <a href="#about">how it works</a></span>
-  </div>
-</footer>
-
-<script>document.getElementById('yr').textContent = new Date().getFullYear();</script>
-<script src="assets/js/lootlabs.js"></script>
-<script src="assets/js/monetize.js"></script>
 </body>
 </html>
