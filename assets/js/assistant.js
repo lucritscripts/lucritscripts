@@ -6,12 +6,19 @@
 //   3. Takes action — its buttons jump sections, open the info tab, or start
 //      a signup, so an answer is never a dead end.
 //
-// Answers are matched locally, so it works offline and costs nothing. The
-// single seam for a model-backed upgrade is `askRemote`: POST the question to
-// the Cloudflare Worker (which holds the API key) and return its reply.
+// Questions about the site are answered locally — instant, free, and more
+// accurate than a model guessing at how this particular site works. Anything
+// that looks like "write me a script" goes to the Cloudflare Worker, which
+// holds the API key and streams a model's reply back.
+//
+// If the Worker is not deployed, or is down, or refuses, every question falls
+// back to the local answers. The assistant never breaks; it just gets simpler.
 
 import { CATEGORIES, categoryOf } from "./data/scripts.js";
 import { account } from "./account.js";
+import { ASSISTANT_URL } from "./config.js";
+import { highlightLuau } from "./engine/highlight.js";
+import { copyText } from "./pages.js";
 
 /* ---------------------------------------------------------------- intent */
 
@@ -59,12 +66,15 @@ const STOPWORDS = new Set([
 ]);
 
 function detectCategories(text) {
-  const q = " " + text.toLowerCase() + " ";
+  // Punctuation out, single spaces, padded — so a term has to sit between two
+  // word boundaries. Matching a bare prefix would read "airspeed" as "ai" and
+  // answer a question about swallows with NPC scripts.
+  const q = " " + text.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim() + " ";
   const hits = [];
   for (const cat of CATEGORIES) {
-    const label = cat.label.toLowerCase().replace(/[^a-z ]/g, "");
+    const label = cat.label.toLowerCase().replace(/[^a-z0-9 ]/g, "").trim();
     const terms = [label, ...(CATEGORY_HINTS[cat.id] || [])];
-    if (terms.some((t) => t && q.includes(" " + t) )) hits.push(cat.id);
+    if (terms.some((t) => t && q.includes(" " + t + " "))) hits.push(cat.id);
   }
   return hits;
 }
@@ -345,8 +355,11 @@ export function createAssistant({
       return { html: GREETING, acts: [] };
     }
 
+    // `weak` marks "nothing actually matched" — the caller uses it to decide
+    // whether the question is worth sending to the model.
     return {
-      html: `Not sure about that one. I'm good at <b>finding scripts</b> ("find me an inventory script"), <b>publishing</b>, <b>keys</b>, <b>payouts</b>, accounts and the leaderboard.`,
+      weak: true,
+      html: `Not sure about that one. I'm good at <b>writing Luau</b>, <b>finding scripts</b> ("find me an inventory script"), <b>publishing</b>, <b>keys</b>, <b>payouts</b>, accounts and the leaderboard.`,
       acts: [
         { do: "jump", arg: "search", label: "Browse scripts" },
         { do: "discord", label: "Ask in Discord" },
@@ -354,22 +367,148 @@ export function createAssistant({
     };
   }
 
-  /** Model-backed upgrade seam — POST to the Worker, return its reply. */
-  async function askRemote() { return null; }
+  /* ---------------------------------------------------------- markdown */
+
+  /**
+   * Just enough Markdown for a chat bubble: fenced code, inline code, bold,
+   * and paragraphs. Everything is escaped first, so model output can never
+   * inject markup — the formatting is applied to escaped text afterwards.
+   *
+   * `streaming` keeps a half-finished fence readable while it is still
+   * arriving, instead of showing the raw backticks.
+   */
+  function renderMarkdown(src, { streaming = false } = {}) {
+    const parts = String(src).split(/```/);
+    let out = "";
+
+    parts.forEach((part, i) => {
+      if (i % 2 === 0) {
+        out += prose(part);
+        return;
+      }
+      // Odd chunks are code. A trailing unclosed fence is still code.
+      const body = part.replace(/^[a-zA-Z]*\n?/, "");
+      const open = streaming && i === parts.length - 1;
+      out += codeBlock(body, open);
+    });
+
+    return out;
+  }
+
+  function prose(text) {
+    return escape(text)
+      .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .split(/\n{2,}/)
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => `<p>${p.replace(/\n/g, "<br>")}</p>`)
+      .join("");
+  }
+
+  let codeSeq = 0;
+
+  function codeBlock(code, streamingOpen) {
+    const trimmed = code.replace(/\n+$/, "");
+    if (!trimmed.trim()) return "";
+    const id = `ac${++codeSeq}`;
+    codeStore.set(id, trimmed);
+
+    return `
+      <div class="acode${streamingOpen ? " is-open" : ""}">
+        <button type="button" class="acode__copy" data-copy="${id}">Copy</button>
+        <pre><code>${highlightLuau(trimmed)}</code></pre>
+      </div>`;
+  }
+
+  /** Raw source per rendered block, so Copy gives code and not highlighted HTML. */
+  const codeStore = new Map();
+
+  /* ------------------------------------------------------ model-backed */
+
+  // Routing. A model answer costs credits and a local answer does not, so the
+  // model is used when the question is actually about code — a writing verb
+  // aimed at a code noun, or a bare Luau API in the text — or when the local
+  // matcher had nothing. "How do I publish a script" stays local; "write me a
+  // datastore script" does not.
+  const CODE_VERB = /\b(writ(e|ing)|mak(e|ing)|creat(e|ing)|build(ing)?|generate|cod(e|ing)|fix(ing)?|debug(ging)?|refactor|optimi[sz]e|improve|explain|convert|rewrite)\b/i;
+  const CODE_NOUN = /\b(script|code|function|module ?script|module|local ?script|remote ?event|remote ?function|data ?store|gui|hud|part|brick|humanoid|workspace|instance|leaderstats|loop|tween|raycast|animation|npc|tool|hitbox|cooldown|luau|lua|error|bug|exception)\b/i;
+  const CODE_API = /(instance\.new|task\.(wait|spawn|delay)|:connect\b|:fireserver|:fireclient|:waitforchild|game[.:]|\.touched|pcall\s*\(|while\s+true|for\s+\w+\s*(,|=|in))/i;
+
+  function wantsModel(question, local) {
+    if (CODE_API.test(question)) return true;
+    if (CODE_VERB.test(question) && CODE_NOUN.test(question)) return true;
+    return Boolean(local.weak);
+  }
+
+  /** Recent turns, so follow-ups like "now add a cooldown" make sense. */
+  const history = [];
+
+  /**
+   * Streams the Worker's reply into `node`, rendering as it arrives.
+   * Returns true if it produced an answer, false to fall back to local.
+   */
+  async function askRemote(question, node) {
+    if (!ASSISTANT_URL) return false;
+
+    let response;
+    try {
+      response = await fetch(ASSISTANT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, history: history.slice(-6) }),
+        signal: AbortSignal.timeout(70000),
+      });
+    } catch {
+      return false;   // offline, blocked, or timed out — local answer instead
+    }
+
+    if (!response.ok) {
+      // The Worker sends a human-readable reason for the cases worth showing.
+      const { error } = await response.json().catch(() => ({}));
+      if (response.status === 429 && error) {
+        node.innerHTML = `<p>${escape(error)}</p>`;
+        return true;
+      }
+      return false;
+    }
+
+    const reader = response.body?.getReader();
+    if (!reader) return false;
+
+    const decoder = new TextDecoder();
+    let text = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value, { stream: true });
+      node.innerHTML = renderMarkdown(text, { streaming: true });
+      log.scrollTop = log.scrollHeight;
+    }
+
+    if (!text.trim()) return false;
+
+    node.innerHTML = renderMarkdown(text);
+    history.push({ role: "user", content: question });
+    history.push({ role: "assistant", content: text });
+    return true;
+  }
 
   async function ask(question) {
     bubble(escape(question), "me");
     chips.innerHTML = "";
 
     const thinking = bubble('<span class="typing"><i></i><i></i><i></i></span>', "bot");
-    const remote = await askRemote(question);
-    await new Promise((r) => setTimeout(r, 240));
 
-    if (remote) {
-      thinking.innerHTML = remote;
-    } else {
-      const { html, acts } = answer(question);
-      thinking.innerHTML = html + actions(acts || []);
+    // Site questions are answered better here than by any model. Code
+    // questions, and anything the local matcher shrugs at, go to the Worker.
+    const local = answer(question);
+    const handled = wantsModel(question, local) ? await askRemote(question, thinking) : false;
+
+    if (!handled) {
+      await new Promise((r) => setTimeout(r, 240));
+      thinking.innerHTML = local.html + actions(local.acts || []);
     }
 
     log.scrollTop = log.scrollHeight;
@@ -382,7 +521,15 @@ export function createAssistant({
 
   /* ---------------------------------------------------------- behaviour */
 
-  log.addEventListener("click", (e) => {
+  log.addEventListener("click", async (e) => {
+    const copy = e.target.closest("[data-copy]");
+    if (copy) {
+      const ok = await copyText(codeStore.get(copy.dataset.copy) || "");
+      copy.textContent = ok ? "Copied" : "Press Ctrl+C";
+      setTimeout(() => { copy.textContent = "Copy"; }, 1600);
+      return;
+    }
+
     const btn = e.target.closest("[data-do]");
     if (!btn) return;
     const { do: what, arg } = btn.dataset;
