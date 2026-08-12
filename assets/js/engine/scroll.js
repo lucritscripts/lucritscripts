@@ -83,20 +83,31 @@ export class SmoothScroll {
     if (document.documentElement.classList.contains("is-locked")) return;
 
     this._measure();
-    const to = this._snapFn(window.scrollY / this.max, this.direction);
+
+    // Take over from the tail of a flick rather than waiting for it to stop
+    // dead first — that hand-off is what makes the settle feel like momentum
+    // carrying you home instead of a second, separate movement. A flick with
+    // real distance left is somewhere the reader deliberately aimed, so it is
+    // allowed to finish and settles afterwards.
+    const from = this.animating ? this.current : window.scrollY;
+    if (this.animating && Math.abs(this.target - this.current) > window.innerHeight * 0.4) {
+      return;
+    }
+
+    const to = this._snapFn(from / this.max, this.direction);
     if (to == null) return;
 
     const y = Math.max(0, Math.min(this.max, to * this.max));
-    if (Math.abs(y - window.scrollY) < 2) return;
+    if (Math.abs(y - from) < 2) return;
 
     // Longer trips glide for longer, but never long enough to feel stuck.
     this.snapping = true;
-    this.current = window.scrollY;
-    this._snapFrom = this.current;
+    this.current = from;
+    this._snapFrom = from;
     this._snapAt = performance.now();
-    this._snapDur = Math.max(320, Math.min(760, 240 + Math.abs(y - this.current) * 0.55));
+    this._snapDur = Math.max(320, Math.min(760, 240 + Math.abs(y - from) * 0.55));
     this.target = y;
-    this._start();
+    if (!this.animating) this._start();
   }
 
   _measure() {
@@ -126,6 +137,9 @@ export class SmoothScroll {
     if (step) this.direction = Math.sign(step);
     this.target = Math.max(0, Math.min(this.max, this.target + step * 2.0));
     this._start();
+    // Arm the settle from the last wheel tick, not from when the flick runs
+    // out — so the glide picks up the moment the reader stops scrolling.
+    this._scheduleSnap(150);
   }
 
   _onScroll() {
