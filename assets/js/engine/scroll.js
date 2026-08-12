@@ -3,6 +3,12 @@
 // Wheel input is intercepted and eased into window.scrollTo, so sections
 // still stick natively. Touch, keyboard and scrollbar dragging stay native
 // and simply re-sync the target.
+//
+// SETTLING: stopping half-way through a chapter's fade leaves the page in a
+// limbo state — nothing fully on screen. When input goes quiet we ask the
+// snap provider whether this position is a resting place; if it isn't, we
+// glide (never jump) to the nearest one. Any new input cancels it instantly,
+// so it assists rather than fights.
 
 export class SmoothScroll {
   constructor({ reducedMotion = false, ease = 0.11 } = {}) {
@@ -15,6 +21,16 @@ export class SmoothScroll {
     this.progress = 0;
     this.velocity = 0;
 
+    this.snapping = false;
+    this.direction = 0;
+    this._snapFn = null;
+    this._snapFrom = 0;
+    this._snapAt = 0;
+    this._snapDur = 460;
+    this._idle = 0;
+    this._touching = false;
+    this._lastY = window.scrollY;
+
     this._onWheel = this._onWheel.bind(this);
     this._onScroll = this._onScroll.bind(this);
     this._tick = this._tick.bind(this);
@@ -25,8 +41,62 @@ export class SmoothScroll {
     window.addEventListener("scroll", this._onScroll, { passive: true });
     window.addEventListener("resize", () => this._measure(), { passive: true });
 
+    // A finger on the glass always outranks the settle.
+    window.addEventListener("touchstart", () => {
+      this._touching = true;
+      this._cancelSnap();
+    }, { passive: true });
+    window.addEventListener("touchend", () => {
+      this._touching = false;
+      this._scheduleSnap(220);
+    }, { passive: true });
+
+    // Keyboard paging should settle too.
+    window.addEventListener("keydown", (e) => {
+      if (/^(Page|Arrow|Home|End| )/.test(e.key)) this._scheduleSnap(260);
+    }, { passive: true });
+
     this._measure();
     this._emit();
+  }
+
+  /** fn(progress, direction) → progress to settle at, or null to stay put. */
+  setSnap(fn) { this._snapFn = fn; }
+
+  _cancelSnap() {
+    clearTimeout(this._idle);
+    if (this.snapping) {
+      this.snapping = false;
+      this.target = this.current;
+    }
+  }
+
+  _scheduleSnap(delay = 130) {
+    clearTimeout(this._idle);
+    if (!this.enabled || !this._snapFn) return;
+    this._idle = setTimeout(() => this._trySnap(), delay);
+  }
+
+  _trySnap() {
+    if (!this.enabled || !this._snapFn || this._touching || this.snapping) return;
+    // Never move the page out from under an open overlay.
+    if (document.documentElement.classList.contains("is-locked")) return;
+
+    this._measure();
+    const to = this._snapFn(window.scrollY / this.max, this.direction);
+    if (to == null) return;
+
+    const y = Math.max(0, Math.min(this.max, to * this.max));
+    if (Math.abs(y - window.scrollY) < 2) return;
+
+    // Longer trips glide for longer, but never long enough to feel stuck.
+    this.snapping = true;
+    this.current = window.scrollY;
+    this._snapFrom = this.current;
+    this._snapAt = performance.now();
+    this._snapDur = Math.max(320, Math.min(760, 240 + Math.abs(y - this.current) * 0.55));
+    this.target = y;
+    this._start();
   }
 
   _measure() {
@@ -50,18 +120,27 @@ export class SmoothScroll {
     }
 
     e.preventDefault();
+    this._cancelSnap();
     this._measure();
     const step = e.deltaMode === 1 ? e.deltaY * 18 : e.deltaY;
+    if (step) this.direction = Math.sign(step);
     this.target = Math.max(0, Math.min(this.max, this.target + step * 2.0));
     this._start();
   }
 
   _onScroll() {
+    const y = window.scrollY;
+    if (y !== this._lastY) {
+      if (!this.animating) this.direction = Math.sign(y - this._lastY) || this.direction;
+      this._lastY = y;
+    }
+
     // A scroll we did not drive (touch, keys, scrollbar, anchor jump).
     if (!this.animating) {
-      this.target = window.scrollY;
-      this.current = window.scrollY;
+      this.target = y;
+      this.current = y;
       this._emit();
+      this._scheduleSnap(200);
     }
   }
 
@@ -73,6 +152,30 @@ export class SmoothScroll {
   }
 
   _tick(now) {
+    // The settle runs on a fixed duration rather than exponential easing, so
+    // it always finishes in the same amount of time — including on a device
+    // rendering at a handful of frames per second, where an exponential ease
+    // would crawl for seconds.
+    if (this.snapping) {
+      const t = Math.min(1, (now - this._snapAt) / this._snapDur);
+      const eased = 1 - Math.pow(1 - t, 3);
+      this.current = this._snapFrom + (this.target - this._snapFrom) * eased;
+      this.velocity = this.target - this.current;
+      window.scrollTo(0, this.current);
+      this._lastY = Math.round(this.current);
+      this._emit();
+
+      if (t >= 1) {
+        this.current = this.target;
+        this.snapping = false;
+        this.animating = false;
+        this._last = 0;
+        return;
+      }
+      requestAnimationFrame(this._tick);
+      return;
+    }
+
     const delta = this.target - this.current;
     this.velocity = delta;
 
@@ -81,7 +184,9 @@ export class SmoothScroll {
       window.scrollTo(0, this.current);
       this.animating = false;
       this._last = 0;
+      this._lastY = this.current;
       this._emit();
+      this._scheduleSnap(120);
       return;
     }
 
@@ -111,6 +216,7 @@ export class SmoothScroll {
 
   /** Animated jump used by nav links and buttons. */
   scrollToProgress(p) {
+    this._cancelSnap();
     this._measure();
     const y = Math.max(0, Math.min(this.max, p * this.max));
     if (!this.enabled) { window.scrollTo(0, y); this.target = y; this.current = y; this._emit(); return; }
@@ -120,6 +226,7 @@ export class SmoothScroll {
 
   scrollToElement(el) {
     if (!el) return;
+    this._cancelSnap();
     const rect = el.getBoundingClientRect();
     const y = window.scrollY + rect.top;
     this._measure();
