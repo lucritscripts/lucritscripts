@@ -135,8 +135,7 @@ export function createGamePicker({ name = "game", placeholder = "Search Roblox g
           <span class="gpick__dot" aria-hidden="true"></span>${nm}
         </li>`),
       custom ? `<li role="option" data-value="${typed.replace(/"/g, "&quot;")}"
-          class="gpick__opt gpick__opt--custom" aria-selected="false">
-          Use "<b>${typed.replace(/</g, "&lt;")}</b>" — not in the list</li>` : "",
+          class="gpick__opt gpick__opt--custom" aria-selected="false">Use “<b>${typed.replace(/</g, "&lt;")}</b>” — not in the list</li>` : "",
       !items.length && !custom ? `<li class="gpick__none">Start typing a game name</li>` : "",
     ].join("");
 
