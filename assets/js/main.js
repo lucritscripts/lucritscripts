@@ -3,9 +3,14 @@
 import { World, BANDS } from "./engine/world.js";
 import { SmoothScroll } from "./engine/scroll.js";
 import {
-  createLibrary, createReader, buildChapters, buildChrome,
-  createChoreography, CHAPTERS, toast,
+  createLibraryPanel, buildChapters, buildChrome, createChoreography,
+  CHAPTERS, library, onLibraryChange,
 } from "./ui.js";
+import {
+  createAuth, createDashboard, createInfoPage, createScriptPage, toast,
+} from "./pages.js";
+import { createAssistant } from "./assistant.js";
+import { account } from "./account.js";
 
 /* ------------------------------------------------------- capabilities */
 
@@ -47,43 +52,72 @@ if (!world) {
   canvas.setAttribute("hidden", "");
 }
 
-/* ------------------------------------------------------------------ UI */
+/* ------------------------------------------------------------- overlays */
 
-const reader = createReader();
-
-const mainLibrary = createLibrary({
-  id: "library-main",
-  onOpen: (script) => reader.open(script),
-});
-
-const scroller = new SmoothScroll({ reducedMotion: caps.reducedMotion });
-
-// Assigned below; jumpTo is only ever called from user interaction, but a
-// declared binding keeps it safe rather than relying on that.
 let choreography = null;
 
-// Chapter content is only readable inside its sticky "pinned" window, which
-// is a different fraction of every band. Land in the middle of that window.
 function jumpTo(key) {
   if (!choreography || !BANDS[key]) return;
   scroller.scrollToProgress(choreography.targetFor(key));
 }
 
-buildChapters({
-  library: mainLibrary,
-  onOpenScript: (s) => reader.open(s),
+const auth = createAuth({
+  onDone: () => { dashboard.refresh(); },
+});
+
+const info = createInfoPage();
+
+const scriptPage = createScriptPage({
+  onRequireAuth: () => { toast("Sign in to rate scripts", "warn"); auth.open("signup"); },
+});
+
+const dashboard = createDashboard({
+  onRequireAuth: () => auth.open("signup"),
+  getPublishes: (user) => library.filter((s) => s.authorId === user.id),
+});
+
+/* ------------------------------------------------------------------ UI */
+
+const libraryPanel = createLibraryPanel({
+  id: "library-main",
+  onOpen: (script) => scriptPage.open(script),
+  onPublish: () => jumpTo("submit"),
+});
+
+const scroller = new SmoothScroll({ reducedMotion: caps.reducedMotion });
+
+const chapters = buildChapters({
+  libraryPanel,
+  onOpenScript: (s) => scriptPage.open(s),
   onJump: jumpTo,
+  onPublish: () => { dashboard.refresh(); },
+  onAuth: () => (account.isSignedIn ? dashboard.open() : auth.open("signup")),
+  onInfo: () => info.open(),
 });
 
 const chrome = buildChrome({
   onJump: jumpTo,
-  onSearch: () => {
-    jumpTo("search");
-    setTimeout(() => mainLibrary.focus(), 420);
-  },
+  onSearch: () => { jumpTo("search"); setTimeout(() => libraryPanel.focus(), 420); },
+  onDashboard: () => dashboard.open(),
+  onAuth: () => auth.open("signup"),
 });
 
 choreography = createChoreography({ chrome });
+
+createAssistant({
+  getLibrary: () => library,
+  onJump: jumpTo,
+  onOpenScript: (s) => scriptPage.open(s),
+  onInfo: () => info.open(),
+  onAuth: () => auth.open("signup"),
+  onPublish: () => jumpTo("submit"),
+});
+
+// Dashboard's "publish a script" shortcut.
+document.addEventListener("lucrit:publish", () => jumpTo("submit"));
+
+// Chapter heights change when the library fills, so the bands must re-measure.
+onLibraryChange(() => setTimeout(() => choreography.measure(), 60));
 
 /* --------------------------------------------------------------- input */
 
@@ -91,7 +125,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "/" && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || "")) {
     e.preventDefault();
     jumpTo("search");
-    setTimeout(() => mainLibrary.focus(), 420);
+    setTimeout(() => libraryPanel.focus(), 420);
   }
 });
 
@@ -123,7 +157,6 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
 
-  // Ease the camera toward scroll position so it glides rather than snaps.
   // Framerate-independent, so a 30fps device tracks at the same speed as 120fps.
   const k = caps.reducedMotion ? 1 : 1 - Math.pow(1 - 0.09, dt * 60);
   smoothed += (progress - smoothed) * k;
@@ -132,7 +165,7 @@ function frame(now) {
     world.resize();
     // Remap real scroll position onto the camera path's canonical bands so the
     // 3D world and the DOM chapters stay locked together at any page height.
-    world.setProgress(choreography ? choreography.toCameraProgress(smoothed) : smoothed);
+    world.setProgress(choreography.toCameraProgress(smoothed));
     world.render(dt);
   }
 }
@@ -143,23 +176,18 @@ requestAnimationFrame(frame);
 
 document.documentElement.classList.add("is-ready");
 
-// Deep link: #script=<id> opens the reader straight away.
 const deep = /#script=([\w-]+)/.exec(location.hash);
 if (deep) {
-  import("./data/scripts.js").then(({ SCRIPTS }) => {
-    const s = SCRIPTS.find((x) => x.id === deep[1]);
-    if (s) reader.open(s);
-  });
+  const s = library.find((x) => x.id === deep[1]);
+  if (s) scriptPage.open(s);
 }
 
-// Expose a tiny surface for debugging and for the test harness.
 window.__lucrit = {
-  world, scroller, reader, library: mainLibrary,
-  jumpTo, chapters: CHAPTERS, caps, toast,
-  setProgress(p) { scroller.scrollToProgress(p); },
-  /** Test hook: drop the camera straight onto the current scroll position. */
+  world, scroller, library, account,
+  auth, dashboard, info, scriptPage, libraryPanel,
+  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast,
   snap() {
     smoothed = progress;
-    world?.setProgress(choreography ? choreography.toCameraProgress(smoothed) : smoothed);
+    world?.setProgress(choreography.toCameraProgress(smoothed));
   },
 };
