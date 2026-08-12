@@ -4,7 +4,7 @@ import { World, BANDS } from "./engine/world.js";
 import { SmoothScroll } from "./engine/scroll.js";
 import {
   createLibraryPanel, buildChapters, buildChrome, createChoreography,
-  CHAPTERS, library, onLibraryChange,
+  CHAPTERS, library, onLibraryChange, removeScript,
 } from "./ui.js";
 import {
   createAuth, createDashboard, createInfoPage, createScriptPage, toast,
@@ -74,6 +74,8 @@ const scriptPage = createScriptPage({
 const dashboard = createDashboard({
   onRequireAuth: () => auth.open("signup"),
   getPublishes: (user) => library.filter((s) => s.authorId === user.id),
+  onOpenScript: (s) => scriptPage.open(s),
+  onDeleteScript: (s) => removeScript(s.id),
 });
 
 /* ------------------------------------------------------------------ UI */

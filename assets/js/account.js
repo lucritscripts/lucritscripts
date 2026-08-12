@@ -70,13 +70,16 @@ const newId = () => "u_" + toHex(crypto.getRandomValues(new Uint8Array(8)));
 /* ------------------------------------------------------------ validation */
 
 export const RULES = {
-  username: /^[a-zA-Z0-9_]{3,20}$/,
+  username: /^[\p{L}\p{N} _.-]{1,32}$/u,
   email: /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/,
 };
 
 export function validateSignUp({ username, email, password }) {
-  if (!RULES.username.test(username || ""))
-    return "Username must be 3-20 characters, letters, numbers or underscores.";
+  const name = String(username || "").trim();
+  if (!name) return "Pick a username.";
+  if (name.length > 32) return "Username can be at most 32 characters.";
+  if (!RULES.username.test(name))
+    return "Username can use letters, numbers, spaces, dots, dashes and underscores.";
   if (!RULES.email.test(email || ""))
     return "That email address doesn't look right.";
   if ((password || "").length < 8)
@@ -216,8 +219,12 @@ export const account = {
 
   async changeUsername(username) {
     if (!session) return { ok: false, error: "You need to be signed in." };
-    if (!RULES.username.test(username || ""))
-      return { ok: false, error: "Username must be 3-20 characters, letters, numbers or underscores." };
+    const name = String(username || "").trim();
+    if (!name) return { ok: false, error: "Pick a username." };
+    if (name.length > 32) return { ok: false, error: "Username can be at most 32 characters." };
+    if (!RULES.username.test(name))
+      return { ok: false, error: "Username can use letters, numbers, spaces, dots, dashes and underscores." };
+    username = name;
 
     const days = this.usernameCooldownDays();
     if (days > 0)

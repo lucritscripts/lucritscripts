@@ -4,7 +4,9 @@
 import { SCRIPTS, CATEGORIES, SORTS, BOARDS, categoryOf } from "./data/scripts.js";
 import { BANDS } from "./engine/world.js";
 import { account } from "./account.js";
-import { esc, fmt, toast, captchaMarkup, captchaPassed, createLeaderboard } from "./pages.js";
+import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLeaderboard } from "./pages.js";
+import { totals as scriptTotals } from "./stats.js";
+import { createGamePicker } from "./gamepicker.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -35,6 +37,14 @@ function libraryChanged() { for (const fn of listeners) fn(library); }
 export function addScript(script) {
   library.unshift(script);
   libraryChanged();
+}
+
+export function removeScript(id) {
+  const i = library.findIndex((s) => s.id === id);
+  if (i < 0) return false;
+  library.splice(i, 1);
+  libraryChanged();
+  return true;
 }
 
 /* --------------------------------------------------------- Roblox media */
@@ -72,7 +82,7 @@ export function cardMarkup(script, { large = false } = {}) {
         <div class="card__meta">
           <span class="by">@${esc(script.author)}</span>
           <span class="dot" aria-hidden="true"></span>
-          <span>${fmt(script.views)} views</span>
+          <span>${fmt(scriptTotals(script.id).views)} views</span>
         </div>
         <div class="card__actions">
           <button class="btn btn--sm btn--primary" data-act="get">Get Script</button>
@@ -484,7 +494,7 @@ function buildPublishForm({ onAuth, onPublished }) {
 
       <form class="form form--grid publish__form" novalidate>
         <label>Script name<input name="title" maxlength="70" placeholder="Inventory System" required></label>
-        <label>Roblox game<input name="game" maxlength="70" placeholder="Blox Fruits" required></label>
+        <label>Roblox game<span data-gamepick></span></label>
 
         <label>Category
           <select name="category">
@@ -531,6 +541,15 @@ function buildPublishForm({ onAuth, onPublished }) {
       </form>`;
   }
 
+  let picker = null;
+
+  function mountPicker() {
+    const slot = $("[data-gamepick]", node);
+    if (!slot) { picker = null; return; }
+    picker = createGamePicker({ name: "game", placeholder: "Search Roblox games, or type your own" });
+    slot.replaceWith(picker.node);
+  }
+
   node.addEventListener("click", (e) => {
     if (e.target.closest('[data-act="auth"]')) onAuth?.();
   });
@@ -572,7 +591,7 @@ function buildPublishForm({ onAuth, onPublished }) {
     const d = Object.fromEntries(new FormData(form));
 
     if (!String(d.title).trim()) return toast("Give the script a name", "warn");
-    if (!String(d.game).trim()) return toast("Which Roblox game is it for?", "warn");
+    if (!String(d.game || "").trim()) return toast("Pick or type the Roblox game", "warn");
 
     const words = wordCount(d.desc);
     if (words < 100) return toast(`Description needs ${100 - words} more word${100 - words === 1 ? "" : "s"}`, "warn");
@@ -599,15 +618,19 @@ function buildPublishForm({ onAuth, onPublished }) {
     addScript(script);
     await account.addPublish(script.id);
     form.reset();
+    picker?.reset();
+    captchaReset(node);
     render();
+    mountPicker();
     toast("Published — it's live in the library");
     onPublished?.(script);
   });
 
-  account.onChange(render);
+  account.onChange(() => { render(); mountPicker(); });
   render();
+  mountPicker();
 
-  return { node, refresh: render };
+  return { node, refresh() { render(); mountPicker(); } };
 }
 
 /* ============================================================

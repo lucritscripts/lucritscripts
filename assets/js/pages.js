@@ -4,7 +4,8 @@
 // These are overlays rather than chapters so the scroll-driven camera path
 // stays untouched.
 
-import { account, STAT_WINDOWS, emptyStats } from "./account.js";
+import { account, STAT_WINDOWS } from "./account.js";
+import * as stats from "./stats.js";
 import { CATEGORIES, BOARDS, categoryOf } from "./data/scripts.js";
 import { renderCodeBlock } from "./engine/highlight.js";
 
@@ -105,32 +106,170 @@ export function createOverlay({ id, label, wide = false }) {
 /* ------------------------------------------------------------- captcha */
 
 /**
- * Placeholder human check. Deliberately NOT presented as security — a real
- * check is Cloudflare Turnstile with the token verified in the Worker.
- * This keeps the flow and the UI honest until that key exists.
+ * Human check.
+ *
+ * Click to verify, then it weighs a few signals before passing:
+ *   - a honeypot field only an autofilling bot would touch
+ *   - dwell time (instant submits are not human)
+ *   - real pointer or keyboard interaction somewhere on the page
+ * Anything suspicious escalates to a drag-to-fit slider.
+ *
+ * This raises the cost of casual scripted signups. It is NOT a security
+ * boundary — a determined bot runs a real browser. The real check is
+ * Cloudflare Turnstile with the token verified in the Worker; this widget is
+ * shaped so that swap is a body change inside `verify()`.
  */
+
+let sawPointer = false;
+let sawKey = false;
+addEventListener("pointermove", () => { sawPointer = true; }, { passive: true, once: true });
+addEventListener("keydown", () => { sawKey = true; }, { passive: true, once: true });
+addEventListener("touchstart", () => { sawPointer = true; }, { passive: true, once: true });
+
+const MIN_DWELL_MS = 1200;
+
 export function captchaMarkup(id) {
-  const a = 3 + Math.floor(Math.random() * 6);
-  const b = 2 + Math.floor(Math.random() * 6);
   return `
-    <div class="captcha" data-answer="${a + b}" id="${id}">
-      <span class="captcha__icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24"><path d="M9 12l2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg>
-      </span>
-      <label class="captcha__q">Human check — what is <b>${a} + ${b}</b>?
-        <input type="text" inputmode="numeric" autocomplete="off" class="captcha__input" aria-label="Answer">
+    <div class="hcheck" id="${id}" data-hcheck data-born="${Date.now()}" data-state="idle">
+      <div class="hcheck__main">
+        <button type="button" class="hcheck__box" role="checkbox" aria-checked="false"
+                aria-label="Verify that you are human">
+          <span class="hcheck__spin" aria-hidden="true"></span>
+          <svg class="hcheck__tick" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 13l4 4L19 7"/></svg>
+        </button>
+        <span class="hcheck__label">
+          <b data-hc-title>I'm human</b>
+          <span class="hcheck__sub" data-hc-sub>Click to verify</span>
+        </span>
+        <span class="hcheck__brand" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.2-2.9 7.9-7 9-4.1-1.1-7-4.8-7-9V6z"/></svg>
+          Lucrit Check
+        </span>
+      </div>
+
+      <div class="hcheck__slide" hidden>
+        <span class="hcheck__slidehint">Drag the handle all the way across</span>
+        <div class="hcheck__track" data-hc-track>
+          <span class="hcheck__fill" data-hc-fill></span>
+          <button type="button" class="hcheck__handle" data-hc-handle aria-label="Slide to verify">
+            <svg viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <label class="hcheck__hp" aria-hidden="true">
+        Leave this empty
+        <input type="text" tabindex="-1" autocomplete="off" name="lucrit_hp_${id}">
       </label>
-      <span class="captcha__state" aria-live="polite"></span>
     </div>`;
 }
 
+function setState(box, state, title, sub) {
+  box.dataset.state = state;
+  box.querySelector("[data-hc-title]").textContent = title;
+  box.querySelector("[data-hc-sub]").textContent = sub;
+  box.querySelector(".hcheck__box").setAttribute("aria-checked", state === "ok" ? "true" : "false");
+}
+
+function pass(box) {
+  setState(box, "ok", "Verified", "You're good to go");
+  box.querySelector(".hcheck__slide").hidden = true;
+}
+
+function challenge(box) {
+  setState(box, "slide", "One more step", "Slide to confirm");
+  box.querySelector(".hcheck__slide").hidden = false;
+}
+
+/** Decides whether the quick path is enough. */
+function looksHuman(box) {
+  const honeypot = box.querySelector(".hcheck__hp input");
+  if (honeypot && honeypot.value.trim()) return false;
+  if (Date.now() - Number(box.dataset.born || 0) < MIN_DWELL_MS) return false;
+  return sawPointer || sawKey;
+}
+
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest(".hcheck__box");
+  if (!btn) return;
+  const box = btn.closest("[data-hcheck]");
+  if (!box || box.dataset.state === "ok" || box.dataset.state === "checking") return;
+
+  setState(box, "checking", "Checking...", "One moment");
+  setTimeout(() => {
+    if (looksHuman(box)) pass(box);
+    else challenge(box);
+  }, 620);
+});
+
+/* ---- slider challenge ---- */
+
+let drag = null;
+
+function dragTo(clientX) {
+  if (!drag) return;
+  const { track, handle, fill } = drag;
+  const rect = track.getBoundingClientRect();
+  const max = rect.width - handle.offsetWidth;
+  const x = Math.max(0, Math.min(max, clientX - rect.left - drag.grab));
+  handle.style.transform = `translateX(${x}px)`;
+  fill.style.width = `${x + handle.offsetWidth / 2}px`;
+  drag.done = x >= max - 2;
+}
+
+document.addEventListener("pointerdown", (e) => {
+  const handle = e.target.closest("[data-hc-handle]");
+  if (!handle) return;
+  const box = handle.closest("[data-hcheck]");
+  const track = box.querySelector("[data-hc-track]");
+  drag = {
+    box, track, handle,
+    fill: box.querySelector("[data-hc-fill]"),
+    grab: e.clientX - handle.getBoundingClientRect().left,
+    done: false,
+  };
+  handle.setPointerCapture?.(e.pointerId);
+  e.preventDefault();
+});
+
+document.addEventListener("pointermove", (e) => { if (drag) dragTo(e.clientX); });
+
+document.addEventListener("pointerup", () => {
+  if (!drag) return;
+  const { box, handle, fill, done } = drag;
+  if (done) {
+    pass(box);
+  } else {
+    handle.style.transform = "translateX(0)";
+    fill.style.width = "0px";
+  }
+  drag = null;
+});
+
 export function captchaPassed(root) {
-  const box = root.querySelector(".captcha");
+  const box = root.querySelector("[data-hcheck]");
   if (!box) return false;
-  const ok = box.querySelector(".captcha__input").value.trim() === box.dataset.answer;
-  box.classList.toggle("is-ok", ok);
-  box.querySelector(".captcha__state").textContent = ok ? "Verified" : "";
-  return ok;
+  if (box.dataset.state === "ok") return true;
+
+  // Nudge the user toward the control they missed.
+  if (box.dataset.state === "idle") setState(box, "idle", "I'm human", "Click the box to verify");
+  box.classList.remove("is-shake");
+  void box.offsetWidth;
+  box.classList.add("is-shake");
+  return false;
+}
+
+/** Lets a form reset its check after a successful submit. */
+export function captchaReset(root) {
+  const box = root.querySelector("[data-hcheck]");
+  if (!box) return;
+  box.dataset.born = String(Date.now());
+  setState(box, "idle", "I'm human", "Click to verify");
+  box.querySelector(".hcheck__slide").hidden = true;
+  const handle = box.querySelector("[data-hc-handle]");
+  const fill = box.querySelector("[data-hc-fill]");
+  if (handle) handle.style.transform = "translateX(0)";
+  if (fill) fill.style.width = "0px";
 }
 
 /* ============================================================
@@ -157,7 +296,8 @@ export function createAuth({ onDone }) {
       ${message ? `<p class="formerror" role="alert">${esc(message)}</p>` : ""}
 
       <form class="form" novalidate>
-        ${signup ? `<label>Username<input name="username" autocomplete="username" placeholder="yourname" required></label>` : ""}
+        ${signup ? `<label>Username<input name="username" autocomplete="nickname" autocapitalize="none"
+          spellcheck="false" placeholder="yourname" required></label>` : ""}
         <label>Email<input name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label>
         ${mode !== "reset" ? `<label>Password<input name="password" type="password"
           autocomplete="${signup ? "new-password" : "current-password"}" placeholder="At least 8 characters" required></label>` : ""}
@@ -272,83 +412,142 @@ export function createInfoPage() {
    Dashboard
    ============================================================ */
 
-export function createDashboard({ onRequireAuth, getPublishes }) {
+export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onDeleteScript }) {
   const sheet = createOverlay({ id: "dashboard", label: "Dashboard", wide: true });
   let statWindow = "7d";
+  let tab = "stats";
 
-  function statCard(label, value) {
-    return `<div class="stat"><span class="stat__v">${fmt(value)}</span><span class="stat__l">${label}</span></div>`;
+  const windowDays = () => STAT_WINDOWS.find((w) => w.id === statWindow)?.days || 7;
+
+  function trendChip(value) {
+    if (!value) return `<span class="trend trend--flat">no change</span>`;
+    const up = value > 0;
+    return `<span class="trend trend--${up ? "up" : "down"}">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="${up ? "M5 15l7-7 7 7" : "M5 9l7 7 7-7"}"/></svg>
+      ${Math.abs(value)}%</span>`;
+  }
+
+  function statCard(label, value, tr) {
+    return `<div class="stat">
+      <span class="stat__l">${label}</span>
+      <span class="stat__v">${fmt(value)}</span>
+      ${tr === undefined ? "" : trendChip(tr)}
+    </div>`;
   }
 
   function render() {
     const u = account.session;
     if (!u) return;
 
-    const cooldown = account.usernameCooldownDays();
     const publishes = getPublishes?.(u) || [];
-    const stats = emptyStats();
+    const ids = publishes.map((s) => s.id);
+    const days = windowDays();
+    const sum = stats.summary(ids, days);
+    const since = new Date(u.createdAt || Date.now());
 
     sheet.body.innerHTML = `
-      <header class="sheet__head sheet__head--row">
+      <header class="dash__head">
         <span class="avatar avatar--lg" style="--seed:${u.username.length * 37}">
           ${u.avatar ? `<img src="${esc(u.avatar)}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}
         </span>
-        <div>
+        <div class="dash__who">
           <span class="sheet__eyebrow">Dashboard</span>
           <h2>@${esc(u.username)}</h2>
-          <p>${u.bio ? esc(u.bio) : "No bio yet — add one below."}</p>
+          <p>${u.bio ? esc(u.bio) : "No bio yet — add one in Profile."}</p>
+          <div class="dash__links">
+            <span class="dash__meta">Joined ${since.toLocaleDateString(undefined, { month: "short", year: "numeric" })}</span>
+            <span class="dash__meta">${publishes.length} publish${publishes.length === 1 ? "" : "es"}</span>
+            ${u.youtube ? `<a href="${esc(u.youtube)}" target="_blank" rel="noopener" class="sociallink">YouTube</a>` : ""}
+            ${u.tiktok ? `<a href="${esc(u.tiktok)}" target="_blank" rel="noopener" class="sociallink">TikTok</a>` : ""}
+          </div>
         </div>
         <button class="btn btn--ghost btn--sm" data-act="signout">Sign out</button>
       </header>
 
       <nav class="tabs" role="tablist">
-        <button class="tab is-on" data-tab="stats" role="tab">Stats</button>
-        <button class="tab" data-tab="publishes" role="tab">Publishes</button>
-        <button class="tab" data-tab="profile" role="tab">Profile</button>
-        <button class="tab" data-tab="security" role="tab">Security</button>
+        ${[["stats","Stats"],["publishes","Publishes"],["profile","Profile"],["security","Security"]]
+          .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}" data-tab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
-      <section class="pane" data-pane="stats">
+      <section class="pane" data-pane="stats" ${tab === "stats" ? "" : "hidden"}>
         <div class="pane__head">
           <h3>Performance</h3>
           <div class="segmented" role="group" aria-label="Time range">
             ${STAT_WINDOWS.map((w) => `<button data-window="${w.id}" class="${w.id === statWindow ? "is-on" : ""}">${w.label}</button>`).join("")}
           </div>
         </div>
+
         <div class="stats">
-          ${statCard("Views", stats.views)}
-          ${statCard("Likes", stats.likes)}
-          ${statCard("Copies", stats.copies)}
+          ${statCard("Views", sum.views, stats.trend(ids, days, "views"))}
+          ${statCard("Likes", sum.likes, stats.trend(ids, days, "likes"))}
+          ${statCard("Copies", sum.copies, stats.trend(ids, days, "copies"))}
           ${statCard("Scripts", publishes.length)}
         </div>
-        <div class="chart" aria-label="Views over time">
-          <div class="chart__empty">No activity yet. Publish a script and this fills in.</div>
+
+        <div class="chartbox">
+          <div class="chartbox__head">
+            <b>Views</b>
+            <span>${days <= 1 ? "last 24 hours, hourly" : `last ${days} days, daily`}</span>
+          </div>
+          ${sum.views
+            ? stats.sparkline(sum.series, { key: "views" })
+            : `<div class="chart__empty">
+                 <strong>No activity in this window.</strong>
+                 <span>Every time someone opens or copies one of your scripts it lands here.</span>
+               </div>`}
         </div>
       </section>
 
-      <section class="pane" data-pane="publishes" hidden>
-        <h3>Your publishes</h3>
-        ${publishes.length ? `<div class="grid">${publishes.map(publishRow).join("")}</div>` : `
-          <div class="empty">
+      <section class="pane" data-pane="publishes" ${tab === "publishes" ? "" : "hidden"}>
+        <div class="pane__head">
+          <h3>Your publishes</h3>
+          ${publishes.length ? `<button class="btn btn--primary btn--sm" data-act="publish">Publish another</button>` : ""}
+        </div>
+        ${publishes.length ? `
+          <table class="ptable">
+            <thead><tr><th>Script</th><th>Category</th><th>Views</th><th>Likes</th><th>Copies</th><th></th></tr></thead>
+            <tbody>
+              ${publishes.map((s) => {
+                const t = stats.totals(s.id);
+                const cat = categoryOf(s.category);
+                return `<tr data-id="${esc(s.id)}">
+                  <td>
+                    <button class="ptable__name" data-act="open">${esc(s.title)}</button>
+                    <span class="ptable__game">${esc(s.game || "Roblox")}</span>
+                  </td>
+                  <td><span class="chip" style="--cat:${cat.accent}">${cat.label}</span></td>
+                  <td class="num">${fmt(t.views)}</td>
+                  <td class="num">${fmt(t.likes)}</td>
+                  <td class="num">${fmt(t.copies)}</td>
+                  <td><button class="ptable__del" data-act="delete" aria-label="Delete ${esc(s.title)}">&times;</button></td>
+                </tr>`;
+              }).join("")}
+            </tbody>
+          </table>` : `
+          <div class="empty empty--lg">
             <strong>You haven't posted any scripts yet...</strong>
-            <span>Publish your first one and it shows up here with its own stats.</span>
+            <span>Publish your first one and it shows up here with its own views, likes and copies.</span>
             <button class="btn btn--primary btn--sm" data-act="publish">Publish a script</button>
           </div>`}
       </section>
 
-      <section class="pane" data-pane="profile" hidden>
+      <section class="pane" data-pane="profile" ${tab === "profile" ? "" : "hidden"}>
         <h3>Profile</h3>
         <form class="form form--grid" data-form="profile">
           <label class="wide">Profile picture
             <div class="avatarpick">
-              <span class="avatar avatar--lg" data-preview>
+              <span class="avatar avatar--lg" data-preview style="--seed:${u.username.length * 37}">
                 ${u.avatar ? `<img src="${esc(u.avatar)}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}
               </span>
-              <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp,image/gif">
+              <div class="avatarpick__controls">
+                <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp,image/gif">
+                ${u.avatar ? `<button type="button" class="btn btn--ghost btn--sm" data-act="clearavatar">Remove</button>` : ""}
+              </div>
             </div>
           </label>
           <label class="wide">Bio
             <textarea name="bio" rows="3" maxlength="300" placeholder="What do you build?">${esc(u.bio)}</textarea>
+            <span class="counter" data-biocount>${(u.bio || "").length} / 300</span>
           </label>
           <label>YouTube<input name="youtube" value="${esc(u.youtube)}" placeholder="youtube.com/@you"></label>
           <label>TikTok<input name="tiktok" value="${esc(u.tiktok)}" placeholder="tiktok.com/@you"></label>
@@ -356,62 +555,103 @@ export function createDashboard({ onRequireAuth, getPublishes }) {
         </form>
       </section>
 
-      <section class="pane" data-pane="security" hidden>
+      <section class="pane" data-pane="security" ${tab === "security" ? "" : "hidden"}>
         <h3>Username</h3>
-        <form class="form form--grid" data-form="username">
-          <label>New username<input name="username" value="${esc(u.username)}" ${cooldown ? "disabled" : ""}></label>
-          <div class="wide">
-            <button class="btn btn--primary" type="submit" ${cooldown ? "disabled" : ""}>Change username</button>
-            <span class="note">${cooldown
-              ? `You can change it again in ${cooldown} day${cooldown === 1 ? "" : "s"}.`
-              : "Can be changed once every 7 days."}</span>
-          </div>
-        </form>
+        ${(() => {
+          const cd = account.usernameCooldownDays();
+          return `<form class="form form--grid" data-form="username">
+            <label>New username<input name="username" autocomplete="nickname" autocapitalize="none"
+              spellcheck="false" value="${esc(u.username)}" ${cd ? "disabled" : ""}></label>
+            <div class="wide">
+              <button class="btn btn--primary" type="submit" ${cd ? "disabled" : ""}>Change username</button>
+              <span class="note">${cd
+                ? `Available again in ${cd} day${cd === 1 ? "" : "s"}.`
+                : "Letters are fine on their own. Changeable once every 7 days."}</span>
+            </div>
+          </form>`;
+        })()}
 
         <h3>Password</h3>
         <form class="form form--grid" data-form="password">
           <label>Current password<input name="current" type="password" autocomplete="current-password"></label>
-          <label>New password<input name="next" type="password" autocomplete="new-password"></label>
+          <label>New password<input name="next" type="password" autocomplete="new-password">
+            <span class="meter" data-meter><i></i></span>
+          </label>
           <div class="wide">
             <button class="btn btn--primary" type="submit">Change password</button>
             <button class="btn btn--ghost" type="button" data-act="reset">Email me a reset link</button>
           </div>
         </form>
+
+        <h3>Email</h3>
+        <p class="note">${esc(u.email)} — changing this arrives with Supabase auth.</p>
       </section>`;
   }
 
-  function publishRow(s) {
-    const cat = categoryOf(s.category);
-    return `<article class="card" style="--cat:${cat.accent}">
-      <div class="card__body">
-        <span class="chip">${cat.label}</span>
-        <h4 class="card__title">${esc(s.title)}</h4>
-        <div class="card__stats"><span>${fmt(s.views)} views</span><span>${fmt(s.likes || 0)} likes</span></div>
-      </div></article>`;
-  }
+  /* ---- interactions ---- */
 
   sheet.body.addEventListener("click", async (e) => {
-    const tab = e.target.closest("[data-tab]");
-    if (tab) {
-      $$(".tab", sheet.body).forEach((t) => t.classList.toggle("is-on", t === tab));
-      $$(".pane", sheet.body).forEach((p) => { p.hidden = p.dataset.pane !== tab.dataset.tab; });
+    const tabBtn = e.target.closest("[data-tab]");
+    if (tabBtn) {
+      tab = tabBtn.dataset.tab;
+      $$(".tab", sheet.body).forEach((t) => t.classList.toggle("is-on", t === tabBtn));
+      $$(".pane", sheet.body).forEach((p) => { p.hidden = p.dataset.pane !== tab; });
       return;
     }
 
     const win = e.target.closest("[data-window]");
-    if (win) {
-      statWindow = win.dataset.window;
-      $$("[data-window]", sheet.body).forEach((b) => b.classList.toggle("is-on", b === win));
+    if (win) { statWindow = win.dataset.window; render(); return; }
+
+    const row = e.target.closest("tr[data-id]");
+    const act = e.target.closest("[data-act]")?.dataset.act;
+
+    if (act === "open" && row) {
+      const s = (getPublishes?.(account.session) || []).find((x) => x.id === row.dataset.id);
+      if (s) { sheet.close(); onOpenScript?.(s); }
       return;
     }
 
-    const act = e.target.closest("[data-act]")?.dataset.act;
+    if (act === "delete" && row) {
+      const s = (getPublishes?.(account.session) || []).find((x) => x.id === row.dataset.id);
+      if (!s) return;
+      if (!window.confirm(`Delete "${s.title}"? This cannot be undone.`)) return;
+      onDeleteScript?.(s);
+      stats.forget(s.id);
+      render();
+      toast("Script deleted");
+      return;
+    }
+
     if (act === "signout") { await account.signOut(); sheet.close(); toast("Signed out"); }
+    if (act === "publish") { sheet.close(); document.dispatchEvent(new CustomEvent("lucrit:publish")); }
+    if (act === "clearavatar") {
+      await account.updateProfile({ avatar: null });
+      render();
+      toast("Profile picture removed");
+    }
     if (act === "reset") {
       const res = await account.requestPasswordReset(account.session?.email);
       toast(res.ok ? "Reset link requested" : res.error, res.ok ? "ok" : "warn");
     }
-    if (act === "publish") { sheet.close(); document.dispatchEvent(new CustomEvent("lucrit:publish")); }
+  });
+
+  sheet.body.addEventListener("input", (e) => {
+    if (e.target.name === "bio") {
+      const c = $("[data-biocount]", sheet.body);
+      if (c) c.textContent = `${e.target.value.length} / 300`;
+    }
+    if (e.target.name === "next") {
+      const meter = $("[data-meter]", sheet.body);
+      if (!meter) return;
+      const v = e.target.value;
+      let score = 0;
+      if (v.length >= 8) score++;
+      if (v.length >= 12) score++;
+      if (/[A-Z]/.test(v) && /[a-z]/.test(v)) score++;
+      if (/\d/.test(v)) score++;
+      if (/[^A-Za-z0-9]/.test(v)) score++;
+      meter.dataset.score = String(Math.min(4, score));
+    }
   });
 
   sheet.body.addEventListener("change", (e) => {
@@ -422,7 +662,8 @@ export function createDashboard({ onRequireAuth, getPublishes }) {
     const reader = new FileReader();
     reader.onload = () => {
       const preview = $("[data-preview]", sheet.body);
-      if (preview) preview.innerHTML = `<img src="${reader.result}" alt="">`;
+      if (!preview) return;
+      preview.innerHTML = `<img src="${reader.result}" alt="">`;
       preview.dataset.value = reader.result;
     };
     reader.readAsDataURL(file);
@@ -440,19 +681,30 @@ export function createDashboard({ onRequireAuth, getPublishes }) {
         bio: d.bio, youtube: d.youtube, tiktok: d.tiktok,
         avatar: preview?.dataset.value || account.session.avatar,
       });
+      if (res.ok && (d.youtube || d.tiktok)) {
+        const s = account.session;
+        if (d.youtube && !s.youtube) toast("YouTube link ignored — use a youtube.com address", "warn");
+        else if (d.tiktok && !s.tiktok) toast("TikTok link ignored — use a tiktok.com address", "warn");
+        else toast("Saved");
+      } else if (res.ok) toast("Saved");
     } else if (form.dataset.form === "username") {
       res = await account.changeUsername(d.username);
+      if (res.ok) toast("Username changed");
     } else {
       res = await account.changePassword({ current: d.current, next: d.next });
+      if (res.ok) toast("Password changed");
     }
 
-    toast(res.ok ? "Saved" : res.error, res.ok ? "ok" : "warn");
-    if (res.ok) render();
+    if (!res.ok) { toast(res.error, "warn"); return; }
+    render();
   });
+
+  stats.onStatsChange(() => { if (sheet.isOpen) render(); });
 
   return {
     open() {
       if (!account.isSignedIn) { onRequireAuth?.(); return; }
+      tab = "stats";
       render();
       sheet.open();
     },
@@ -505,8 +757,8 @@ export function createScriptPage({ onRequireAuth }) {
         <p class="script__game">${esc(s.game || "Roblox")}</p>
         <div class="sheet__meta">
           <span>@${esc(s.author)}</span><span class="dot"></span>
-          <span>${fmt(s.views)} views</span><span class="dot"></span>
-          <span>${fmt(s.copies)} copies</span><span class="dot"></span>
+          <span>${fmt(stats.totals(s.id).views)} views</span><span class="dot"></span>
+          <span>${fmt(stats.totals(s.id).copies)} copies</span><span class="dot"></span>
           <span>${esc(s.added)}</span>
         </div>
       </header>
@@ -520,7 +772,10 @@ export function createScriptPage({ onRequireAuth }) {
           ${isOwner(s) ? `<span class="chip chip--ok">Your script — unlocked automatically</span>` : ""}
           <button class="btn btn--primary" data-act="copy">Copy code</button>
           <button class="btn btn--ghost" data-act="raw">Open raw</button>
-          <button class="btn btn--ghost" data-act="like">Like</button>
+          <button class="btn btn--ghost${account.isSignedIn && stats.hasLiked(s.id, account.session.id) ? " is-on" : ""}" data-act="like">
+            ${account.isSignedIn && stats.hasLiked(s.id, account.session.id) ? "Liked" : "Like"}
+            ${stats.totals(s.id).likes ? ` · ${stats.totals(s.id).likes}` : ""}
+          </button>
           <button class="btn btn--ghost" data-act="report">Report</button>
         </div>
         <div class="script__code">${renderCodeBlock(s.code || "-- no code")}</div>
@@ -546,6 +801,7 @@ export function createScriptPage({ onRequireAuth }) {
 
     if (act === "copy") {
       const ok = await copyText(current.code || "");
+      if (ok) stats.record(current.id, "copy");
       toast(ok ? "COPIED TO CLIPBOARD" : "Copy blocked — select the code manually", ok ? "ok" : "warn");
     }
 
@@ -557,7 +813,15 @@ export function createScriptPage({ onRequireAuth }) {
 
     if (act === "like") {
       if (!account.isSignedIn) { onRequireAuth?.(); return; }
-      toast("Liked");
+      const me = account.session.id;
+      if (stats.hasLiked(current.id, me)) {
+        stats.unlike(current.id, me);
+        toast("Like removed");
+      } else {
+        stats.record(current.id, "like", me);
+        toast("Liked");
+      }
+      render();
     }
 
     if (act === "report") toast("Report sent to moderators", "warn");
@@ -574,7 +838,12 @@ export function createScriptPage({ onRequireAuth }) {
   });
 
   return {
-    open(script) { current = script; render(); sheet.open(); },
+    open(script) {
+      current = script;
+      stats.record(script.id, "view");
+      render();
+      sheet.open();
+    },
     close: () => sheet.close(),
   };
 }
