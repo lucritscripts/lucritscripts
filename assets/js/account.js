@@ -182,6 +182,13 @@ const local = {
     return { ok: true, data: session };
   },
 
+  // Google sign-in is a real identity provider, so there is nothing honest a
+  // browser-only shell can do with it. The UI hides the button when the
+  // backend is local; this is the belt-and-braces answer if it slips through.
+  async signInWithGoogle() {
+    return { ok: false, error: "Google sign-in needs the server backend, which isn't available right now." };
+  },
+
   async signOut() {
     setSession(null);
     return { ok: true };
@@ -320,8 +327,12 @@ export const account = {
     return () => listeners.delete(fn);
   },
 
+  /** True once a real provider is behind the account, so the UI can offer Google. */
+  get canUseGoogle() { return backend.kind === "firebase"; },
+
   signUp: (details) => backend.signUp(details),
   signIn: (details) => backend.signIn(details),
+  signInWithGoogle: () => backend.signInWithGoogle(),
   signOut: () => backend.signOut(),
   requestPasswordReset: (email) => backend.requestPasswordReset(email),
   changePassword: (details) => backend.changePassword(details),

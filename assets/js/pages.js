@@ -298,6 +298,18 @@ export function createAuth({ onDone }) {
 
       ${message ? `<p class="formerror" role="alert">${esc(message)}</p>` : ""}
 
+      ${mode !== "reset" && account.canUseGoogle ? `
+        <button class="btn btn--google btn--full" type="button" data-google>
+          <svg viewBox="0 0 48 48" aria-hidden="true" width="18" height="18">
+            <path fill="#4285F4" d="M45 24.5c0-1.6-.1-2.8-.4-4H24v7.6h12c-.2 2-1.5 5-4.4 7l6.7 5.2C42.2 36.6 45 31 45 24.5z"/>
+            <path fill="#34A853" d="M24 46c5.9 0 10.8-1.9 14.4-5.3l-6.7-5.2c-1.8 1.3-4.3 2.2-7.7 2.2-5.9 0-10.9-3.9-12.7-9.3l-7 5.4C7.9 41 15.4 46 24 46z"/>
+            <path fill="#FBBC05" d="M11.3 28.4A13.3 13.3 0 0 1 10.6 24c0-1.5.3-3 .7-4.4l-7-5.4A22 22 0 0 0 2 24c0 3.5.8 6.9 2.3 9.8l7-5.4z"/>
+            <path fill="#EA4335" d="M24 10.2c4.2 0 7 1.8 8.6 3.3l6-5.9C34.8 4.2 29.9 2 24 2 15.4 2 7.9 7 4.3 14.2l7 5.4C13.1 14.1 18.1 10.2 24 10.2z"/>
+          </svg>
+          Continue with Google
+        </button>
+        <p class="sheet__or"><span>or ${signup ? "sign up" : "sign in"} with email</span></p>` : ""}
+
       <form class="form" novalidate>
         ${signup ? `<label>Username<input name="username" autocomplete="nickname" autocapitalize="none"
           spellcheck="false" placeholder="yourname" required></label>` : ""}
@@ -320,7 +332,21 @@ export function createAuth({ onDone }) {
       </div>`;
   }
 
-  sheet.body.addEventListener("click", (e) => {
+  sheet.body.addEventListener("click", async (e) => {
+    const google = e.target.closest("[data-google]");
+    if (google) {
+      google.disabled = true;
+      const res = await account.signInWithGoogle();
+      google.disabled = false;
+      // An empty error means they closed the popup themselves, or we handed
+      // off to a redirect — either way there is nothing to tell them.
+      if (!res.ok) { if (res.error) render(res.error); return; }
+      toast("Signed in");
+      sheet.close();
+      onDone?.(account.session);
+      return;
+    }
+
     const btn = e.target.closest("[data-mode]");
     if (!btn) return;
     mode = btn.dataset.mode;

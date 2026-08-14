@@ -24,15 +24,17 @@ export const FIREBASE_CONFIG = {
 /**
  * The master switch.
  *
- * OFF until `firestore.rules` is published to the project. With the default
- * deny-all rules in place, a signup would create the Auth user and then fail
- * to write its profile — leaving an orphan account whose email can never be
- * registered again. Local accounts keep working in the meantime.
+ * ON. `firestore.rules` is published to the project, Email/Password and
+ * Google sign-in are both enabled, and lucritscripts.github.io is an
+ * authorised OAuth domain.
  *
- * Publish the rules (Firebase console → Firestore → Rules → paste
- * firestore.rules → Publish), then flip this to true.
+ * Turning this off falls the whole site back to browser-local accounts —
+ * useful if the project ever needs taking down without a redeploy. Do not
+ * turn it on against a project whose rules are still the deny-all default:
+ * a signup would create the Auth user, fail to write its profile, and leave
+ * an orphan account whose email can never be registered again.
  */
-export const USE_FIREBASE = false;
+export const USE_FIREBASE = true;
 
 async function connect() {
   if (!USE_FIREBASE || !FIREBASE_CONFIG.apiKey) return null;

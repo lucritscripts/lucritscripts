@@ -47,6 +47,7 @@ export async function createFirebaseBackend({ setSession, validateSignUp, RULES 
     createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut,
     sendPasswordResetEmail, updatePassword, EmailAuthProvider,
     reauthenticateWithCredential, onAuthStateChanged,
+    GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult,
     doc, getDoc, setDoc, updateDoc, deleteDoc, runTransaction, serverTimestamp,
   } = fns;
 
@@ -92,16 +93,86 @@ export async function createFirebaseBackend({ setSession, validateSignUp, RULES 
     });
   }
 
+  /* ------------------------------------------------------ Google sign-in */
+
+  // Google hands us a name and an email but no username, and the security
+  // rules require a profile that holds a matching claim. So the first time
+  // someone arrives this way we mint one for them — that is what makes
+  // "continue with Google" a single click instead of a second form.
+
+  const ALLOWED = /[^\p{L}\p{N} _.-]/gu;
+
+  /** A display name Google gave us, squeezed into what the rules accept. */
+  function seedName(user) {
+    const raw = user.displayName || (user.email || "").split("@")[0] || "player";
+    const clean = raw.replace(ALLOWED, "").replace(/\s+/g, " ").trim().slice(0, 28);
+    return clean || "player";
+  }
+
+  /**
+   * Makes sure this uid has a profile document. Returns the profile.
+   *
+   * Claiming can lose a race with someone who has the same Google name, so it
+   * retries with a suffix rather than failing the sign-in — being told "that
+   * name is taken" by a button you pressed once is a dead end.
+   */
+  async function ensureProfile(user) {
+    const existing = await getDoc(userRef(user.uid)).catch(() => null);
+    if (existing?.exists()) return existing.data();
+
+    const base = seedName(user);
+    let claimed = null;
+
+    for (let attempt = 0; attempt < 12 && !claimed; attempt += 1) {
+      const candidate = attempt === 0 ? base : `${base.slice(0, 26)}${attempt + 1}`;
+      try {
+        await claimUsername(user.uid, candidate, null);
+        claimed = candidate;
+      } catch { /* taken — try the next one */ }
+    }
+    if (!claimed) throw new Error("Couldn't find a free username. Try signing up with an email instead.");
+
+    const profile = {
+      username: claimed,
+      usernameLower: claimed.toLowerCase(),
+      bio: "", avatar: user.photoURL || null, youtube: "", tiktok: "",
+      createdAt: new Date().toISOString(),
+      usernameChangedAt: null,
+      publishes: [],
+      joinedAt: serverTimestamp(),
+    };
+    await setDoc(userRef(user.uid), profile);
+    return profile;
+  }
+
+  const isGoogle = (user) =>
+    (user?.providerData || []).some((p) => p?.providerId === "google.com");
+
+  /** Finishes a redirect sign-in that started before this page load. */
+  const redirected = getRedirectResult(auth).catch(() => null);
+
   // Keep the UI in step with Auth: a refreshed tab, a token expiring, or a
   // sign-in in another tab all land here.
+  //
+  // This is also what makes the site remember you. Firebase persists the
+  // session in this browser by default, so a returning visitor is signed in
+  // again before the page has finished painting — no form, no prompt.
   let settled = false;
   const first = new Promise((resolve) => {
     onAuthStateChanged(auth, async (user) => {
+      // A Google account with no profile yet: finish provisioning it here so
+      // an interrupted first sign-in heals itself on the next visit. Email
+      // signups are skipped — signUp() writes their profile itself, and
+      // stepping in here would race it and mint the wrong username.
+      if (user && isGoogle(user)) {
+        await ensureProfile(user).catch((err) =>
+          console.warn("[lucrit] could not set up this account:", err?.message || err));
+      }
       setSession(await loadSession(user));
       if (!settled) { settled = true; resolve(); }
     });
   });
-  await first;
+  await Promise.all([first, redirected]);
 
   return {
     kind: "firebase",
@@ -152,6 +223,40 @@ export async function createFirebaseBackend({ setSession, validateSignUp, RULES 
       try {
         const credential = await signInWithEmailAndPassword(auth, email, password);
         const session = await loadSession(credential.user);
+        setSession(session);
+        return { ok: true, data: session };
+      } catch (err) { return fail(err); }
+    },
+
+    /**
+     * One click, no form. Popup first because it keeps the page state; if the
+     * browser blocks popups we fall back to a full redirect, which always
+     * works — the result is picked up by getRedirectResult on the way back.
+     */
+    async signInWithGoogle() {
+      const provider = new GoogleAuthProvider();
+      // Always let them pick, rather than silently reusing whichever Google
+      // account the browser happens to be signed into.
+      provider.setCustomParameters({ prompt: "select_account" });
+
+      let credential;
+      try {
+        credential = await signInWithPopup(auth, provider);
+      } catch (err) {
+        const code = String(err?.code || "");
+        if (code === "auth/popup-closed-by-user" || code === "auth/cancelled-popup-request") {
+          return { ok: false, error: "" };   // they changed their mind; say nothing
+        }
+        if (code === "auth/popup-blocked" || code === "auth/operation-not-supported-in-this-environment") {
+          try { await signInWithRedirect(auth, provider); return { ok: false, error: "" }; }
+          catch (redirectErr) { return fail(redirectErr); }
+        }
+        return fail(err);
+      }
+
+      try {
+        const profile = await ensureProfile(credential.user);
+        const session = toSession(credential.user, profile);
         setSession(session);
         return { ok: true, data: session };
       } catch (err) { return fail(err); }
