@@ -14,6 +14,9 @@ import { renderCodeBlock } from "./engine/highlight.js";
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
+import { safeHref, safeImageSrc } from "./safe.js";
+import { drafts as myDrafts, deleteDraft, savedIds } from "./vault.js";
+
 export const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
   .replace(/"/g, "&quot;");
@@ -412,7 +415,8 @@ export function createInfoPage() {
    Dashboard
    ============================================================ */
 
-export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onDeleteScript }) {
+export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onDeleteScript,
+                                 getScript, onOpenDraft, onGenerate, onUnheart }) {
   const sheet = createOverlay({ id: "dashboard", label: "Dashboard", wide: true });
   let statWindow = "7d";
   let tab = "stats";
@@ -448,7 +452,7 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
     sheet.body.innerHTML = `
       <header class="dash__head">
         <span class="avatar avatar--lg" style="--seed:${u.username.length * 37}">
-          ${u.avatar ? `<img src="${esc(u.avatar)}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}
+          ${u.avatar ? `<img src="${esc(safeImageSrc(u.avatar))}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}
         </span>
         <div class="dash__who">
           <span class="sheet__eyebrow">Dashboard</span>
@@ -457,15 +461,15 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
           <div class="dash__links">
             <span class="dash__meta">Joined ${since.toLocaleDateString(undefined, { month: "short", year: "numeric" })}</span>
             <span class="dash__meta">${publishes.length} publish${publishes.length === 1 ? "" : "es"}</span>
-            ${u.youtube ? `<a href="${esc(u.youtube)}" target="_blank" rel="noopener" class="sociallink">YouTube</a>` : ""}
-            ${u.tiktok ? `<a href="${esc(u.tiktok)}" target="_blank" rel="noopener" class="sociallink">TikTok</a>` : ""}
+            ${u.youtube ? `<a href="${esc(safeHref(u.youtube))}" target="_blank" rel="noopener" class="sociallink">YouTube</a>` : ""}
+            ${u.tiktok ? `<a href="${esc(safeHref(u.tiktok))}" target="_blank" rel="noopener" class="sociallink">TikTok</a>` : ""}
           </div>
         </div>
         <button class="btn btn--ghost btn--sm" data-act="signout">Sign out</button>
       </header>
 
       <nav class="tabs" role="tablist">
-        ${[["stats","Stats"],["publishes","Publishes"],["profile","Profile"],["security","Security"]]
+        ${[["stats","Stats"],["publishes","Publishes"],["drafts","Drafts"],["saved","Saved"],["profile","Profile"],["security","Security"]]
           .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}" data-tab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
@@ -531,13 +535,61 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
           </div>`}
       </section>
 
+      <section class="pane" data-pane="drafts" ${tab === "drafts" ? "" : "hidden"}>
+        <div class="pane__head"><h3>Drafts</h3><p>Private until you publish them.</p></div>
+        ${(() => {
+          const list = myDrafts(u.id);
+          if (!list.length) return `
+            <div class="empty">
+              <strong>No drafts yet.</strong>
+              <span>Anything you make with the AI generator and save lands here.</span>
+              <button class="btn btn--primary btn--sm" data-act="generate">Create a script with AI</button>
+            </div>`;
+          return `<div class="ptable">${list.map((d) => `
+            <div class="ptable__row">
+              <div class="ptable__main">
+                <strong>${esc(d.title)}</strong>
+                <span>${esc(new Date(d.updatedAt).toLocaleDateString())} · ${d.code.split("\n").length} lines</span>
+              </div>
+              <div class="ptable__acts">
+                <button class="btn btn--ghost btn--xs" data-draft-open="${esc(d.id)}">Open</button>
+                <button class="btn btn--ghost btn--xs" data-draft-del="${esc(d.id)}">Delete</button>
+              </div>
+            </div>`).join("")}</div>`;
+        })()}
+      </section>
+
+      <section class="pane" data-pane="saved" ${tab === "saved" ? "" : "hidden"}>
+        <div class="pane__head"><h3>Saved</h3><p>Scripts you hearted around the site.</p></div>
+        ${(() => {
+          const ids = savedIds(u.id);
+          const list = ids.map((id) => getScript?.(id)).filter(Boolean);
+          if (!list.length) return `
+            <div class="empty">
+              <strong>Nothing saved yet.</strong>
+              <span>Tap the heart on any script and it gets its own tab here.</span>
+            </div>`;
+          return `<div class="ptable">${list.map((sc) => `
+            <div class="ptable__row">
+              <div class="ptable__main">
+                <strong>${esc(sc.title)}</strong>
+                <span>${esc(sc.game || "")} · @${esc(sc.author)}</span>
+              </div>
+              <div class="ptable__acts">
+                <button class="btn btn--ghost btn--xs" data-open="${esc(sc.id)}">Open</button>
+                <button class="btn btn--ghost btn--xs" data-unheart="${esc(sc.id)}">Remove</button>
+              </div>
+            </div>`).join("")}</div>`;
+        })()}
+      </section>
+
       <section class="pane" data-pane="profile" ${tab === "profile" ? "" : "hidden"}>
         <h3>Profile</h3>
         <form class="form form--grid" data-form="profile">
           <label class="wide">Profile picture
             <div class="avatarpick">
               <span class="avatar avatar--lg" data-preview style="--seed:${u.username.length * 37}">
-                ${u.avatar ? `<img src="${esc(u.avatar)}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}
+                ${u.avatar ? `<img src="${esc(safeImageSrc(u.avatar))}" alt="">` : esc(u.username.slice(0, 2).toUpperCase())}
               </span>
               <div class="avatarpick__controls">
                 <input type="file" name="avatar" accept="image/png,image/jpeg,image/webp,image/gif">
@@ -591,6 +643,24 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
   /* ---- interactions ---- */
 
   sheet.body.addEventListener("click", async (e) => {
+    const draftOpen = e.target.closest("[data-draft-open]");
+    if (draftOpen) { sheet.close(); onOpenDraft?.(draftOpen.dataset.draftOpen); return; }
+
+    const draftDel = e.target.closest("[data-draft-del]");
+    if (draftDel) {
+      const d = myDrafts(account.session.id).find((x) => x.id === draftDel.dataset.draftDel);
+      if (d && window.confirm(`Delete the draft "${d.title}"? This cannot be undone.`)) {
+        deleteDraft(account.session.id, d.id);
+        render();
+      }
+      return;
+    }
+
+    const unheart = e.target.closest("[data-unheart]");
+    if (unheart) { onUnheart?.(unheart.dataset.unheart); render(); return; }
+
+    if (e.target.closest('[data-act="generate"]')) { sheet.close(); onGenerate?.(); return; }
+
     const tabBtn = e.target.closest("[data-tab]");
     if (tabBtn) {
       tab = tabBtn.dataset.tab;
@@ -663,7 +733,7 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
     reader.onload = () => {
       const preview = $("[data-preview]", sheet.body);
       if (!preview) return;
-      preview.innerHTML = `<img src="${reader.result}" alt="">`;
+      preview.innerHTML = `<img src="${esc(safeImageSrc(reader.result))}" alt="">`;
       preview.dataset.value = reader.result;
     };
     reader.readAsDataURL(file);
@@ -702,9 +772,9 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
   stats.onStatsChange(() => { if (sheet.isOpen) render(); });
 
   return {
-    open() {
+    open(startTab = "stats") {
       if (!account.isSignedIn) { onRequireAuth?.(); return; }
-      tab = "stats";
+      tab = startTab;
       render();
       sheet.open();
     },
@@ -763,7 +833,7 @@ export function createScriptPage({ onRequireAuth }) {
         </div>
       </header>
 
-      ${s.thumbnail ? `<img class="script__thumb" src="${esc(s.thumbnail)}" alt="">` : ""}
+      ${s.thumbnail ? `<img class="script__thumb" src="${esc(safeImageSrc(s.thumbnail))}" alt="">` : ""}
 
       <div class="script__desc">${esc(s.desc).replace(/\n+/g, "</p><p>").replace(/^/, "<p>") + "</p>"}</div>
 

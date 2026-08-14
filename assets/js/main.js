@@ -11,7 +11,10 @@ import {
   createAuth, createDashboard, createInfoPage, createScriptPage, toast,
 } from "./pages.js";
 import { createAssistant } from "./assistant.js";
+import { createGenerator } from "./generator.js";
+import { toggleSaved, getDraft, onVaultChange } from "./vault.js";
 import { account } from "./account.js";
+import { runBotCheck } from "./gate.js";
 
 /* ------------------------------------------------------- capabilities */
 
@@ -77,6 +80,32 @@ const dashboard = createDashboard({
   getPublishes: (user) => library.filter((s) => s.authorId === user.id),
   onOpenScript: (s) => scriptPage.open(s),
   onDeleteScript: (s) => removeScript(s.id),
+  getScript: (id) => library.find((s) => s.id === id),
+  onOpenDraft: (id) => generator.openDraft(getDraft(account.session?.id, id)),
+  onGenerate: () => generator.open(),
+  onUnheart: (id) => toggleSaved(account.session?.id, id),
+});
+
+/* ------------------------------------------------------------ generator */
+
+const generator = createGenerator({
+  onRequireAuth: () => auth.open("signup"),
+  onOpenDashboard: (tab) => dashboard.open(tab),
+  onPublish: (draft) => {
+    // The publish form owns game and category, so send the draft there rather
+    // than guessing values on someone's behalf.
+    jumpTo("submit");
+    setTimeout(() => {
+      const form = document.querySelector(".publish__form");
+      if (!form) return;
+      form.querySelector('[name="title"]').value = draft.title;
+      const code = form.querySelector('[name="code"]');
+      code.value = draft.code;
+      code.dispatchEvent(new Event("input", { bubbles: true }));
+      form.querySelector('[name="title"]').focus();
+      toast("Fill in the game and description, then publish");
+    }, 700);
+  },
 });
 
 /* --------------------------------------------------------------- browse */
@@ -140,6 +169,41 @@ createAssistant({
   onAuth: () => auth.open("signup"),
   onPublish: () => jumpTo("submit"),
 });
+
+// The heart lives on every card, so one delegated listener covers the whole
+// site — search results, the vault, game pages, trending.
+document.addEventListener("click", (e) => {
+  const heart = e.target.closest("[data-heart]");
+  if (!heart) return;
+  e.preventDefault();
+  e.stopPropagation();
+
+  if (!account.isSignedIn) {
+    toast("Sign in to save scripts to your tabs", "warn");
+    auth.open("signup");
+    return;
+  }
+
+  const now = toggleSaved(account.session.id, heart.dataset.heart);
+  heart.classList.toggle("is-on", now);
+  heart.setAttribute("aria-pressed", String(now));
+  heart.setAttribute("aria-label", now ? "Remove from your tabs" : "Save to your tabs");
+  toast(now ? "Saved to your tabs" : "Removed from your tabs");
+}, true);
+
+document.addEventListener("lucrit:generate", () => generator.open());
+
+// Hearts are drawn per-account, so every surface that shows cards has to
+// repaint when the session or the shelf changes. Without this, signing out
+// leaves someone else's hearts filled in on the page.
+function repaintShelf() {
+  libraryPanel.refresh();
+  chapters.refresh();
+  gamePage.refresh();
+  gameLibrary.refresh();
+}
+account.onChange(repaintShelf);
+onVaultChange(repaintShelf);
 
 // Dashboard's "publish a script" shortcut.
 document.addEventListener("lucrit:publish", () => jumpTo("submit"));
@@ -208,6 +272,12 @@ requestAnimationFrame(frame);
 
 document.documentElement.classList.add("is-ready");
 
+// The gate goes up before anything else is usable. The 3D world keeps
+// loading behind it so the site is ready the moment it clears.
+runBotCheck().then((how) => {
+  if (how !== "skipped") choreography.measure();
+});
+
 const deep = /#script=([\w-]+)/.exec(location.hash);
 if (deep) {
   const s = library.find((x) => x.id === deep[1]);
@@ -221,7 +291,7 @@ else if (location.hash === "#library") gameLibrary.open();
 window.__lucrit = {
   world, scroller, library, account,
   auth, dashboard, info, scriptPage, libraryPanel, gamePage, gameLibrary,
-  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography,
+  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography, generator,
   snap() {
     smoothed = progress;
     world?.setProgress(choreography.toCameraProgress(smoothed));

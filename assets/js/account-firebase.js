@@ -14,6 +14,7 @@
 // address has no business in a public document.
 
 import { firebaseReady } from "./firebase.js";
+import { safeSocialUrl } from "./safe.js";
 
 const COOLDOWN_DAYS = 7;
 
@@ -233,8 +234,11 @@ export async function createFirebaseBackend({ setSession, validateSignUp, RULES 
       const clean = {};
       if (patch.bio !== undefined) clean.bio = String(patch.bio).slice(0, 300);
       if (patch.avatar !== undefined) clean.avatar = patch.avatar;
-      if (patch.youtube !== undefined) clean.youtube = patch.youtube;
-      if (patch.tiktok !== undefined) clean.tiktok = patch.tiktok;
+      // Validated here, not just in the local backend. Storing these raw let
+      // a profile hold a javascript: URL that ran on any visitor who clicked
+      // it — and `users` is world-readable, so that reached everyone.
+      if (patch.youtube !== undefined) clean.youtube = safeSocialUrl(patch.youtube, ["youtube.com", "youtu.be"]);
+      if (patch.tiktok !== undefined) clean.tiktok = safeSocialUrl(patch.tiktok, ["tiktok.com"]);
 
       try { await updateDoc(userRef(user.uid), clean); }
       catch (err) { return fail(err); }

@@ -12,6 +12,7 @@
 // offline, not as a place to keep real credentials.
 
 import { USE_FIREBASE } from "./firebase.js";
+import { safeSocialUrl } from "./safe.js";
 
 const KEY_USERS = "lucrit:users";
 const KEY_SESSION = "lucrit:session";
@@ -257,8 +258,8 @@ const local = {
 
     if (bio !== undefined) user.bio = String(bio).slice(0, 300);
     if (avatar !== undefined) user.avatar = avatar;
-    if (youtube !== undefined) user.youtube = normaliseUrl(youtube, "youtube.com");
-    if (tiktok !== undefined) user.tiktok = normaliseUrl(tiktok, "tiktok.com");
+    if (youtube !== undefined) user.youtube = safeSocialUrl(youtube, ["youtube.com", "youtu.be"]);
+    if (tiktok !== undefined) user.tiktok = safeSocialUrl(tiktok, ["tiktok.com"]);
 
     saveUsers(users);
     setSession(publicUser(user));
@@ -329,15 +330,6 @@ export const account = {
   updateProfile: (patch) => backend.updateProfile(patch, session),
   addPublish: (scriptId) => backend.addPublish(scriptId, session),
 };
-
-function normaliseUrl(value, host) {
-  const v = String(value || "").trim();
-  if (!v) return "";
-  try {
-    const url = new URL(v.startsWith("http") ? v : "https://" + v);
-    return url.hostname.includes(host) ? url.toString() : "";
-  } catch { return ""; }
-}
 
 /* ------------------------------------------------------------ analytics */
 

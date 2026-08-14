@@ -4,6 +4,8 @@
 import { SCRIPTS, CATEGORIES, SORTS, BOARDS, categoryOf } from "./data/scripts.js";
 import { BANDS } from "./engine/world.js";
 import { account } from "./account.js";
+import { safeImageSrc } from "./safe.js";
+import { isSaved } from "./vault.js";
 import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLeaderboard } from "./pages.js";
 import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import { createGamePicker } from "./gamepicker.js";
@@ -69,10 +71,15 @@ const wordCount = (s) => String(s || "").trim().split(/\s+/).filter(Boolean).len
 export function cardMarkup(script, { large = false } = {}) {
   const cat = categoryOf(script.category);
   const t = scriptTotals(script.id);
+  const saved = isSaved(account.session?.id, script.id);
   return `
     <article class="card${large ? " card--lg" : ""}" data-id="${esc(script.id)}" style="--cat:${cat.accent}">
       <div class="card__glow" aria-hidden="true"></div>
-      ${script.thumbnail ? `<img class="card__thumb" src="${esc(script.thumbnail)}" alt="" loading="lazy">` : ""}
+      <button class="card__heart${saved ? " is-on" : ""}" type="button" data-heart="${esc(script.id)}"
+              aria-pressed="${saved}" aria-label="${saved ? "Remove from your tabs" : "Save to your tabs"}">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20s-7-4.4-7-9.1A4 4 0 0 1 12 8a4 4 0 0 1 7 2.9C19 15.6 12 20 12 20Z"/></svg>
+      </button>
+      ${script.thumbnail ? `<img class="card__thumb" src="${esc(safeImageSrc(script.thumbnail))}" alt="" loading="lazy">` : ""}
       <div class="card__body">
         <div class="card__top">
           <span class="chip">${cat.label}</span>
@@ -364,6 +371,10 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
         <p class="hero__sub">Discover, explore, and build with Roblox scripts — published by creators who get paid every time you unlock one.</p>
         <div class="hero__cta">
           <button class="btn btn--primary" data-jump="search">Explore scripts</button>
+          <button class="btn btn--ai" data-generate>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/></svg>
+            Create a Script with AI
+          </button>
           <a class="btn btn--discord" href="${DISCORD_INVITE}" target="_blank" rel="noopener">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.3 5.3A16 16 0 0 0 15.4 4l-.2.4a12 12 0 0 1 3.3 1.6 11 11 0 0 0-9-1.1 11.4 11.4 0 0 0-2 1.1A12 12 0 0 1 10.8 4L10.6 4a16 16 0 0 0-3.9 1.3C4.2 9 3.5 12.6 3.9 16.2a16 16 0 0 0 4.8 2.4l.6-1a10.6 10.6 0 0 1-1.7-.8l.4-.3a11.4 11.4 0 0 0 9.8 0l.4.3a10.6 10.6 0 0 1-1.7.8l.6 1a16 16 0 0 0 4.8-2.4c.5-4.2-.6-7.8-2.6-10.9ZM9.7 14.1c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Zm4.6 0c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Z"/></svg>
             Join Discord for daily updates
@@ -507,6 +518,10 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
     const jump = e.target.closest("[data-jump]");
     if (jump) { onJump(jump.dataset.jump); return; }
 
+    if (e.target.closest("[data-generate]")) {
+      document.dispatchEvent(new CustomEvent("lucrit:generate"));
+      return;
+    }
     if (e.target.closest("[data-info]")) { onInfo?.(); return; }
     if (e.target.closest("[data-auth]")) { onAuth?.(); return; }
 
@@ -734,7 +749,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary }
   function paintDash(session) {
     dash.innerHTML = session
       ? `<span class="avatar" style="--seed:${session.username.length * 37}">
-           ${session.avatar ? `<img src="${esc(session.avatar)}" alt="">` : esc(session.username.slice(0, 2).toUpperCase())}
+           ${session.avatar ? `<img src="${esc(safeImageSrc(session.avatar))}" alt="">` : esc(session.username.slice(0, 2).toUpperCase())}
          </span><span>Dashboard</span>`
       : `<span class="dashbtn__icon" aria-hidden="true">
            <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6"/></svg>
