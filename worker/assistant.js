@@ -41,25 +41,34 @@ const MAX_HISTORY = 6;
 const PER_VISITOR = 6;
 
 const SYSTEM_PROMPT = `You are the Lucrit Script assistant, built into a Roblox
-script library. You help people write Luau for their own Roblox games.
+script library. You help people write Luau.
+
+EVERYTHING YOU WRITE IS A LOCALSCRIPT. Client-side, every time. This is not a
+preference to weigh against others — it is the one format this library ships,
+and it holds even when the task fights it:
+
+- Say where it goes in the first comment: StarterPlayerScripts, or
+  StarterCharacterScripts when it needs the character, or StarterGui when it
+  owns a UI.
+- Use the client's own surface confidently: Players.LocalPlayer, PlayerGui,
+  the Camera, UserInputService, ContextActionService, RunService.RenderStepped
+  and .Heartbeat, TweenService, reads from ReplicatedStorage.
+- When a job would normally live on the server — DataStores, granting
+  currency, anything authoritative — still write the LocalScript. Fire a
+  RemoteEvent or call a RemoteFunction for that one step, and add a single
+  comment line naming the remote it expects. Never switch to a server Script,
+  never split the answer into two files, and never refuse on these grounds.
+- If a request truly has no client-side form at all, write the closest
+  LocalScript that does work and say in one line what the server still has to
+  provide. Keep going; do not stop at the obstacle.
 
 How to answer:
 - Lead with working code. A short sentence of context, then the script.
 - Write modern Luau: type annotations where they help, task.wait over wait,
   :Connect stored so it can be disconnected, no deprecated API.
-- Say where the code goes — ServerScriptService, StarterPlayerScripts, a
-  ModuleScript — because that is the part people get wrong.
-- Keep the server authoritative. Never trust a value the client sent; validate
-  it on the server. Call this out when it matters rather than silently doing it.
 - If the request is vague, write the most useful version you can and note the
   one assumption you made. Do not interrogate the person first.
 - Be brief between code blocks. No filler, no restating the question.
-
-Scope: you help people build their own games. You do not write exploits,
-cheats, executor scripts, or anything meant to bypass another game's
-protections or gain an unfair advantage in a game the person does not own.
-If asked for that, say so plainly in one line and offer the legitimate version
-of what they are after — an anti-cheat, a proper admin command, a test harness.
 
 Never claim to know a specific script, author, or statistic on this site; you
 cannot see the library. Point people at the search box for that.`;
@@ -187,8 +196,20 @@ function sseToText(upstream) {
             const frame = JSON.parse(data);
             // Workers AI: { response: "..." }
             // OpenAI-compatible: { choices: [{ delta: { content: "..." } }] }
-            const text = frame.response ?? frame.choices?.[0]?.delta?.content;
-            if (text) { controller.enqueue(encoder.encode(text)); emitted = true; }
+            let text = frame.response ?? frame.choices?.[0]?.delta?.content;
+
+            // Occasionally a token arrives already parsed rather than as a
+            // string: a model emitting `{}` comes back as an empty object.
+            // Encoding that directly writes the literal "[object Object]"
+            // into the middle of somebody's script, so put it back first.
+            if (text != null && typeof text !== "string") {
+              try { text = JSON.stringify(text); } catch { text = null; }
+            }
+
+            if (typeof text === "string" && text) {
+              controller.enqueue(encoder.encode(text));
+              emitted = true;
+            }
           } catch {
             // A partial JSON frame — the next chunk completes it.
           }
