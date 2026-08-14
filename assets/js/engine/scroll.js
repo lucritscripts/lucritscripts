@@ -115,17 +115,28 @@ export class SmoothScroll {
   }
 
   _onWheel(e) {
-    // Let the browser handle zoom gestures and scrollable inner panels.
+    // Let the browser handle zoom gestures.
     if (e.ctrlKey) return;
+
+    // An open overlay owns the wheel. Without this, a sheet whose content is
+    // too short to scroll let the wheel fall straight through and drove the
+    // page behind it — you scrolled the background instead of the panel.
+    if (document.documentElement.classList.contains("is-locked")) return;
+
+    // A scrollable inner region owns the wheel for as long as the pointer is
+    // over it, including at its top and bottom edge. Handing the page the
+    // wheel once an inner list bottoms out is what threw people into the next
+    // chapter mid-read; `overscroll-behavior: contain` stops the browser
+    // chaining for the same reason.
     let node = e.target;
     while (node && node !== document.body) {
-      if (node.dataset && node.dataset.nativeScroll !== undefined) {
-        const canScroll = node.scrollHeight > node.clientHeight + 1;
-        if (canScroll) {
-          const atTop = node.scrollTop <= 0 && e.deltaY < 0;
-          const atEnd = node.scrollTop + node.clientHeight >= node.scrollHeight - 1 && e.deltaY > 0;
-          if (!atTop && !atEnd) return;
-        }
+      if (node.dataset && node.dataset.nativeScroll !== undefined
+          && node.scrollHeight > node.clientHeight + 1) {
+        // Also drop any settle already queued from an earlier page-level
+        // wheel. Otherwise it fires while someone is reading a list and
+        // slides the page to the next chapter under them.
+        this._cancelSnap();
+        return;
       }
       node = node.parentElement;
     }
