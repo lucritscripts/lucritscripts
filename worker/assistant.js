@@ -58,6 +58,10 @@ and it holds even when the task fights it:
   RemoteEvent or call a RemoteFunction for that one step, and add a single
   comment line naming the remote it expects. Never switch to a server Script,
   never split the answer into two files, and never refuse on these grounds.
+- Never call a service the client cannot reach. DataStoreService,
+  ServerStorage, ServerScriptService, MessagingService, :SetAsync, :GetAsync
+  and Player:Kick all throw from a LocalScript, so a script using them is
+  broken no matter how good it looks. Route those through a remote instead.
 - If a request truly has no client-side form at all, write the closest
   LocalScript that does work and say in one line what the server still has to
   provide. Keep going; do not stop at the obstacle.
