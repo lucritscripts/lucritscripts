@@ -1617,3 +1617,137 @@ html.no-webgl .panel { background: rgba(10, 15, 26, 0.86); }
 @media (pointer: coarse) {
   .acode__copy { opacity: 1; }
 }
+
+/* ============================================================
+   AI generator, hearts and the shelf
+   ============================================================ */
+
+.btn--ai {
+  background: linear-gradient(120deg, var(--violet, #8b5cf6), var(--blue));
+  color: #fff; border: 0;
+}
+.btn--ai svg { width: 17px; height: 17px; fill: currentColor; }
+.btn--ai:hover { filter: brightness(1.08); }
+
+/* ------------------------------------------------------------- heart */
+
+.card { position: relative; }
+.card__heart {
+  position: absolute; top: 10px; right: 10px; z-index: 3;
+  display: grid; place-items: center; width: 32px; height: 32px;
+  cursor: pointer; border-radius: 50%;
+  background: rgba(6, 9, 16, 0.72); border: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+  transition: transform 0.16s var(--ease), border-color 0.16s, background 0.16s;
+}
+.card__heart svg { width: 17px; height: 17px; fill: none; stroke: var(--ink-2); stroke-width: 1.8; }
+.card__heart:hover { transform: scale(1.1); border-color: var(--red, #ff4d5e); }
+.card__heart:hover svg { stroke: var(--red, #ff4d5e); }
+.card__heart.is-on { border-color: var(--red, #ff4d5e); background: rgba(255, 77, 94, 0.16); }
+.card__heart.is-on svg { fill: var(--red, #ff4d5e); stroke: var(--red, #ff4d5e); }
+.card__heart:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* --------------------------------------------------------- generator */
+
+.gen__label {
+  display: block; margin: 22px 0 8px;
+  font-family: var(--mono); font-size: 0.7rem;
+  letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-3);
+}
+.gen__prompt {
+  width: 100%; resize: vertical; padding: 13px 15px;
+  font: inherit; line-height: 1.55; color: var(--ink);
+  background: rgba(4, 7, 13, 0.6);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.gen__prompt:focus { outline: none; border-color: var(--blue); }
+
+.gen__examples { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+.gen__eg {
+  padding: 6px 11px; cursor: pointer; text-align: left;
+  font-size: 0.76rem; color: var(--ink-2);
+  background: none; border: 1px dashed var(--line-2); border-radius: 99px;
+}
+.gen__eg:hover { color: var(--ink); border-color: var(--blue); border-style: solid; }
+
+.gen__bar { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 18px; }
+.gen__quota { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-3); }
+
+.gen__out { margin-top: 26px; }
+.gen__outhead {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  margin-bottom: 9px; font-weight: 620;
+}
+.gen__hint { font-family: var(--mono); font-size: 0.68rem; color: var(--ink-3); font-weight: 400; }
+
+/* The textarea sits transparent on top of a highlighted copy of the same
+   text, so people edit real code and still see it coloured. Both layers must
+   use identical metrics or the two drift apart as you type. */
+.gen__editor {
+  position: relative; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: rgba(2, 4, 9, 0.72); overflow: hidden;
+}
+.gen__ghost, .gen__code {
+  margin: 0; padding: 14px 16px;
+  font-family: var(--mono); font-size: 0.78rem; line-height: 1.65;
+  white-space: pre; tab-size: 2;
+}
+.gen__ghost {
+  position: absolute; inset: 0; overflow: auto;
+  pointer-events: none; color: var(--ink);
+}
+.gen__code {
+  position: relative; display: block; width: 100%; height: 340px;
+  resize: vertical; border: 0; background: none;
+  color: transparent; caret-color: var(--blue);
+  overflow: auto;
+}
+.gen__code:focus { outline: none; }
+.gen__code::selection { background: rgba(61, 155, 255, 0.32); color: transparent; }
+
+.gen__save { display: flex; align-items: center; gap: 11px; flex-wrap: wrap; margin-top: 16px; }
+.gen__note { font-family: var(--mono); font-size: 0.7rem; color: var(--good, #4ade80); }
+
+.ptable__acts { display: flex; gap: 6px; flex: none; }
+
+@media (max-width: 820px) {
+  .gen__code { height: 260px; }
+  .gen__examples .gen__eg:nth-child(n+3) { display: none; }
+}
+
+/* ============================================================
+   First-visit bot check
+   ============================================================ */
+
+html.is-gated { overflow: hidden; }
+
+.botgate {
+  position: fixed; inset: 0; z-index: 999;
+  display: grid; place-items: center; padding: 24px;
+  background: radial-gradient(120% 90% at 50% 0%, #0b1020, #04060c 70%);
+  animation: gatein 0.35s var(--ease) both;
+}
+.botgate.is-going {
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.4s var(--ease);
+}
+@keyframes gatein { from { opacity: 0; } to { opacity: 1; } }
+
+.botgate__panel {
+  width: min(480px, 100%); text-align: center;
+  display: flex; flex-direction: column; align-items: center;
+}
+.botgate__logo { width: min(300px, 74vw); height: auto; margin-bottom: 6px; }
+.botgate__title {
+  font-size: clamp(1.7rem, 4vw, 2.3rem); letter-spacing: -0.03em; margin: 0 0 8px;
+}
+.botgate__sub { color: var(--ink-2); max-width: 34ch; margin: 0 0 24px; }
+.botgate .hcheck { width: 100%; text-align: left; }
+.botgate__note {
+  margin-top: 20px; max-width: 38ch;
+  font-family: var(--mono); font-size: 0.68rem; line-height: 1.6; color: var(--ink-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .botgate, .botgate.is-going { animation: none; transition: none; }
+}
