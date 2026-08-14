@@ -1751,3 +1751,37 @@ html.is-gated { overflow: hidden; }
 @media (prefers-reduced-motion: reduce) {
   .botgate, .botgate.is-going { animation: none; transition: none; }
 }
+
+/* Continue with Google -------------------------------------------------- */
+
+/* Google's brand guidelines want their mark on a light, plain surface, so
+   this button deliberately breaks the dark theme rather than tinting it. */
+.btn--google {
+  background: #fff;
+  color: #1f1f1f;
+  border-color: #dadce0;
+  gap: 10px;
+  font-weight: 600;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+}
+.btn--google:hover { background: #f5f6f7; box-shadow: 0 4px 16px rgba(0, 0, 0, 0.34); }
+.btn--google:disabled { opacity: 0.6; cursor: default; }
+.btn--google svg { flex: none; }
+
+.sheet__or {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0 4px;
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-3, var(--ink-2));
+}
+.sheet__or::before,
+.sheet__or::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line, rgba(255, 255, 255, 0.12));
+}
