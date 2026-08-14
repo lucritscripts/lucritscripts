@@ -1,12 +1,94 @@
 rules_version = '2';
 
-// Every collection the backend touches is written by Cloud Functions using
-// the Admin SDK, which bypasses these rules. Nothing here should be readable
-// or writable straight from a browser — a visitor who could write to
-// `unlocks` could mark their own paywall as complete.
+// Default deny. Every collection below opts back in deliberately — anything
+// not listed here stays unreachable from a browser.
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /{document=**} {
+
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function incoming() { return request.resource.data; }
+    function current()  { return resource.data; }
+
+    // Only fields the app actually writes may appear. Without this an owner
+    // could invent fields — including ones a future feature will trust.
+    function onlyKnownFields() {
+      return incoming().keys().hasOnly([
+        'username', 'usernameLower', 'bio', 'avatar',
+        'youtube', 'tiktok', 'createdAt', 'usernameChangedAt',
+        'publishes', 'joinedAt'
+      ]);
+    }
+
+    function shapeOk() {
+      return incoming().username is string
+             && incoming().username.size() > 0
+             && incoming().username.size() <= 32
+             && incoming().bio is string
+             && incoming().bio.size() <= 300
+             // Email addresses belong in Auth. This document is world-readable.
+             && !('email' in incoming());
+    }
+
+    // A display name is only yours if you hold the matching claim. Without
+    // this an account could simply write someone else's username into its own
+    // profile and impersonate them everywhere the name is shown.
+    function holdsClaim() {
+      return exists(/databases/$(database)/documents/usernames/$(incoming().usernameLower))
+             && get(/databases/$(database)/documents/usernames/$(incoming().usernameLower)).data.uid == request.auth.uid
+             && incoming().usernameLower == incoming().username.lower();
+    }
+
+    // Public profiles: readable by anyone so profiles and the leaderboard
+    // work without an account, writable only by the person they belong to.
+    match /users/{uid} {
+      allow read: if true;
+
+      allow create: if isOwner(uid)
+                    && onlyKnownFields() && shapeOk() && holdsClaim()
+                    && incoming().publishes.size() == 0;
+
+      allow update: if isOwner(uid)
+                    && onlyKnownFields() && shapeOk() && holdsClaim()
+                    // The cooldown is only real if it cannot be rewound. A
+                    // rename must move this forward; any other edit leaves it.
+                    && (incoming().usernameChangedAt == current().usernameChangedAt
+                        || incoming().username != current().username)
+                    // Publishes are proof of authorship, so they may only grow
+                    // by one at a time — never be handed to yourself in bulk.
+                    && incoming().publishes.size() <= current().publishes.size() + 1
+                    && incoming().createdAt == current().createdAt;
+
+      allow delete: if isOwner(uid);
+    }
+
+    // One document per claimed username, so two people cannot hold the same
+    // name. Create only when it does not already exist — that is what makes
+    // the claim a race-safe lock rather than a hope.
+    match /usernames/{name} {
+      allow read: if true;
+      allow create: if signedIn()
+                    && incoming().keys().hasOnly(['uid'])
+                    && incoming().uid == request.auth.uid
+                    && !exists(/databases/$(database)/documents/usernames/$(name));
+      allow update: if false;
+      allow delete: if signedIn() && current().uid == request.auth.uid;
+    }
+
+    // Written only by Cloud Functions through the Admin SDK, which bypasses
+    // these rules. A visitor who could write to `unlocks` could mark their
+    // own paywall complete, so the browser gets nothing here.
+    match /unlocks/{document} {
+      allow read, write: if false;
+    }
+
+    match /ratelimits/{document} {
       allow read, write: if false;
     }
   }
