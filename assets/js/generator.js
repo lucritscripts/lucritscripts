@@ -40,6 +40,10 @@ Rules for this answer:
   normally sit on the server. Do not write a server Script.
 - Start with a short comment saying where it goes: StarterPlayerScripts,
   StarterCharacterScripts, or StarterGui.
+- NEVER call a service the client cannot reach: no DataStoreService, no
+  ServerStorage, no ServerScriptService, no MessagingService, no
+  :SetAsync/:GetAsync, no Player:Kick from the client. Calling one of these
+  from a LocalScript throws at runtime, so the script would not work.
 - If one step genuinely needs the server, fire a RemoteEvent for that step and
   add a single comment naming the remote. Keep the rest client-side.
 - It must run as-is. No placeholders, no "TODO", no pseudo-code.`;
