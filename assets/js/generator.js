@@ -18,10 +18,10 @@ import { saveDraft, quotaLeft, spendQuota, QUOTA } from "./vault.js";
 const $ = (sel, root = document) => root.querySelector(sel);
 
 const EXAMPLES = [
-  "A round-based minigame with a lobby, a countdown and a winner",
-  "Save player coins to a DataStore, safely on leave and shutdown",
-  "An NPC that patrols waypoints and chases a player who gets close",
-  "A shop GUI where the server owns the price and the stock",
+  "A sprint toggle on shift with a stamina bar that drains and refills",
+  "An ESP that outlines every player through walls, toggled with a key",
+  "A draggable GUI menu with tabs, sliders and a close button",
+  "Smooth camera shake when the character lands from a fall",
 ];
 
 /**
@@ -30,16 +30,19 @@ const EXAMPLES = [
  * is specific to producing one finished file.
  */
 function buildRequest(description) {
-  return `Write one complete, working Roblox Luau script for this request:
+  return `Write one complete, working Roblox LocalScript for this request:
 
 "${description}"
 
 Rules for this answer:
 - Return the script in a single \`\`\`lua code block, nothing after it.
-- Start the script with a short comment saying where it goes
-  (ServerScriptService, StarterPlayerScripts, a ModuleScript, and so on).
-- It must run as-is. No placeholders, no "TODO", no pseudo-code.
-- Keep the server authoritative — never trust a value the client sent.`;
+- It must be a LocalScript — client-side, always, even if the job would
+  normally sit on the server. Do not write a server Script.
+- Start with a short comment saying where it goes: StarterPlayerScripts,
+  StarterCharacterScripts, or StarterGui.
+- If one step genuinely needs the server, fire a RemoteEvent for that step and
+  add a single comment naming the remote. Keep the rest client-side.
+- It must run as-is. No placeholders, no "TODO", no pseudo-code.`;
 }
 
 /** Pulls the code out of a fenced block, or falls back to the whole reply. */
