@@ -1,0 +1,868 @@
+/**
+ * Lucrit Script — the whole backend, on Cloudflare.
+ *
+ * This is a Pages "advanced mode" worker: every request to the site lands here
+ * first. Anything under /api/ is handled below; everything else is handed to
+ * env.ASSETS, which serves the static site. Site and API therefore share one
+ * origin, which is what makes httpOnly session cookies possible and removes
+ * CORS entirely.
+ *
+ * What it replaces:
+ *   Firebase Auth       -> /api/auth/* with sessions in D1
+ *   Firestore users     -> the `users` table
+ *   Firestore usernames -> a UNIQUE column, which the database enforces for us
+ *   Security rules      -> this file being the only way in
+ *   App Check           -> Turnstile
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * ABOUT PASSWORDS — read this before changing anything in the auth section.
+ *
+ * The Workers free plan allows 10ms of CPU per request. A password hash worth
+ * having (PBKDF2 at hundreds of thousands of iterations, or Argon2) costs far
+ * more than that, so hashing on the server is not an option here.
+ *
+ * So the browser does the expensive part. It derives
+ *
+ *     authKey = PBKDF2-SHA256(password, salt, 310000)
+ *
+ * where the salt is derived from the email address, and sends authKey instead
+ * of the password. The server then stores a plain SHA-256 of authKey with a
+ * random per-user salt, which costs microseconds.
+ *
+ * This is not a shortcut. The work an attacker must do per guess is identical
+ * — they still have to run PBKDF2 310,000 times for every candidate password,
+ * because that is what turns a password into an authKey. What changes is only
+ * who pays for it during normal use. Two useful side effects: the server never
+ * sees the password at all, and the login salt is derived from the email
+ * rather than looked up, so asking for it cannot reveal whether an account
+ * exists.
+ * ─────────────────────────────────────────────────────────────────────────────
+ *
+ * Bindings expected:
+ *   DB                 D1 database
+ *   AI                 Workers AI
+ *   TURNSTILE_SECRET   secret — Turnstile server key
+ *   RESEND_API_KEY     secret — for password reset email (optional)
+ *   GOOGLE_CLIENT_ID   plain var — public by design
+ *   SITE_URL           plain var — used in reset links
+ *   MAIL_FROM          plain var — the From: address for reset email
+ */
+
+/* ══════════════════════════════════════════════════════════ small helpers ══ */
+
+const json = (status, body, extra = {}) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store", ...extra },
+  });
+
+const ok = (data = {}) => json(200, { ok: true, ...data });
+const bad = (status, error) => json(status, { ok: false, error });
+
+const enc = new TextEncoder();
+
+const toHex = (buf) =>
+  Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+
+async function sha256Hex(text) {
+  return toHex(await crypto.subtle.digest("SHA-256", enc.encode(text)));
+}
+
+const randomHex = (bytes = 32) =>
+  toHex(crypto.getRandomValues(new Uint8Array(bytes)));
+
+/** Comparison that does not leak where two strings first differ. */
+function sameSecret(a, b) {
+  const x = String(a ?? ""), y = String(b ?? "");
+  if (x.length !== y.length) return false;
+  let diff = 0;
+  for (let i = 0; i < x.length; i += 1) diff |= x.charCodeAt(i) ^ y.charCodeAt(i);
+  return diff === 0;
+}
+
+const nowSec = () => Math.floor(Date.now() / 1000);
+
+/* ═══════════════════════════════════════════════════════════════ validation ══ */
+
+const RULES = {
+  username: /^[\p{L}\p{N} _.-]{1,32}$/u,
+  email: /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/,
+};
+
+const USERNAME_COOLDOWN_DAYS = 7;
+
+/** authKey is 32 bytes of PBKDF2 output, hex encoded. Anything else is a bug or an attack. */
+const AUTH_KEY = /^[0-9a-f]{64}$/;
+
+function checkUsername(name) {
+  const trimmed = String(name || "").trim();
+  if (!trimmed) return "Pick a username.";
+  if (trimmed.length > 32) return "Username can be at most 32 characters.";
+  if (!RULES.username.test(trimmed))
+    return "Username can use letters, numbers, spaces, dots, dashes and underscores.";
+  return null;
+}
+
+/** Social links are shown on world-readable profiles, so they are pinned to a host. */
+function safeSocial(value, hosts) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  let url;
+  try { url = new URL(/^https?:\/\//i.test(raw) ? raw : "https://" + raw); }
+  catch { return ""; }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!hosts.some((h) => host === h || host.endsWith("." + h))) return "";
+  url.protocol = "https:";
+  url.username = ""; url.password = "";
+  return url.toString();
+}
+
+/* ══════════════════════════════════════════════════════════════ rate limits ══ */
+
+/**
+ * Fixed window, one row per (key, minute). Fails open: a database hiccup must
+ * not lock everybody out of their own accounts.
+ */
+async function underLimit(env, key, limit, windowSec = 60) {
+  const bucket = Math.floor(nowSec() / windowSec);
+  const k = `${key}:${bucket}`;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO ratelimits (k, count, expires) VALUES (?, 1, ?)
+       ON CONFLICT(k) DO UPDATE SET count = count + 1`
+    ).bind(k, nowSec() + windowSec * 3).run();
+
+    const row = await env.DB.prepare(`SELECT count FROM ratelimits WHERE k = ?`).bind(k).first();
+    return (row?.count ?? 0) <= limit;
+  } catch (err) {
+    console.warn("rate limit unavailable", err?.message);
+    return true;
+  }
+}
+
+const clientIp = (request) => request.headers.get("CF-Connecting-IP") || "unknown";
+
+/* ═══════════════════════════════════════════════════════════════ sessions ══ */
+
+const SESSION_COOKIE = "__Host-lucrit";
+const SESSION_DAYS = 30;
+
+function cookieHeader(token, maxAgeSec) {
+  const parts = [
+    `${SESSION_COOKIE}=${token}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=Lax",
+    `Max-Age=${maxAgeSec}`,
+  ];
+  return parts.join("; ");
+}
+
+function readCookie(request, name) {
+  const raw = request.headers.get("Cookie") || "";
+  for (const part of raw.split(";")) {
+    const [k, ...rest] = part.trim().split("=");
+    if (k === name) return rest.join("=");
+  }
+  return null;
+}
+
+async function startSession(env, userId) {
+  const token = randomHex(32);
+  const hash = await sha256Hex(token);
+  const now = nowSec();
+  await env.DB.prepare(
+    `INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)`
+  ).bind(hash, userId, now, now + SESSION_DAYS * 86400).run();
+  return token;
+}
+
+async function endSession(env, token) {
+  if (!token) return;
+  await env.DB.prepare(`DELETE FROM sessions WHERE token_hash = ?`)
+    .bind(await sha256Hex(token)).run();
+}
+
+/** The signed-in user, or null. Expired rows are swept as they are found. */
+async function currentUser(request, env) {
+  const token = readCookie(request, SESSION_COOKIE);
+  if (!token) return null;
+
+  const hash = await sha256Hex(token);
+  const row = await env.DB.prepare(
+    `SELECT u.*, s.expires_at AS session_expires
+       FROM sessions s JOIN users u ON u.id = s.user_id
+      WHERE s.token_hash = ?`
+  ).bind(hash).first();
+
+  if (!row) return null;
+  if (row.session_expires <= nowSec()) {
+    await env.DB.prepare(`DELETE FROM sessions WHERE token_hash = ?`).bind(hash).run();
+    return null;
+  }
+  return row;
+}
+
+/** The shape the site's UI already expects. Note there is no email in here. */
+function publicSession(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    email: row.email,
+    username: row.username,
+    bio: row.bio || "",
+    avatar: row.avatar || null,
+    youtube: row.youtube || "",
+    tiktok: row.tiktok || "",
+    createdAt: row.created_at,
+    usernameChangedAt: row.username_changed_at || null,
+    publishes: [],
+    remote: true,
+  };
+}
+
+/* ══════════════════════════════════════════════════════════════ turnstile ══ */
+
+/**
+ * Verifies the human check. Fails OPEN when no secret is configured, so the
+ * site keeps working before Turnstile is set up; once the secret exists, a
+ * missing or bad token is refused.
+ */
+async function humanOk(env, token, ip) {
+  if (!env.TURNSTILE_SECRET) return true;
+  if (!token) return false;
+  try {
+    const body = new FormData();
+    body.append("secret", env.TURNSTILE_SECRET);
+    body.append("response", token);
+    if (ip && ip !== "unknown") body.append("remoteip", ip);
+
+    const res = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST", body,
+    });
+    const data = await res.json();
+    return Boolean(data.success);
+  } catch (err) {
+    console.warn("turnstile unreachable", err?.message);
+    return true;   // never lock real people out because Cloudflare blinked
+  }
+}
+
+/* ═════════════════════════════════════════════════════════════════ google ══ */
+
+/**
+ * Verifies a Google Identity Services ID token.
+ *
+ * We use the browser-issued credential rather than an OAuth code exchange
+ * specifically so there is no client secret anywhere in this system — only the
+ * public client id. Verification is a signature check against Google's
+ * published keys, which is cheap enough for the CPU budget.
+ */
+let jwksCache = { at: 0, keys: null };
+
+async function googleKeys() {
+  if (jwksCache.keys && Date.now() - jwksCache.at < 3600_000) return jwksCache.keys;
+  const res = await fetch("https://www.googleapis.com/oauth2/v3/certs");
+  if (!res.ok) throw new Error("Could not reach Google.");
+  const { keys } = await res.json();
+  jwksCache = { at: Date.now(), keys };
+  return keys;
+}
+
+const b64urlToBytes = (s) => {
+  const pad = s.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(pad + "=".repeat((4 - (pad.length % 4)) % 4));
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+};
+
+async function verifyGoogleToken(credential, clientId) {
+  const [headerB64, payloadB64, sigB64] = String(credential || "").split(".");
+  if (!headerB64 || !payloadB64 || !sigB64) throw new Error("That Google sign-in looked wrong.");
+
+  const header = JSON.parse(new TextDecoder().decode(b64urlToBytes(headerB64)));
+  const payload = JSON.parse(new TextDecoder().decode(b64urlToBytes(payloadB64)));
+
+  const jwk = (await googleKeys()).find((k) => k.kid === header.kid);
+  if (!jwk) throw new Error("That Google sign-in could not be verified.");
+
+  const key = await crypto.subtle.importKey(
+    "jwk", jwk, { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" }, false, ["verify"]
+  );
+  const valid = await crypto.subtle.verify(
+    "RSASSA-PKCS1-v1_5", key, b64urlToBytes(sigB64), enc.encode(`${headerB64}.${payloadB64}`)
+  );
+  if (!valid) throw new Error("That Google sign-in could not be verified.");
+
+  if (payload.aud !== clientId) throw new Error("That sign-in was issued for a different site.");
+  if (!/^(https:\/\/)?accounts\.google\.com$/.test(String(payload.iss)))
+    throw new Error("That sign-in did not come from Google.");
+  if (Number(payload.exp) <= nowSec()) throw new Error("That sign-in expired. Try again.");
+  if (!payload.email) throw new Error("Google did not share an email address.");
+
+  return payload;
+}
+
+/* ══════════════════════════════════════════════════════════════════ email ══ */
+
+/** Sends the reset mail through Resend. Absent key means the feature is off. */
+async function sendResetEmail(env, to, link) {
+  if (!env.RESEND_API_KEY) return false;
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.MAIL_FROM || "Lucrit Script <onboarding@resend.dev>",
+      to: [to],
+      subject: "Reset your Lucrit Script password",
+      text: `Someone asked to reset the password for this Lucrit Script account.
+
+Open this link to choose a new one. It works once and expires in an hour:
+
+${link}
+
+If it wasn't you, ignore this — nothing has changed.`,
+    }),
+  });
+  if (!res.ok) {
+    console.warn("resend rejected the email", res.status, (await res.text()).slice(0, 200));
+    return false;
+  }
+  return true;
+}
+
+/* ═══════════════════════════════════════════════════════════════════ users ══ */
+
+const newId = () => "u_" + randomHex(8);
+
+/** Turns whatever Google calls someone into a username this site accepts. */
+function seedUsername(payload) {
+  const raw = payload.name || String(payload.email).split("@")[0] || "player";
+  const clean = raw.replace(/[^\p{L}\p{N} _.-]/gu, "").replace(/\s+/g, " ").trim().slice(0, 28);
+  return clean || "player";
+}
+
+/** Finds a free username near the one asked for. */
+async function freeUsername(env, base) {
+  for (let i = 0; i < 25; i += 1) {
+    const candidate = i === 0 ? base : `${base.slice(0, 28)}${i + 1}`;
+    const taken = await env.DB.prepare(`SELECT 1 FROM users WHERE username_lower = ?`)
+      .bind(candidate.toLowerCase()).first();
+    if (!taken) return candidate;
+  }
+  return `${base.slice(0, 22)}${randomHex(3)}`;
+}
+
+/* ════════════════════════════════════════════════════════════════ handlers ══ */
+
+/**
+ * The per-account salt the browser needs before it can derive an authKey.
+ *
+ * Derived from the email rather than stored, so the answer is identical for
+ * addresses that have an account and addresses that do not. Asking this
+ * question tells an attacker nothing.
+ */
+async function handleSalt(request, env) {
+  const { email } = await request.json().catch(() => ({}));
+  if (!RULES.email.test(String(email || "")))
+    return bad(400, "That email address doesn't look right.");
+  return ok({ salt: await sha256Hex("lucrit:v1:" + String(email).trim().toLowerCase()) });
+}
+
+async function handleSignUp(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `signup:${ip}`, 5, 600)))
+    return bad(429, "Too many attempts. Wait a few minutes.");
+
+  const { username, email, authKey, turnstile } = await request.json().catch(() => ({}));
+
+  const nameProblem = checkUsername(username);
+  if (nameProblem) return bad(400, nameProblem);
+  if (!RULES.email.test(String(email || "")))
+    return bad(400, "That email address doesn't look right.");
+  if (!AUTH_KEY.test(String(authKey || "")))
+    return bad(400, "Something went wrong securing your password. Reload and try again.");
+  if (!(await humanOk(env, turnstile, ip)))
+    return bad(400, "Please complete the human check.");
+
+  const name = String(username).trim();
+  const mail = String(email).trim();
+  const salt = randomHex(16);
+  const hash = await sha256Hex(salt + ":" + authKey);
+  const id = newId();
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO users (id, email, email_lower, auth_hash, auth_salt, username,
+                          username_lower, bio, youtube, tiktok, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, '', '', '', ?)`
+    ).bind(id, mail, mail.toLowerCase(), hash, salt, name, name.toLowerCase(),
+           new Date().toISOString()).run();
+  } catch (err) {
+    const msg = String(err?.message || "");
+    // The database decides who owns a name, not a read-then-write race.
+    if (/username_lower/.test(msg)) return bad(409, "That username is already taken.");
+    if (/email_lower/.test(msg)) return bad(409, "An account already exists for that email.");
+    console.error("signup failed", msg);
+    return bad(500, "Couldn't create that account. Try again.");
+  }
+
+  const row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(id).first();
+  const token = await startSession(env, id);
+  return json(200, { ok: true, data: publicSession(row) },
+    { "Set-Cookie": cookieHeader(token, SESSION_DAYS * 86400) });
+}
+
+async function handleSignIn(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `signin:${ip}`, 10, 600)))
+    return bad(429, "Too many attempts. Wait a few minutes.");
+
+  const { email, authKey } = await request.json().catch(() => ({}));
+  const wrong = "Email or password is incorrect.";   // same answer either way
+
+  if (!RULES.email.test(String(email || "")) || !AUTH_KEY.test(String(authKey || "")))
+    return bad(400, wrong);
+
+  const row = await env.DB.prepare(`SELECT * FROM users WHERE email_lower = ?`)
+    .bind(String(email).trim().toLowerCase()).first();
+  if (!row || !row.auth_hash) return bad(400, wrong);
+
+  const expect = await sha256Hex(row.auth_salt + ":" + authKey);
+  if (!sameSecret(expect, row.auth_hash)) return bad(400, wrong);
+
+  const token = await startSession(env, row.id);
+  return json(200, { ok: true, data: publicSession(row) },
+    { "Set-Cookie": cookieHeader(token, SESSION_DAYS * 86400) });
+}
+
+async function handleGoogle(request, env) {
+  if (!env.GOOGLE_CLIENT_ID) return bad(503, "Google sign-in isn't configured yet.");
+
+  const { credential } = await request.json().catch(() => ({}));
+  let payload;
+  try { payload = await verifyGoogleToken(credential, env.GOOGLE_CLIENT_ID); }
+  catch (err) { return bad(400, err.message); }
+
+  const mail = String(payload.email).trim();
+  const lower = mail.toLowerCase();
+
+  // Match on Google's subject first, then fall back to the email so that
+  // signing up with a password and later using Google lands on one account
+  // rather than two.
+  let row = await env.DB.prepare(`SELECT * FROM users WHERE google_sub = ?`)
+    .bind(payload.sub).first();
+
+  if (!row) {
+    row = await env.DB.prepare(`SELECT * FROM users WHERE email_lower = ?`).bind(lower).first();
+    if (row) {
+      await env.DB.prepare(`UPDATE users SET google_sub = ? WHERE id = ?`)
+        .bind(payload.sub, row.id).run();
+    }
+  }
+
+  if (!row) {
+    const name = await freeUsername(env, seedUsername(payload));
+    const id = newId();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO users (id, email, email_lower, google_sub, username, username_lower,
+                            bio, avatar, youtube, tiktok, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, '', '', ?)`
+      ).bind(id, mail, lower, payload.sub, name, name.toLowerCase(),
+             payload.picture || null, new Date().toISOString()).run();
+    } catch (err) {
+      console.error("google signup failed", err?.message);
+      return bad(500, "Couldn't finish setting up that account. Try again.");
+    }
+    row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(id).first();
+  }
+
+  const token = await startSession(env, row.id);
+  return json(200, { ok: true, data: publicSession(row) },
+    { "Set-Cookie": cookieHeader(token, SESSION_DAYS * 86400) });
+}
+
+async function handleSignOut(request, env) {
+  await endSession(env, readCookie(request, SESSION_COOKIE));
+  return json(200, { ok: true }, { "Set-Cookie": cookieHeader("", 0) });
+}
+
+async function handleSession(request, env) {
+  const row = await currentUser(request, env);
+  return ok({ data: publicSession(row) });
+}
+
+async function handleUsername(request, env) {
+  const me = await currentUser(request, env);
+  if (!me) return bad(401, "You need to be signed in.");
+
+  const { username } = await request.json().catch(() => ({}));
+  const problem = checkUsername(username);
+  if (problem) return bad(400, problem);
+
+  if (me.username_changed_at) {
+    const elapsed = Date.now() - new Date(me.username_changed_at).getTime();
+    const left = USERNAME_COOLDOWN_DAYS - elapsed / 86400000;
+    if (left > 0) {
+      const days = Math.ceil(left);
+      return bad(429, `You can change your username again in ${days} day${days === 1 ? "" : "s"}.`);
+    }
+  }
+
+  const name = String(username).trim();
+  const changedAt = new Date().toISOString();
+  try {
+    await env.DB.prepare(
+      `UPDATE users SET username = ?, username_lower = ?, username_changed_at = ? WHERE id = ?`
+    ).bind(name, name.toLowerCase(), changedAt, me.id).run();
+  } catch (err) {
+    if (/username_lower/.test(String(err?.message))) return bad(409, "That username is already taken.");
+    throw err;
+  }
+
+  const row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(me.id).first();
+  return ok({ data: publicSession(row) });
+}
+
+async function handleProfile(request, env) {
+  const me = await currentUser(request, env);
+  if (!me) return bad(401, "You need to be signed in.");
+
+  const patch = await request.json().catch(() => ({}));
+  const bio = patch.bio === undefined ? me.bio : String(patch.bio).slice(0, 300);
+  const avatar = patch.avatar === undefined ? me.avatar : patch.avatar;
+  const youtube = patch.youtube === undefined ? me.youtube
+    : safeSocial(patch.youtube, ["youtube.com", "youtu.be"]);
+  const tiktok = patch.tiktok === undefined ? me.tiktok
+    : safeSocial(patch.tiktok, ["tiktok.com"]);
+
+  await env.DB.prepare(
+    `UPDATE users SET bio = ?, avatar = ?, youtube = ?, tiktok = ? WHERE id = ?`
+  ).bind(bio, avatar, youtube, tiktok, me.id).run();
+
+  const row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(me.id).first();
+  return ok({ data: publicSession(row) });
+}
+
+async function handlePassword(request, env) {
+  const me = await currentUser(request, env);
+  if (!me) return bad(401, "You need to be signed in.");
+
+  const { currentAuthKey, nextAuthKey } = await request.json().catch(() => ({}));
+  if (!AUTH_KEY.test(String(nextAuthKey || "")))
+    return bad(400, "Something went wrong securing your new password. Reload and try again.");
+
+  // Google-only accounts have no password to prove; they are setting one.
+  if (me.auth_hash) {
+    if (!AUTH_KEY.test(String(currentAuthKey || "")))
+      return bad(400, "Current password is incorrect.");
+    const expect = await sha256Hex(me.auth_salt + ":" + currentAuthKey);
+    if (!sameSecret(expect, me.auth_hash)) return bad(400, "Current password is incorrect.");
+  }
+
+  const salt = randomHex(16);
+  const hash = await sha256Hex(salt + ":" + nextAuthKey);
+  await env.DB.prepare(`UPDATE users SET auth_hash = ?, auth_salt = ? WHERE id = ?`)
+    .bind(hash, salt, me.id).run();
+
+  // Changing a password ends every other session — that is the point of doing it.
+  const keep = await sha256Hex(readCookie(request, SESSION_COOKIE) || "");
+  await env.DB.prepare(`DELETE FROM sessions WHERE user_id = ? AND token_hash != ?`)
+    .bind(me.id, keep).run();
+
+  return ok();
+}
+
+async function handleResetRequest(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `reset:${ip}`, 5, 900)))
+    return bad(429, "Too many attempts. Wait a few minutes.");
+
+  const { email } = await request.json().catch(() => ({}));
+  if (!RULES.email.test(String(email || "")))
+    return bad(400, "That email address doesn't look right.");
+
+  const row = await env.DB.prepare(`SELECT * FROM users WHERE email_lower = ?`)
+    .bind(String(email).trim().toLowerCase()).first();
+
+  // Always the same answer, whether or not that account exists.
+  const pretend = ok({ data: { pending: true } });
+  if (!row) return pretend;
+
+  const token = randomHex(32);
+  await env.DB.prepare(
+    `INSERT INTO resets (token_hash, user_id, expires_at, used) VALUES (?, ?, ?, 0)`
+  ).bind(await sha256Hex(token), row.id, nowSec() + 3600).run();
+
+  const base = env.SITE_URL || new URL(request.url).origin;
+  const sent = await sendResetEmail(env, row.email, `${base}/#reset=${token}`);
+  if (!sent) {
+    return ok({ data: { pending: true },
+      note: "Reset email isn't switched on yet — add a RESEND_API_KEY to enable it." });
+  }
+  return pretend;
+}
+
+async function handleResetConfirm(request, env) {
+  const { token, authKey } = await request.json().catch(() => ({}));
+  if (!AUTH_KEY.test(String(authKey || "")))
+    return bad(400, "Something went wrong securing your new password. Reload and try again.");
+
+  const row = await env.DB.prepare(
+    `SELECT * FROM resets WHERE token_hash = ?`
+  ).bind(await sha256Hex(String(token || ""))).first();
+
+  if (!row || row.used || row.expires_at <= nowSec())
+    return bad(400, "That reset link has expired. Ask for a new one.");
+
+  const salt = randomHex(16);
+  const hash = await sha256Hex(salt + ":" + authKey);
+
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE users SET auth_hash = ?, auth_salt = ? WHERE id = ?`)
+      .bind(hash, salt, row.user_id),
+    env.DB.prepare(`UPDATE resets SET used = 1 WHERE token_hash = ?`).bind(row.token_hash),
+    env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(row.user_id),
+  ]);
+
+  return ok();
+}
+
+/* ══════════════════════════════════════════════════════════════════════ AI ══ */
+
+const CF_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/qwen/qwen2.5-coder-32b-instruct",
+];
+const MAX_TOKENS = 4000;
+const MAX_QUESTION = 14000;
+const MAX_HISTORY = 12;
+
+const SYSTEM_PROMPT = `You are the Lucrit Script assistant, built into a Roblox
+script library. You help people write Luau.
+
+EVERYTHING YOU WRITE IS A LOCALSCRIPT. Client-side, every time. This is not a
+preference to weigh against others — it is the one format this library ships,
+and it holds even when the task fights it:
+
+- Say where it goes in the first comment: StarterPlayerScripts, or
+  StarterCharacterScripts when it needs the character, or StarterGui when it
+  owns a UI.
+- Use the client's own surface confidently: Players.LocalPlayer, PlayerGui,
+  the Camera, UserInputService, ContextActionService, RunService.RenderStepped
+  and .Heartbeat, TweenService, reads from ReplicatedStorage.
+- When a job would normally live on the server — DataStores, granting
+  currency, anything authoritative — still write the LocalScript. Fire a
+  RemoteEvent or call a RemoteFunction for that one step, and add a single
+  comment line naming the remote it expects. Never switch to a server Script,
+  never split the answer into two files, and never refuse on these grounds.
+- Never call a service the client cannot reach. DataStoreService,
+  ServerStorage, ServerScriptService, MessagingService, :SetAsync, :GetAsync
+  and Player:Kick all throw from a LocalScript, so a script using them is
+  broken no matter how good it looks. Route those through a remote instead.
+- If a request truly has no client-side form at all, write the closest
+  LocalScript that does work and say in one line what the server still has to
+  provide. Keep going; do not stop at the obstacle.
+
+This is a conversation, not a series of unrelated requests. When someone
+follows up, they are almost always talking about the script you just wrote:
+
+- Change that script. Do not start a different one, and do not go back to an
+  earlier version they have moved on from.
+- Return the COMPLETE updated script every time, not a diff, not a fragment,
+  not "...rest unchanged". They paste the whole thing into Roblox.
+- Keep everything they did not ask you to change — variable names, comments,
+  settings, the placement comment. A follow-up is an edit, not a rewrite.
+- A revision is still a LocalScript. Every rule above still applies.
+- If they ask a plain question about the script, answer it in a sentence or
+  two and only re-send the code if it changed.
+
+How to answer:
+- Lead with working code. A short sentence of context, then the script.
+- Write modern Luau: type annotations where they help, task.wait over wait,
+  :Connect stored so it can be disconnected, no deprecated API.
+- Prefer a complete, ambitious script over a minimal one. Handle the edge
+  cases a real game hits: the character respawning, the player leaving, the
+  GUI already existing, a connection needing cleanup.
+- If the request is vague, write the most useful version you can and note the
+  one assumption you made. Do not interrogate the person first.
+- Be brief between code blocks. No filler, no restating the question.
+
+Never claim to know a specific script, author, or statistic on this site; you
+cannot see the library. Point people at the search box for that.`;
+
+function cleanHistory(history) {
+  if (!Array.isArray(history)) return [];
+  return history
+    .filter((m) => m && (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
+    .slice(-MAX_HISTORY)
+    .map((m) => ({ role: m.role, content: m.content.slice(0, MAX_QUESTION) }));
+}
+
+/**
+ * Both Workers AI and every OpenAI-compatible provider stream Server-Sent
+ * Events, but they disagree about where the text sits in each frame. This
+ * unwraps either shape and emits plain text, which is all the browser wants.
+ */
+function sseToText(upstream) {
+  const reader = upstream.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = "";
+
+  return new ReadableStream({
+    async pull(controller) {
+      // Keep reading until there is actually something to emit, or the upstream
+      // ends. Frames that carry no text must not leave the consumer waiting on
+      // a pull that never comes — that reads as the reply freezing.
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) { controller.close(); return; }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        let emitted = false;
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const frame = JSON.parse(data);
+            let text = frame.response ?? frame.choices?.[0]?.delta?.content;
+            // Occasionally a token arrives already parsed rather than as a
+            // string: a model emitting `{}` comes back as an empty object.
+            // Encoding that directly writes "[object Object]" into somebody's
+            // script, so put it back first.
+            if (text != null && typeof text !== "string") {
+              try { text = JSON.stringify(text); } catch { text = null; }
+            }
+            if (typeof text === "string" && text) {
+              controller.enqueue(encoder.encode(text));
+              emitted = true;
+            }
+          } catch { /* a partial frame — the next chunk completes it */ }
+        }
+        if (emitted) return;
+      }
+    },
+    cancel() { reader.cancel().catch(() => {}); },
+  });
+}
+
+async function handleAI(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `ai:${ip}`, 12, 60)))
+    return bad(429, "You're asking faster than I can answer — give it a few seconds.");
+
+  const body = await request.json().catch(() => null);
+  const question = String(body?.question || "").trim();
+  if (!question) return bad(400, "Ask me something.");
+  if (question.length > MAX_QUESTION)
+    return bad(413, "That's too long — trim it to the part you need help with.");
+
+  const messages = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...cleanHistory(body?.history),
+    { role: "user", content: question },
+  ];
+
+  const models = env.AI_MODEL ? [env.AI_MODEL] : CF_MODELS;
+  let stream = null, lastErr;
+  for (const model of models) {
+    try {
+      stream = await env.AI.run(model, {
+        messages, stream: true, max_tokens: MAX_TOKENS, temperature: 0.3,
+      });
+      if (stream) break;
+    } catch (err) {
+      console.warn("model unavailable", model, err?.message);
+      lastErr = err;
+    }
+  }
+
+  if (!stream) {
+    const message = /neuron|quota|limit|capacity/i.test(String(lastErr?.message))
+      ? "The AI has hit today's free limit. It resets tomorrow."
+      : "Couldn't reach the model. Try again in a moment.";
+    return bad(502, message);
+  }
+
+  return new Response(sseToText(stream), {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════════════ router ══ */
+
+const ROUTES = {
+  "POST /api/auth/salt": handleSalt,
+  "POST /api/auth/signup": handleSignUp,
+  "POST /api/auth/signin": handleSignIn,
+  "POST /api/auth/google": handleGoogle,
+  "POST /api/auth/signout": handleSignOut,
+  "GET  /api/auth/session": handleSession,
+  "POST /api/account/username": handleUsername,
+  "POST /api/account/profile": handleProfile,
+  "POST /api/account/password": handlePassword,
+  "POST /api/auth/reset/request": handleResetRequest,
+  "POST /api/auth/reset/confirm": handleResetConfirm,
+  "POST /api/ai": handleAI,
+  "GET  /api/config": async (_request, env) => ok({
+    data: {
+      googleClientId: env.GOOGLE_CLIENT_ID || "",
+      turnstileSiteKey: env.TURNSTILE_SITE_KEY || "",
+      resetEmail: Boolean(env.RESEND_API_KEY),
+    },
+  }),
+};
+
+/** Headers GitHub Pages could never send us. */
+function harden(response) {
+  const out = new Response(response.body, response);
+  out.headers.set("X-Content-Type-Options", "nosniff");
+  out.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  out.headers.set("X-Frame-Options", "DENY");
+  out.headers.set("Permissions-Policy", "geolocation=(), microphone=(), camera=()");
+  return out;
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+
+    if (!url.pathname.startsWith("/api/")) {
+      return harden(await env.ASSETS.fetch(request));
+    }
+
+    const key = `${request.method.padEnd(4)} ${url.pathname}`.replace(/\s+/, " ");
+    const handler =
+      ROUTES[`${request.method} ${url.pathname}`] ||
+      ROUTES[`${request.method}  ${url.pathname}`] ||
+      ROUTES[key];
+
+    if (!handler) {
+      // Distinguish "no such endpoint" from "wrong verb" — it saves an hour
+      // of debugging the first time somebody gets it wrong.
+      const anyVerb = Object.keys(ROUTES).some((k) => k.endsWith(" " + url.pathname));
+      return anyVerb ? bad(405, "Wrong method for that endpoint.") : bad(404, "No such endpoint.");
+    }
+
+    try {
+      return await handler(request, env);
+    } catch (err) {
+      console.error("unhandled", url.pathname, err?.stack || err?.message);
+      return bad(500, "Something went wrong. Try again.");
+    }
+  },
+};
