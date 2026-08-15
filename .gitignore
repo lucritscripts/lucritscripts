@@ -1,0 +1,10 @@
+# Build output. .dist/lucrit-site.zip is just the tracked files zipped up for
+# Cloudflare Pages direct upload — it is rebuilt from the tree every deploy, so
+# committing it only churns a ~350KB binary through history and makes every
+# diff look like something changed when nothing did.
+.dist/
+
+# Left over from the Firebase era. The site runs on Cloudflare now; these are
+# kept locally for reference (functions/unlocks.js is where the LootLabs flow
+# was first worked out) but have no business in the deployed tree.
+functions/node_modules/

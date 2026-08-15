@@ -46,6 +46,8 @@
  *   GOOGLE_CLIENT_ID   plain var — public by design
  *   SITE_URL           plain var — used in reset links
  *   MAIL_FROM          plain var — the From: address for reset email
+ *   LOOTLABS_TOKEN     secret — sponsor unlocks (optional; see the unlock section)
+ *   ADMIN_USER_ID      plain var — the one account that can remove any script
  */
 
 /* ══════════════════════════════════════════════════════════ small helpers ══ */
@@ -248,6 +250,29 @@ async function humanOk(env, token, ip) {
     console.warn("turnstile unreachable", err?.message);
     return true;   // never lock real people out because Cloudflare blinked
   }
+}
+
+/**
+ * The first-visit gate asks here before letting anyone in.
+ *
+ * The point of routing it through the server is that the verdict stops being
+ * something the browser can simply assert. The client still records a local
+ * note so returning visitors aren't asked again — that note is a convenience,
+ * not the check, and forging it only skips a challenge this endpoint would
+ * have passed anyway.
+ *
+ * Like everywhere else, this fails open with no secret configured.
+ */
+async function handleHuman(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `human:${ip}`, 30, 600)))
+    return bad(429, "Too many checks from this connection. Try again shortly.");
+
+  const { turnstile } = await request.json().catch(() => ({}));
+  if (!(await humanOk(env, turnstile, ip)))
+    return bad(400, "That check didn't pass. Please try again.");
+
+  return ok({ data: { human: true } });
 }
 
 /* ═════════════════════════════════════════════════════════════════ google ══ */
@@ -803,9 +828,424 @@ async function handleAI(request, env) {
   });
 }
 
+/* ══════════════════════════════════════════════════════════════════ scripts ══ */
+
+/**
+ * The library.
+ *
+ * The rule this whole section exists to enforce: `code` leaves the database
+ * through exactly one door, handleScriptCode, and that door asks for a grant.
+ * Every other query names its columns explicitly rather than using SELECT *,
+ * so adding a listing endpoint later cannot leak the code by accident.
+ */
+const SCRIPT_COLUMNS = `s.id, s.author_id, s.title, s.game, s.category, s.descr,
+  s.tags, s.keyless, s.thumbnail, s.views, s.copies, s.removed, s.created_at,
+  u.username AS author`;
+
+const SCRIPT_LIMITS = { title: 70, game: 90, descr: 6000, code: 200000, tag: 24 };
+const MIN_DESC_WORDS = 100;
+const GRANT_HOURS = 24;
+
+/** The row shape the site's cards and script page already expect. */
+function publicScript(row, extra = {}) {
+  if (!row) return null;
+  let tags = [];
+  try { tags = JSON.parse(row.tags || "[]"); } catch { tags = []; }
+  return {
+    id: row.id,
+    title: row.title,
+    game: row.game,
+    category: row.category,
+    desc: row.descr,
+    tags: Array.isArray(tags) ? tags : [],
+    keyless: Boolean(row.keyless),
+    thumbnail: row.thumbnail || "",
+    author: row.author || "",
+    authorId: row.author_id,
+    views: row.views || 0,
+    copies: row.copies || 0,
+    likes: row.likes || 0,
+    added: String(row.created_at || "").slice(0, 10),
+    // Deliberately absent: code. The listing must never carry it.
+    ...extra,
+  };
+}
+
+/**
+ * Who a grant belongs to.
+ *
+ * Signed in, it is tied to the session so it follows you between devices as
+ * long as you stay signed in. Signed out, there is nothing to tie it to but
+ * the connection, so it is a hash of the IP — hashed because a raw address in
+ * a table we query by is more personal data than this feature needs.
+ */
+async function grantSubject(request, env, user) {
+  if (user) return "u:" + user.id;
+  return "a:" + (await sha256Hex("grant-subject:" + clientIp(request)));
+}
+
+async function handleScriptList(request, env) {
+  const url = new URL(request.url);
+  const category = String(url.searchParams.get("category") || "").slice(0, 40);
+  const author = String(url.searchParams.get("author") || "").slice(0, 40);
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+
+  const where = ["s.removed = 0"];
+  const binds = [];
+  if (category) { where.push("s.category = ?"); binds.push(category); }
+  if (author) { where.push("s.author_id = ?"); binds.push(author); }
+
+  const { results } = await env.DB.prepare(
+    `SELECT ${SCRIPT_COLUMNS},
+            (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
+       FROM scripts s JOIN users u ON u.id = s.author_id
+      WHERE ${where.join(" AND ")}
+      ORDER BY s.created_at DESC
+      LIMIT ?`
+  ).bind(...binds, limit).all();
+
+  return ok({ data: (results || []).map((r) => publicScript(r)) });
+}
+
+async function handleScriptGet(request, env, { id }) {
+  const row = await env.DB.prepare(
+    `SELECT ${SCRIPT_COLUMNS},
+            (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
+       FROM scripts s JOIN users u ON u.id = s.author_id
+      WHERE s.id = ? AND s.removed = 0`
+  ).bind(id).first();
+
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const user = await currentUser(request, env);
+  const subject = await grantSubject(request, env, user);
+  const mine = user && user.id === row.author_id;
+
+  const grant = mine ? null : await env.DB.prepare(
+    `SELECT verified FROM grants WHERE subject = ? AND script_id = ? AND expires > ?`
+  ).bind(subject, id, nowSec()).first();
+
+  // A view is one per subject per script per hour, so a refresh loop cannot
+  // inflate somebody's numbers.
+  if (await underLimit(env, `view:${subject}:${id}`, 1, 3600)) {
+    await env.DB.prepare(`UPDATE scripts SET views = views + 1 WHERE id = ?`).bind(id).run();
+    row.views = (row.views || 0) + 1;
+  }
+
+  return ok({
+    data: publicScript(row, {
+      // The author never has to unlock their own work.
+      unlocked: Boolean(mine || grant),
+      mine: Boolean(mine),
+      liked: user ? Boolean(await env.DB.prepare(
+        `SELECT 1 FROM likes WHERE user_id = ? AND script_id = ?`
+      ).bind(user.id, id).first()) : false,
+    }),
+  });
+}
+
+async function handleScriptPublish(request, env) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in to publish a script.");
+
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `publish:${user.id}`, 10, 3600)))
+    return bad(429, "That's a lot of scripts at once. Try again in a little while.");
+
+  const body = await request.json().catch(() => ({}));
+  const { turnstile } = body;
+  if (!(await humanOk(env, turnstile, ip)))
+    return bad(400, "Please complete the human check.");
+
+  const title = String(body.title || "").trim();
+  const game = String(body.game || "").trim();
+  const descr = String(body.desc || "").trim();
+  const code = String(body.code || "");
+  const category = String(body.category || "utilities").trim();
+
+  if (!title) return bad(400, "Give the script a name.");
+  if (title.length > SCRIPT_LIMITS.title) return bad(400, "That title is too long.");
+  if (!game) return bad(400, "Say which Roblox game it's for.");
+  if (game.length > SCRIPT_LIMITS.game) return bad(400, "That game name is too long.");
+
+  const words = descr.split(/\s+/).filter(Boolean).length;
+  if (words < MIN_DESC_WORDS)
+    return bad(400, `The description needs at least ${MIN_DESC_WORDS} words.`);
+  if (descr.length > SCRIPT_LIMITS.descr) return bad(400, "That description is too long.");
+
+  if (!code.trim()) return bad(400, "Paste the Luau code.");
+  if (code.length > SCRIPT_LIMITS.code) return bad(400, "That script is too large to publish.");
+
+  const tags = (Array.isArray(body.tags) ? body.tags : [])
+    .map((t) => String(t || "").trim().slice(0, SCRIPT_LIMITS.tag))
+    .filter(Boolean)
+    .slice(0, 6);
+
+  // A thumbnail is either a data URL the person uploaded or a Roblox CDN link.
+  // Anything else would let a publisher point the whole library at a tracker.
+  const thumbRaw = String(body.thumbnail || "").trim();
+  const thumbnail =
+    /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(thumbRaw) && thumbRaw.length < 400000
+      ? thumbRaw
+      : safeSocial(thumbRaw, ["roblox.com", "rbxcdn.com"]);
+
+  const id = "s_" + randomHex(8);
+  await env.DB.prepare(
+    `INSERT INTO scripts (id, author_id, title, game, category, descr, code, tags,
+                          keyless, thumbnail, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(
+    id, user.id, title, game, category, descr, code, JSON.stringify(tags),
+    body.keyless === false ? 0 : 1, thumbnail, new Date().toISOString()
+  ).run();
+
+  const row = await env.DB.prepare(
+    `SELECT ${SCRIPT_COLUMNS}, 0 AS likes
+       FROM scripts s JOIN users u ON u.id = s.author_id WHERE s.id = ?`
+  ).bind(id).first();
+
+  return ok({ data: publicScript(row, { unlocked: true, mine: true, liked: false }) });
+}
+
+/**
+ * The one door the code comes through.
+ *
+ * Authors walk straight in. Everyone else needs an unhandled grant, which only
+ * /api/unlock/claim can mint. This is the difference between a paywall and a
+ * decoration: there is no path that puts the code in a page before this call.
+ */
+async function handleScriptCode(request, env, { id }) {
+  const row = await env.DB.prepare(
+    `SELECT id, author_id, code FROM scripts WHERE id = ? AND removed = 0`
+  ).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const user = await currentUser(request, env);
+  if (user && user.id === row.author_id) return ok({ data: { code: row.code } });
+
+  const subject = await grantSubject(request, env, user);
+  const grant = await env.DB.prepare(
+    `SELECT verified FROM grants WHERE subject = ? AND script_id = ? AND expires > ?`
+  ).bind(subject, id, nowSec()).first();
+
+  if (!grant) return bad(403, "Unlock the script first.");
+
+  // Counting here rather than at claim time means the number reflects code
+  // actually collected, not sponsor steps abandoned at the last moment.
+  await env.DB.prepare(`UPDATE scripts SET copies = copies + 1 WHERE id = ?`).bind(id).run();
+  return ok({ data: { code: row.code } });
+}
+
+async function handleScriptDelete(request, env, { id }) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in first.");
+
+  const row = await env.DB.prepare(`SELECT author_id FROM scripts WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const admin = env.ADMIN_USER_ID && user.id === env.ADMIN_USER_ID;
+  if (row.author_id !== user.id && !admin) return bad(403, "That isn't your script.");
+
+  // Soft delete: the row stays so counts and any payout history survive, but
+  // nothing that lists or serves scripts will look at it again.
+  await env.DB.prepare(`UPDATE scripts SET removed = 1 WHERE id = ?`).bind(id).run();
+  return ok({ data: { id } });
+}
+
+async function handleScriptLike(request, env, { id }) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in to like a script.");
+
+  const exists = await env.DB.prepare(
+    `SELECT 1 FROM likes WHERE user_id = ? AND script_id = ?`
+  ).bind(user.id, id).first();
+
+  if (exists) {
+    await env.DB.prepare(`DELETE FROM likes WHERE user_id = ? AND script_id = ?`)
+      .bind(user.id, id).run();
+  } else {
+    const script = await env.DB.prepare(
+      `SELECT 1 FROM scripts WHERE id = ? AND removed = 0`).bind(id).first();
+    if (!script) return bad(404, "That script doesn't exist.");
+    await env.DB.prepare(`INSERT INTO likes (user_id, script_id, at) VALUES (?, ?, ?)`)
+      .bind(user.id, id, nowSec()).run();
+  }
+
+  const { count } = await env.DB.prepare(
+    `SELECT COUNT(*) AS count FROM likes WHERE script_id = ?`).bind(id).first();
+  return ok({ data: { liked: !exists, likes: count } });
+}
+
+async function handleScriptReport(request, env, { id }) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `report:${ip}`, 10, 3600)))
+    return bad(429, "Too many reports from this connection.");
+
+  const user = await currentUser(request, env);
+  const { reason } = await request.json().catch(() => ({}));
+
+  await env.DB.prepare(
+    `INSERT INTO reports (id, script_id, reporter, reason, at) VALUES (?, ?, ?, ?, ?)`
+  ).bind("r_" + randomHex(8), id, user ? user.id : "", String(reason || "").slice(0, 500), nowSec()).run();
+
+  return ok({ data: { reported: true } });
+}
+
+/* ══════════════════════════════════════════════════════════════════ unlocks ══ */
+
+/**
+ * The sponsor step, in three parts.
+ *
+ *   start    the site asks where to send the visitor. We mint a click id,
+ *            remember what it is for, and hand back the provider's link.
+ *   postback the provider's servers call us when the visitor finishes. No
+ *            Origin header, no cookies — it is a machine, not a browser. This
+ *            is safe because it only marks a click id done; reading anything
+ *            back still goes through claim.
+ *   claim    the site says "I finished, click id X". We look it up, and only
+ *            if the provider marked it done do we write a grant.
+ *
+ * WITHOUT A PROVIDER TOKEN CONFIGURED this degrades to an unverified grant, so
+ * the site keeps working — but the grant is recorded with verified = 0 and no
+ * money was ever made. That is a placeholder, not a paywall, and the honest
+ * thing is that it says so in /api/config rather than pretending otherwise.
+ */
+const LOOTLABS_API = "https://creators.lootlabs.gg/api/public";
+const CLICK_TTL_SEC = 3600;
+
+function unlockConfigured(env) {
+  return Boolean(env.LOOTLABS_TOKEN);
+}
+
+async function handleUnlockStart(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `unlock:${ip}`, 30, 600)))
+    return bad(429, "Too many unlocks from this connection. Try again shortly.");
+
+  const { scriptId, provider } = await request.json().catch(() => ({}));
+  const script = await env.DB.prepare(
+    `SELECT id, title FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
+  if (!script) return bad(404, "That script doesn't exist.");
+
+  const user = await currentUser(request, env);
+  const subject = await grantSubject(request, env, user);
+  const clickId = randomHex(16);
+  const now = nowSec();
+
+  await env.DB.prepare(
+    `INSERT INTO unlock_clicks (click_id, script_id, subject, provider, done, at, expires)
+     VALUES (?, ?, ?, ?, 0, ?, ?)`
+  ).bind(clickId, script.id, subject, String(provider || "").slice(0, 20), now, now + CLICK_TTL_SEC).run();
+
+  if (!unlockConfigured(env)) {
+    // Nothing to send them to. Say so plainly instead of inventing a link.
+    return ok({ data: { clickId, url: "", configured: false } });
+  }
+
+  const site = env.SITE_URL || new URL(request.url).origin;
+  try {
+    const res = await fetch(LOOTLABS_API + "/content_locker", {
+      method: "POST",
+      headers: { Authorization: "Bearer " + env.LOOTLABS_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: script.title.slice(0, 60),
+        url: `${site}/?unlocked=${encodeURIComponent(script.id)}&click=${clickId}`,
+        tier_id: 1,
+        number_of_tasks: 1,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const data = await res.json().catch(() => ({}));
+    const url = data?.message?.loot_url || data?.loot_url || "";
+    if (!url) return bad(502, "The sponsor step is unavailable right now.");
+    return ok({ data: { clickId, url, configured: true } });
+  } catch {
+    return bad(502, "Couldn't reach the sponsor step. Try again.");
+  }
+}
+
+/** Called by the provider's servers, never by a browser. */
+async function handleUnlockPostback(request, env) {
+  const url = new URL(request.url);
+  const clickId = String(url.searchParams.get("click_id") || url.searchParams.get("click") || "");
+  if (!clickId) return bad(400, "missing click_id");
+
+  await env.DB.prepare(
+    `UPDATE unlock_clicks SET done = 1 WHERE click_id = ? AND expires > ?`
+  ).bind(clickId, nowSec()).run();
+
+  // Providers expect a bare 200, not our JSON envelope.
+  return new Response("ok", { status: 200, headers: { "Cache-Control": "no-store" } });
+}
+
+async function handleUnlockClaim(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `claim:${ip}`, 40, 600)))
+    return bad(429, "Too many attempts. Try again shortly.");
+
+  const { scriptId, clickId } = await request.json().catch(() => ({}));
+  const script = await env.DB.prepare(
+    `SELECT id FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
+  if (!script) return bad(404, "That script doesn't exist.");
+
+  const user = await currentUser(request, env);
+  const subject = await grantSubject(request, env, user);
+  const now = nowSec();
+
+  let verified = 0;
+  let provider = "";
+
+  if (unlockConfigured(env)) {
+    const click = await env.DB.prepare(
+      `SELECT script_id, subject, provider, done FROM unlock_clicks
+        WHERE click_id = ? AND expires > ?`
+    ).bind(String(clickId || ""), now).first();
+
+    // Every one of these has to hold. A click id for someone else's session, or
+    // for a different script, or one the provider never confirmed, is not proof
+    // of anything.
+    if (!click) return bad(400, "That unlock couldn't be verified.");
+    if (!click.done) return bad(400, "The sponsor step wasn't completed.");
+    if (click.script_id !== script.id) return bad(400, "That unlock was for a different script.");
+    if (!sameSecret(click.subject, subject)) return bad(400, "That unlock belongs to someone else.");
+
+    // Single use, so a completed click id cannot be replayed or shared around.
+    await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(String(clickId)).run();
+    verified = 1;
+    provider = click.provider || "";
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO grants (subject, script_id, provider, verified, at, expires)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(subject, script_id) DO UPDATE SET
+       verified = MAX(grants.verified, excluded.verified),
+       expires = excluded.expires`
+  ).bind(subject, script.id, provider, verified, now, now + GRANT_HOURS * 3600).run();
+
+  return ok({ data: { unlocked: true, verified: Boolean(verified) } });
+}
+
 /* ═══════════════════════════════════════════════════════════════════ router ══ */
 
+/**
+ * Routes with an :id in them. Kept separate from the exact-match table so the
+ * common case stays a plain object lookup.
+ */
+const PATTERNS = [
+  ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptGet],
+  ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
+  ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
+  ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
+  ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/report$/, handleScriptReport],
+];
+
 const ROUTES = {
+  "GET  /api/scripts": handleScriptList,
+  "POST /api/scripts": handleScriptPublish,
+  "POST /api/unlock/start": handleUnlockStart,
+  "GET  /api/unlock/postback": handleUnlockPostback,
+  "POST /api/unlock/claim": handleUnlockClaim,
   "POST /api/auth/salt": handleSalt,
   "POST /api/auth/signup": handleSignUp,
   "POST /api/auth/signin": handleSignIn,
@@ -818,11 +1258,15 @@ const ROUTES = {
   "POST /api/auth/reset/request": handleResetRequest,
   "POST /api/auth/reset/confirm": handleResetConfirm,
   "POST /api/ai": handleAI,
+  "POST /api/human": handleHuman,
   "GET  /api/config": async (_request, env) => ok({
     data: {
       googleClientId: env.GOOGLE_CLIENT_ID || "",
       turnstileSiteKey: env.TURNSTILE_SITE_KEY || "",
       resetEmail: Boolean(env.RESEND_API_KEY),
+      // The site tells people the truth about the sponsor step rather than
+      // showing a paying-looking button that earns nothing.
+      unlockLive: unlockConfigured(env),
     },
   }),
 };
@@ -846,20 +1290,30 @@ export default {
     }
 
     const key = `${request.method.padEnd(4)} ${url.pathname}`.replace(/\s+/, " ");
-    const handler =
+    let handler =
       ROUTES[`${request.method} ${url.pathname}`] ||
       ROUTES[`${request.method}  ${url.pathname}`] ||
       ROUTES[key];
+    let params = {};
+
+    if (!handler) {
+      for (const [method, pattern, fn] of PATTERNS) {
+        const m = url.pathname.match(pattern);
+        if (m && method === request.method) { handler = fn; params = { id: m[1] }; break; }
+      }
+    }
 
     if (!handler) {
       // Distinguish "no such endpoint" from "wrong verb" — it saves an hour
       // of debugging the first time somebody gets it wrong.
-      const anyVerb = Object.keys(ROUTES).some((k) => k.endsWith(" " + url.pathname));
+      const anyVerb =
+        Object.keys(ROUTES).some((k) => k.endsWith(" " + url.pathname)) ||
+        PATTERNS.some(([, pattern]) => pattern.test(url.pathname));
       return anyVerb ? bad(405, "Wrong method for that endpoint.") : bad(404, "No such endpoint.");
     }
 
     try {
-      return await handler(request, env);
+      return await handler(request, env, params);
     } catch (err) {
       console.error("unhandled", url.pathname, err?.stack || err?.message);
       return bad(500, "Something went wrong. Try again.");
