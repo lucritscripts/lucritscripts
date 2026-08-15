@@ -16,6 +16,10 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 import { safeHref, safeImageSrc } from "./safe.js";
 import { drafts as myDrafts, deleteDraft, savedIds } from "./vault.js";
+import {
+  libraryOnline, fetchScript, fetchCode, deleteScript, likeScript, reportScript,
+  startUnlock, claimUnlock,
+} from "./library-api.js";
 
 export const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -155,15 +159,23 @@ function loadTurnstile() {
   return turnstileLoading;
 }
 
-/** Renders Turnstile into any [data-turnstile] the sheet just drew. */
+/**
+ * Renders Turnstile into any [data-turnstile] the sheet just drew.
+ *
+ * Resolves true when a widget is up, false when it could not be — a blocked
+ * script, an ad blocker eating challenges.cloudflare.com, no key configured.
+ * Callers that gate something behind it need to know the difference, or they
+ * sit waiting for a token that is never coming.
+ */
 export async function mountTurnstile(root) {
   const host = root?.querySelector?.("[data-turnstile]");
-  if (!host || host.dataset.mounted === "1") return;
+  if (!host || host.dataset.mounted === "1") return false;
   const key = account.turnstileKey;
-  if (!key) return;
+  if (!key) return false;
 
   try {
     const turnstile = await loadTurnstile();
+    if (!turnstile?.render) return false;
     host.dataset.mounted = "1";
     turnstile.render(host, {
       sitekey: key,
@@ -172,8 +184,10 @@ export async function mountTurnstile(root) {
       "expired-callback": () => { host.dataset.token = ""; },
       "error-callback": () => { host.dataset.token = ""; },
     });
+    return true;
   } catch {
     // Leave the fallback widget in place; the server fails open anyway.
+    return false;
   }
 }
 
@@ -888,13 +902,23 @@ function persistUnlocks() {
 export function createScriptPage({ onRequireAuth }) {
   const sheet = createOverlay({ id: "script", label: "Script", wide: true });
   let current = null;
+  let code = null;         // fetched separately, and only once we're allowed it
+  let busy = false;
 
   function isOwner(s) {
     return Boolean(account.session && s.authorId && s.authorId === account.session.id);
   }
 
+  /**
+   * Whether the code may be shown.
+   *
+   * On a server-backed site this is the server's answer (`s.unlocked`), which
+   * is the only one that counts — the local set below is just a hint so the
+   * page does not flash locked while we ask. On static hosting there is no
+   * server to ask and the local set is all there is.
+   */
   function canSee(s) {
-    return isOwner(s) || unlocked.has(s.id);
+    return isOwner(s) || Boolean(s.unlocked) || unlocked.has(s.id);
   }
 
   function render() {
@@ -914,8 +938,8 @@ export function createScriptPage({ onRequireAuth }) {
         <p class="script__game">${esc(s.game || "Roblox")}</p>
         <div class="sheet__meta">
           <span>@${esc(s.author)}</span><span class="dot"></span>
-          <span>${fmt(stats.totals(s.id).views)} views</span><span class="dot"></span>
-          <span>${fmt(stats.totals(s.id).copies)} copies</span><span class="dot"></span>
+          <span>${fmt(s.views ?? stats.totals(s.id).views)} views</span><span class="dot"></span>
+          <span>${fmt(s.copies ?? stats.totals(s.id).copies)} copies</span><span class="dot"></span>
           <span>${esc(s.added)}</span>
         </div>
       </header>
@@ -929,13 +953,17 @@ export function createScriptPage({ onRequireAuth }) {
           ${isOwner(s) ? `<span class="chip chip--ok">Your script — unlocked automatically</span>` : ""}
           <button class="btn btn--primary" data-act="copy">Copy code</button>
           <button class="btn btn--ghost" data-act="raw">Open raw</button>
-          <button class="btn btn--ghost${account.isSignedIn && stats.hasLiked(s.id, account.session.id) ? " is-on" : ""}" data-act="like">
-            ${account.isSignedIn && stats.hasLiked(s.id, account.session.id) ? "Liked" : "Like"}
-            ${stats.totals(s.id).likes ? ` · ${stats.totals(s.id).likes}` : ""}
+          <button class="btn btn--ghost${s.liked ? " is-on" : ""}" data-act="like">
+            ${s.liked ? "Liked" : "Like"}${s.likes ? ` · ${fmt(s.likes)}` : ""}
           </button>
+          ${isOwner(s) ? `<button class="btn btn--ghost btn--danger" data-act="delete">Delete</button>` : ""}
           <button class="btn btn--ghost" data-act="report">Report</button>
         </div>
-        <div class="script__code">${renderCodeBlock(s.code || "-- no code")}</div>
+        <div class="script__code">${
+          code === null
+            ? `<p class="script__loading">Fetching the code…</p>`
+            : renderCodeBlock(code || "-- no code")
+        }</div>
       ` : `
         <div class="gate">
           <div class="gate__lock" aria-hidden="true">
@@ -944,12 +972,37 @@ export function createScriptPage({ onRequireAuth }) {
           <h3>Get this script</h3>
           <p>Complete one short sponsor step to unlock the code. It pays the person who wrote it.</p>
           <div class="gate__actions">
-            <button class="btn btn--primary" data-act="linkvertise">Unlock with Linkvertise</button>
-            <button class="btn btn--primary btn--alt" data-act="lootlabs">Unlock with Lootlabs</button>
+            <button class="btn btn--primary" data-act="lootlabs" ${busy ? "disabled" : ""}>
+              ${busy ? "Opening…" : "Unlock with Lootlabs"}
+            </button>
+            <button class="btn btn--primary btn--alt" data-act="linkvertise" ${busy ? "disabled" : ""}>
+              ${busy ? "Opening…" : "Unlock with Linkvertise"}
+            </button>
           </div>
           <p class="gate__note">You'll come straight back here with the script open.</p>
         </div>
       `}`;
+  }
+
+  /** The code is never in the listing, so opening an unlocked script fetches it. */
+  async function loadCode() {
+    if (!current || code !== null) return;
+    if (!(await libraryOnline())) { code = current.code || ""; render(); return; }
+    const got = await fetchCode(current.id);
+    code = got === null ? "" : got;
+    render();
+  }
+
+  /** Comes back from the sponsor round-trip and asks the server to confirm it. */
+  async function finishUnlock(clickId) {
+    const res = await claimUnlock(current.id, clickId);
+    if (!res.ok) { toast(res.error || "That unlock couldn't be verified.", "warn"); return false; }
+    current.unlocked = true;
+    if (!res.data.verified) unlocked.add(current.id), persistUnlocks();
+    code = null;
+    render();
+    await loadCode();
+    return true;
   }
 
   sheet.body.addEventListener("click", async (e) => {
@@ -957,49 +1010,101 @@ export function createScriptPage({ onRequireAuth }) {
     if (!act || !current) return;
 
     if (act === "copy") {
-      const ok = await copyText(current.code || "");
-      if (ok) stats.record(current.id, "copy");
+      const ok = await copyText(code || "");
       toast(ok ? "COPIED TO CLIPBOARD" : "Copy blocked — select the code manually", ok ? "ok" : "warn");
     }
 
     if (act === "raw") {
-      const url = URL.createObjectURL(new Blob([current.code || ""], { type: "text/plain;charset=utf-8" }));
+      const url = URL.createObjectURL(new Blob([code || ""], { type: "text/plain;charset=utf-8" }));
       window.open(url, "_blank", "noopener");
       setTimeout(() => URL.revokeObjectURL(url), 30000);
     }
 
     if (act === "like") {
       if (!account.isSignedIn) { onRequireAuth?.(); return; }
-      const me = account.session.id;
-      if (stats.hasLiked(current.id, me)) {
-        stats.unlike(current.id, me);
-        toast("Like removed");
+      if (await libraryOnline()) {
+        const res = await likeScript(current.id);
+        if (res.ok) { current.liked = res.data.liked; current.likes = res.data.likes; }
+        toast(res.ok ? (res.data.liked ? "Liked" : "Like removed") : (res.error || "Couldn't do that"),
+              res.ok ? "ok" : "warn");
       } else {
-        stats.record(current.id, "like", me);
-        toast("Liked");
+        const me = account.session.id;
+        const had = stats.hasLiked(current.id, me);
+        if (had) stats.unlike(current.id, me); else stats.record(current.id, "like", me);
+        current.liked = !had;
+        toast(had ? "Like removed" : "Liked");
       }
       render();
     }
 
-    if (act === "report") toast("Report sent to moderators", "warn");
+    if (act === "delete") {
+      const res = await deleteScript(current.id);
+      if (!res.ok) return toast(res.error || "Couldn't delete that", "warn");
+      toast("Script removed");
+      document.dispatchEvent(new CustomEvent("lucrit:script-removed", { detail: { id: current.id } }));
+      sheet.close();
+    }
+
+    if (act === "report") {
+      await reportScript(current.id, "");
+      toast("Report sent — thanks for flagging it", "warn");
+    }
 
     if (act === "linkvertise" || act === "lootlabs") {
-      // The real flow hands off to the provider and comes back with a token
-      // the Worker verifies. Until that endpoint exists this unlocks locally
-      // and says so, rather than pretending to be secure.
-      unlocked.add(current.id);
-      persistUnlocks();
-      render();
-      toast("Unlocked — server verification arrives with the Worker", "warn");
+      if (busy) return;
+      busy = true; render();
+      try {
+        const res = await startUnlock(current.id, act);
+        if (!res.ok) return toast(res.error || "Couldn't start the unlock.", "warn");
+
+        if (res.data.url) {
+          // Off to the sponsor. They come back to /?unlocked=..&click=..,
+          // which main.js picks up and hands to finishUnlock.
+          location.href = res.data.url;
+          return;
+        }
+
+        // No provider configured. Grant it, but do not claim money changed
+        // hands — the toast says exactly what happened.
+        const done = await finishUnlock(res.data.clickId);
+        if (done) toast("Unlocked — sponsor step isn't live yet, so this one was free", "warn");
+      } finally {
+        busy = false;
+        if (current && !canSee(current)) render();
+      }
     }
   });
 
   return {
-    open(script) {
-      current = script;
-      stats.record(script.id, "view");
+    async open(script) {
+      current = { ...script };
+      code = null;
+      busy = false;
       render();
       sheet.open();
+
+      // Ask the server for the authoritative version: real counts, and whether
+      // this visitor actually holds an unlock.
+      if (await libraryOnline()) {
+        const fresh = await fetchScript(script.id);
+        if (fresh && current && fresh.id === current.id) {
+          current = fresh;
+          render();
+        }
+      } else {
+        stats.record(script.id, "view");
+      }
+      if (canSee(current)) await loadCode();
+    },
+    /** Called when the visitor lands back from a sponsor step. */
+    async resume(scriptId, clickId) {
+      const script = await fetchScript(scriptId);
+      if (!script) return false;
+      current = script;
+      code = null;
+      render();
+      sheet.open();
+      return finishUnlock(clickId);
     },
     close: () => sheet.close(),
   };

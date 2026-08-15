@@ -261,8 +261,9 @@ export async function createApiBackend({ setSession, validateSignUp, RULES }) {
     },
 
     async addPublish(scriptId, session) {
-      // Publishing still lives in the browser's library for now; when scripts
-      // move into D1 this becomes a real call.
+      // Nothing to record. A publish IS the row in the scripts table, and the
+      // dashboard reads someone's publishes by filtering the library on
+      // authorId — so there is no second list that could drift out of step.
       if (!session) return { ok: false, error: "You need to be signed in." };
       return { ok: true };
     },

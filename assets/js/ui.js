@@ -6,10 +6,12 @@ import { BANDS } from "./engine/world.js";
 import { account } from "./account.js";
 import { safeImageSrc } from "./safe.js";
 import { isSaved } from "./vault.js";
-import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLeaderboard } from "./pages.js";
+import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLeaderboard,
+         mountTurnstile, turnstileToken } from "./pages.js";
 import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import { createGamePicker } from "./gamepicker.js";
 import { tileGames, searchGames, searchScripts, gameArt, allGames } from "./games.js";
+import { libraryOnline, fetchScripts, publishScript } from "./library-api.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -30,12 +32,35 @@ const el = (tag, attrs = {}, html) => {
 
 /* ------------------------------------------------------------- library */
 
-/** Every published script. Starts empty; grows through the submit form. */
+/**
+ * Every published script.
+ *
+ * This array is a CACHE of what the server has, not the source of truth. It
+ * used to be the source of truth, which is exactly why a published script was
+ * visible to one person in one tab and vanished on refresh.
+ *
+ * `refreshLibrary()` fills it from /api/scripts. On static hosting there is no
+ * API, so it stays a plain local array and the site behaves as it used to —
+ * the same build has to work in both places.
+ */
 export const library = SCRIPTS.slice();
 
 const listeners = new Set();
 export function onLibraryChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 function libraryChanged() { for (const fn of listeners) fn(library); }
+
+/** Replaces the cache wholesale with what the server just said. */
+export function setLibrary(scripts) {
+  library.length = 0;
+  library.push(...scripts);
+  libraryChanged();
+}
+
+export async function refreshLibrary() {
+  if (!(await libraryOnline())) return false;
+  setLibrary(await fetchScripts());
+  return true;
+}
 
 export function addScript(script) {
   library.unshift(script);
@@ -612,7 +637,9 @@ function buildPublishForm({ onAuth, onPublished }) {
           <label class="radio"><input type="radio" name="keyless" value="no"> Key required</label>
         </fieldset>
 
-        <div class="wide">${captchaMarkup("publish-captcha")}</div>
+        <div class="wide">${account.turnstileKey
+          ? `<div class="turnstile" data-turnstile></div>`
+          : captchaMarkup("publish-captcha")}</div>
 
         <div class="wide publish__actions">
           <button class="btn btn--primary" type="submit">Publish script</button>
@@ -628,6 +655,8 @@ function buildPublishForm({ onAuth, onPublished }) {
     if (!slot) { picker = null; return; }
     picker = createGamePicker({ name: "game", placeholder: "Search Roblox games, or type your own" });
     slot.replaceWith(picker.node);
+    // Turnstile replaces the hand-rolled widget wherever a server can verify it.
+    mountTurnstile(node);
   }
 
   node.addEventListener("click", (e) => {
@@ -676,11 +705,12 @@ function buildPublishForm({ onAuth, onPublished }) {
     const words = wordCount(d.desc);
     if (words < 100) return toast(`Description needs ${100 - words} more word${100 - words === 1 ? "" : "s"}`, "warn");
     if (!String(d.code).trim()) return toast("Paste the Luau code", "warn");
-    if (!captchaPassed(node)) return toast("Complete the human check", "warn");
+    const usingTurnstile = Boolean(account.turnstileKey);
+    if (!usingTurnstile && !captchaPassed(node))
+      return toast("Complete the human check", "warn");
 
     const prev = $("[data-thumb]", node);
-    const script = {
-      id: "s_" + Math.random().toString(36).slice(2, 10),
+    const draft = {
       title: String(d.title).trim(),
       game: String(d.game).trim(),
       category: d.category,
@@ -689,20 +719,52 @@ function buildPublishForm({ onAuth, onPublished }) {
       tags: String(d.tags || "").split(",").map((t) => t.trim()).filter(Boolean).slice(0, 6),
       keyless: d.keyless !== "no",
       thumbnail: prev?.dataset.value || prev?.dataset.auto || robloxThumb(d.place) || "",
-      author: account.session.username,
-      authorId: account.session.id,
-      views: 0, copies: 0, likes: 0, rating: 0,
-      added: new Date().toISOString().slice(0, 10),
+      turnstile: turnstileToken(node),
     };
 
-    addScript(script);
+    const submit = $('[type="submit"]', form);
+    const wasLabel = submit?.textContent;
+    if (submit) { submit.disabled = true; submit.textContent = "Publishing…"; }
+
+    let script;
+    try {
+      if (await libraryOnline()) {
+        // The real path: the script goes to the server, and what comes back is
+        // what everyone else will see.
+        const res = await publishScript(draft);
+        if (!res.ok) {
+          toast(res.error || "Couldn't publish that. Try again.", "warn");
+          return;
+        }
+        script = res.data;
+        addScript(script);
+      } else {
+        // Static hosting, no API. Publish locally and SAY SO — the old code
+        // showed "it's live in the library" here, which was untrue and is how
+        // a published script ended up visible to nobody.
+        script = {
+          ...draft,
+          id: "s_" + Math.random().toString(36).slice(2, 10),
+          author: account.session.username,
+          authorId: account.session.id,
+          views: 0, copies: 0, likes: 0,
+          added: new Date().toISOString().slice(0, 10),
+          localOnly: true,
+        };
+        addScript(script);
+        toast("Saved on this device only — the library isn't reachable", "warn");
+      }
+    } finally {
+      if (submit) { submit.disabled = false; submit.textContent = wasLabel; }
+    }
+
     await account.addPublish(script.id);
     form.reset();
     picker?.reset();
     captchaReset(node);
     render();
     mountPicker();
-    toast("Published — it's live in the library");
+    if (!script.localOnly) toast("Published — it's live in the library");
     onPublished?.(script);
   });
 

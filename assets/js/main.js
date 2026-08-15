@@ -4,7 +4,7 @@ import { World, BANDS } from "./engine/world.js";
 import { SmoothScroll } from "./engine/scroll.js";
 import {
   createLibraryPanel, buildChapters, buildChrome, createChoreography,
-  CHAPTERS, library, onLibraryChange, removeScript, cardMarkup,
+  CHAPTERS, library, onLibraryChange, removeScript, refreshLibrary, cardMarkup,
 } from "./ui.js";
 import { createGameLibrary, createGamePage } from "./browse.js";
 import {
@@ -16,6 +16,7 @@ import { createMyScripts } from "./mine.js";
 import { toggleSaved, getDraft, onVaultChange } from "./vault.js";
 import { account } from "./account.js";
 import { runBotCheck } from "./gate.js";
+import { capturePendingUnlock, takePendingUnlock, deleteScript } from "./library-api.js";
 
 /* ------------------------------------------------------- capabilities */
 
@@ -80,7 +81,13 @@ const dashboard = createDashboard({
   onRequireAuth: () => auth.open("signup"),
   getPublishes: (user) => library.filter((s) => s.authorId === user.id),
   onOpenScript: (s) => scriptPage.open(s),
-  onDeleteScript: (s) => removeScript(s.id),
+  onDeleteScript: async (s) => {
+    // Remove it where it actually lives, then from the cached list. Doing only
+    // the second is what "deleted" used to mean, and it came back on refresh.
+    const res = await deleteScript(s.id);
+    if (res.ok || res.absent) removeScript(s.id);
+    else toast(res.error || "Couldn't delete that", "warn");
+  },
   getScript: (id) => library.find((s) => s.id === id),
   onOpenDraft: (id) => generator.openDraft(getDraft(account.session?.id, id)),
   onGenerate: () => generator.open(),
@@ -305,11 +312,32 @@ runBotCheck().then((how) => {
   if (how !== "skipped") choreography.measure();
 });
 
-const deep = /#script=([\w-]+)/.exec(location.hash);
-if (deep) {
-  const s = library.find((x) => x.id === deep[1]);
-  if (s) scriptPage.open(s);
-}
+// A sponsor step sends people back with ?unlocked=..&click=.. on the URL.
+// Grab it before anything else touches the address bar, so a refresh cannot
+// replay it and the parameters do not linger where they'd be shared around.
+capturePendingUnlock();
+
+// The library lives on the server now, so fetch it before deep links go
+// looking for a script by id.
+refreshLibrary()
+  .then(async () => {
+    const pending = takePendingUnlock();
+    if (pending) {
+      const done = await scriptPage.resume(pending.scriptId, pending.clickId);
+      if (done) toast("Unlocked — here's the script");
+      return;
+    }
+
+    const deep = /#script=([\w-]+)/.exec(location.hash);
+    if (deep) {
+      const s = library.find((x) => x.id === deep[1]);
+      if (s) scriptPage.open(s);
+    }
+  })
+  .catch(() => { /* offline or static hosting — the site still works */ });
+
+// Deleting from the script page has to reach the cached list too.
+document.addEventListener("lucrit:script-removed", (e) => removeScript(e.detail.id));
 
 const deepGame = /#game=([\w-]+)/.exec(location.hash);
 if (deepGame) gamePage.open(deepGame[1]);
