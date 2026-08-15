@@ -10,6 +10,13 @@
 // glide (never jump) to the nearest one. Any new input cancels it instantly,
 // so it assists rather than fights.
 
+/**
+ * How long a wheel can go quiet before the next tick counts as a new gesture.
+ * Trackpad momentum arrives roughly every 16ms, so anything above ~100ms is
+ * a person deciding to scroll again rather than a flick still coasting.
+ */
+const NEW_GESTURE_MS = 140;
+
 export class SmoothScroll {
   constructor({ reducedMotion = false, ease = 0.11 } = {}) {
     this.enabled = !reducedMotion;
@@ -123,20 +130,38 @@ export class SmoothScroll {
     // page behind it — you scrolled the background instead of the panel.
     if (document.documentElement.classList.contains("is-locked")) return;
 
-    // A scrollable inner region owns the wheel for as long as the pointer is
-    // over it, including at its top and bottom edge. Handing the page the
-    // wheel once an inner list bottoms out is what threw people into the next
-    // chapter mid-read; `overscroll-behavior: contain` stops the browser
-    // chaining for the same reason.
+    // A scrollable inner region — a tall chapter like Publish, or a results
+    // list — owns the wheel while there is anything left to scroll in the
+    // direction being asked for.
+    //
+    // The interesting part is what happens at the edge. Releasing immediately
+    // means the tail of a flick flings you into the next chapter the moment
+    // you reach the bottom of a form. Never releasing means you are trapped.
+    // So: the same gesture cannot escape, but a fresh one can. Reach the
+    // bottom of the publish form, momentum stops there, scroll again and the
+    // page moves on — which is what people already expect from a modal.
+    const now = performance.now();
+    const gap = now - (this._wheelAt || 0);
+    this._wheelAt = now;
+
     let node = e.target;
     while (node && node !== document.body) {
       if (node.dataset && node.dataset.nativeScroll !== undefined
           && node.scrollHeight > node.clientHeight + 1) {
-        // Also drop any settle already queued from an earlier page-level
-        // wheel. Otherwise it fires while someone is reading a list and
-        // slides the page to the next chapter under them.
-        this._cancelSnap();
-        return;
+        const down = e.deltaY > 0;
+        const atEnd = node.scrollTop + node.clientHeight >= node.scrollHeight - 1;
+        const atTop = node.scrollTop <= 0;
+
+        if (!(down ? atEnd : atTop)) {
+          // Still room to move inside. Also drop any settle already queued
+          // from an earlier page-level wheel, or it fires while someone is
+          // reading and slides the page out from under them.
+          this._cancelSnap();
+          return;
+        }
+        // At the edge: only a new gesture gets to leave.
+        if (gap < NEW_GESTURE_MS) { this._cancelSnap(); return; }
+        break;
       }
       node = node.parentElement;
     }
