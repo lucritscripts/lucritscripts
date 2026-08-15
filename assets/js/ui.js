@@ -348,10 +348,14 @@ const CATEGORY_WORLDS = [
 export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, onAuth, onInfo }) {
   const content = el("main", { id: "content" });
 
+  // The stage is a 100vh scroll box. Most chapters fit inside it and never
+  // scroll, but a few — Publish above all — are taller than the screen, and
+  // without `data-native-scroll` the wheel handler would drive the page past
+  // them instead of letting you read to the bottom.
   const chapter = (key, label, len, inner) => `
     <section class="chapter" id="ch-${key}" data-chapter="${key}" style="--len:${len}">
       <div class="chapter__inner">
-        <div class="chapter__stage">
+        <div class="chapter__stage" data-native-scroll>
           <span class="chapter__tag" aria-hidden="true">${label}</span>
           ${inner}
         </div>
