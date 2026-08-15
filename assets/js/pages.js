@@ -131,6 +131,57 @@ addEventListener("touchstart", () => { sawPointer = true; }, { passive: true, on
 
 const MIN_DWELL_MS = 1200;
 
+/**
+ * Cloudflare Turnstile, when it is configured.
+ *
+ * This is the real bot check — verified server-side, unlike the widget below,
+ * which only ever bought friction. The widget stays as the fallback so the
+ * page still asks *something* before Turnstile is switched on, and so the
+ * first-visit gate has something to show.
+ */
+let turnstileLoading = null;
+
+function loadTurnstile() {
+  if (turnstileLoading) return turnstileLoading;
+  turnstileLoading = new Promise((resolve, reject) => {
+    if (window.turnstile) return resolve(window.turnstile);
+    const s = document.createElement("script");
+    s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    s.async = true;
+    s.onload = () => resolve(window.turnstile);
+    s.onerror = () => reject(new Error("Couldn't load the human check."));
+    document.head.appendChild(s);
+  });
+  return turnstileLoading;
+}
+
+/** Renders Turnstile into any [data-turnstile] the sheet just drew. */
+export async function mountTurnstile(root) {
+  const host = root?.querySelector?.("[data-turnstile]");
+  if (!host || host.dataset.mounted === "1") return;
+  const key = account.turnstileKey;
+  if (!key) return;
+
+  try {
+    const turnstile = await loadTurnstile();
+    host.dataset.mounted = "1";
+    turnstile.render(host, {
+      sitekey: key,
+      theme: "dark",
+      callback: (token) => { host.dataset.token = token; },
+      "expired-callback": () => { host.dataset.token = ""; },
+      "error-callback": () => { host.dataset.token = ""; },
+    });
+  } catch {
+    // Leave the fallback widget in place; the server fails open anyway.
+  }
+}
+
+/** The Turnstile token from a rendered sheet, or "" if there isn't one. */
+export function turnstileToken(root) {
+  return root?.querySelector?.("[data-turnstile]")?.dataset.token || "";
+}
+
 export function captchaMarkup(id) {
   return `
     <div class="hcheck" id="${id}" data-hcheck data-born="${Date.now()}" data-state="idle">
@@ -316,7 +367,11 @@ export function createAuth({ onDone }) {
         <label>Email<input name="email" type="email" autocomplete="email" placeholder="you@example.com" required></label>
         ${mode !== "reset" ? `<label>Password<input name="password" type="password"
           autocomplete="${signup ? "new-password" : "current-password"}" placeholder="At least 8 characters" required></label>` : ""}
-        ${signup ? captchaMarkup("auth-captcha") : ""}
+        ${signup
+          ? (account.turnstileKey
+              ? `<div class="turnstile" data-turnstile></div>`
+              : captchaMarkup("auth-captcha"))
+          : ""}
         <button class="btn btn--primary btn--full" type="submit">
           ${signup ? "Create account" : mode === "reset" ? "Send reset link" : "Sign in"}
         </button>
@@ -330,6 +385,8 @@ export function createAuth({ onDone }) {
             : `<button data-mode="signup">No account? <b>Create one</b></button>
                <button data-mode="reset">Forgot password?</button>`}
       </div>`;
+
+    if (signup) mountTurnstile(sheet.body);
   }
 
   sheet.body.addEventListener("click", async (e) => {
@@ -362,7 +419,11 @@ export function createAuth({ onDone }) {
 
     let res;
     if (mode === "signup") {
-      res = await account.signUp({ ...d, captcha: captchaPassed(sheet.body) });
+      res = await account.signUp({
+        ...d,
+        captcha: account.turnstileKey ? true : captchaPassed(sheet.body),
+        turnstile: turnstileToken(sheet.body),
+      });
     } else if (mode === "reset") {
       res = await account.requestPasswordReset(d.email);
       if (res.ok) {

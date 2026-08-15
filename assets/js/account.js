@@ -4,15 +4,15 @@
 // where the account actually lives.
 //
 // Two backends live behind that shape:
-//   firebase  real accounts, cross-device, real password-reset emails
-//   local     browser-only fallback for when the SDK cannot load
+//   cloudflare  real accounts in D1, reached through /api on our own origin
+//   local       browser-only fallback for when there is no API to talk to
 //
 // The local one hashes passwords with PBKDF2 and a per-user salt, but browser
 // storage is not a security boundary. It exists so the site still works
 // offline, not as a place to keep real credentials.
 
-import { USE_FIREBASE } from "./firebase.js";
 import { safeSocialUrl } from "./safe.js";
+import { useSameOriginApi } from "./config.js";
 
 const KEY_USERS = "lucrit:users";
 const KEY_SESSION = "lucrit:session";
@@ -94,10 +94,9 @@ export function validateSignUp({ username, email, password }) {
 
 const listeners = new Set();
 
-// When Firebase is in play it is the source of truth for who is signed in, so
-// we do not seed from storage — a stale browser-only session must never look
-// like a real login. Firebase resolves the real one a moment later.
-let session = USE_FIREBASE ? null : readJSON(KEY_SESSION, null);
+// Seeded from storage so the offline shell works on reload. If the API turns
+// out to be there, it overwrites this with the real answer a moment later.
+let session = readJSON(KEY_SESSION, null);
 
 function emit() {
   for (const fn of listeners) {
@@ -132,10 +131,10 @@ function publicUser(u) {
 const local = {
   kind: "local",
 
-  async signUp({ username, email, password, captcha }) {
+  async signUp({ username, email, password, captcha, turnstile }) {
     const problem = validateSignUp({ username, email, password });
     if (problem) return { ok: false, error: problem };
-    if (!captcha) return { ok: false, error: "Please complete the human check." };
+    if (!captcha && !turnstile) return { ok: false, error: "Please complete the human check." };
 
     const users = allUsers();
     const taken = Object.values(users);
@@ -294,21 +293,24 @@ let backend = local;
  * state has arrived. Await it before trusting `account.isSignedIn` on load.
  */
 export const ready = (async () => {
-  if (!USE_FIREBASE) return backend.kind;
   try {
-    const { createFirebaseBackend } = await import("./account-firebase.js");
-    const remote = await createFirebaseBackend({ setSession, validateSignUp, RULES });
+    const { createApiBackend } = await import("./account-api.js");
+    const remote = await createApiBackend({ setSession, validateSignUp, RULES });
     if (remote) {
       backend = remote;
-      store.del(KEY_SESSION);   // Firebase owns the session now
+      // The session cookie is the truth now; a stale local copy would only
+      // confuse things on the next reload.
+      store.del(KEY_SESSION);
+      // Same origin for accounts means same origin for the assistant too.
+      useSameOriginApi();
       return backend.kind;
     }
   } catch (err) {
-    console.warn("[lucrit] falling back to local accounts:", err?.message || err);
+    console.warn("[lucrit] no account API here, staying local:", err?.message || err);
   }
 
-  // Firebase is not taking over, so the stored session is the real one again.
-  // Skipping this would sign people out of the offline mode on every reload.
+  // No API — the stored session is the real one again. Skipping this would
+  // sign people out of the offline mode on every reload.
   const saved = readJSON(KEY_SESSION, null);
   if (saved) setSession(saved);
   return backend.kind;
@@ -317,7 +319,7 @@ export const ready = (async () => {
 export const account = {
   get session() { return session; },
   get isSignedIn() { return Boolean(session); },
-  /** "firebase" or "local" — the dashboard shows this so it is never a mystery. */
+  /** "cloudflare" or "local" — the dashboard shows this so it is never a mystery. */
   get backend() { return backend.kind; },
   ready,
 
@@ -328,7 +330,15 @@ export const account = {
   },
 
   /** True once a real provider is behind the account, so the UI can offer Google. */
-  get canUseGoogle() { return backend.kind === "firebase"; },
+  get canUseGoogle() { return backend.kind === "cloudflare" && Boolean(backend.config?.googleClientId); },
+
+  /** Turnstile's public site key, or "" when it is not configured yet. */
+  get turnstileKey() { return backend.config?.turnstileSiteKey || ""; },
+
+  /** Google One Tap, if this browser already knows the person. */
+  tryAutoSignIn: () => backend.tryAutoSignIn?.() ?? Promise.resolve(false),
+  confirmPasswordReset: (details) => backend.confirmPasswordReset?.(details)
+    ?? Promise.resolve({ ok: false, error: "Password reset isn't available here." }),
 
   signUp: (details) => backend.signUp(details),
   signIn: (details) => backend.signIn(details),

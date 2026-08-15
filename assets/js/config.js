@@ -6,10 +6,22 @@
 // key anywhere — not here, not there.
 
 /**
- * The assistant proxy. Empty means "not deployed": the assistant quietly
- * falls back to its built-in answers, so the site works either way.
+ * The assistant endpoint.
+ *
+ * Starts out pointing at the standalone Worker, which is what the GitHub Pages
+ * build has to use because it is on a different origin. Once account.js finds
+ * an API on our own origin — that is, once we are running on Cloudflare Pages
+ * — it calls useSameOriginApi() and this switches to /api/ai: no CORS, no
+ * second deploy, one place to change the model.
+ *
+ * ES module exports are live bindings, so importers see the new value without
+ * having to re-import anything.
  */
-export const ASSISTANT_URL = "https://lucrit-assistant.lucritscripts.workers.dev/";
+const STANDALONE = "https://lucrit-assistant.lucritscripts.workers.dev/";
+
+export let ASSISTANT_URL = STANDALONE;
+
+export function useSameOriginApi() { ASSISTANT_URL = "/api/ai"; }
 
 /**
  * The unlock verifier. Empty keeps the paywall client-side, which is fine for
