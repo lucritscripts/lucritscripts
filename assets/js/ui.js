@@ -713,7 +713,7 @@ function buildPublishForm({ onAuth, onPublished }) {
    Chrome — nav, top progress bar, floating dashboard button
    ============================================================ */
 
-export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary }) {
+export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, onMine }) {
   const nav = el("header", { class: "nav" });
   nav.innerHTML = `
     <div class="progress" role="presentation">
@@ -727,6 +727,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary }
     <nav class="nav__links" aria-label="Sections">
       <button data-jump="search">Scripts</button>
       <button data-library>Library</button>
+      <button data-mine>My Scripts</button>
       <button data-jump="categories">Categories</button>
       <button data-jump="featured">Trending</button>
       <button data-jump="community">Leaderboard</button>
@@ -741,6 +742,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary }
     const jump = e.target.closest("[data-jump]");
     if (jump) { e.preventDefault(); onJump(jump.dataset.jump); return; }
     if (e.target.closest("[data-library]")) { onLibrary?.(); return; }
+    if (e.target.closest("[data-mine]")) { onMine?.(); return; }
     if (e.target.closest(".nav__search")) onSearch();
   });
 

@@ -12,6 +12,7 @@ import {
 } from "./pages.js";
 import { createAssistant } from "./assistant.js";
 import { createGenerator } from "./generator.js";
+import { createMyScripts } from "./mine.js";
 import { toggleSaved, getDraft, onVaultChange } from "./vault.js";
 import { account } from "./account.js";
 import { runBotCheck } from "./gate.js";
@@ -88,24 +89,47 @@ const dashboard = createDashboard({
 
 /* ------------------------------------------------------------ generator */
 
+/**
+ * Hands a draft to the publish form. The form owns game, category and
+ * description, so we fill in what we know and leave the rest to the person
+ * rather than inventing values on their behalf.
+ */
+function sendToPublishForm(draft) {
+  jumpTo("submit");
+  setTimeout(() => {
+    const form = document.querySelector(".publish__form");
+    if (!form) return;
+    form.querySelector('[name="title"]').value = draft.title;
+    const code = form.querySelector('[name="code"]');
+    code.value = draft.code;
+    code.dispatchEvent(new Event("input", { bubbles: true }));
+    form.querySelector('[name="title"]').focus();
+    toast("Fill in the game and description, then publish");
+  }, 700);
+}
+
 const generator = createGenerator({
   onRequireAuth: () => auth.open("signup"),
   onOpenDashboard: (tab) => dashboard.open(tab),
-  onPublish: (draft) => {
-    // The publish form owns game and category, so send the draft there rather
-    // than guessing values on someone's behalf.
-    jumpTo("submit");
-    setTimeout(() => {
-      const form = document.querySelector(".publish__form");
-      if (!form) return;
-      form.querySelector('[name="title"]').value = draft.title;
-      const code = form.querySelector('[name="code"]');
-      code.value = draft.code;
-      code.dispatchEvent(new Event("input", { bubbles: true }));
-      form.querySelector('[name="title"]').focus();
-      toast("Fill in the game and description, then publish");
-    }, 700);
+  onOpenMine: () => mine.open("drafts"),
+  onPublish: (draft) => sendToPublishForm(draft),
+});
+
+/* ------------------------------------------------------------ my scripts */
+
+const mine = createMyScripts({
+  getPublished: (user) => library.filter((s) => s.authorId === user.id),
+  onContinue: (id) => generator.openDraft(getDraft(account.session?.id, id)),
+  onPublishDraft: (id) => {
+    const draft = getDraft(account.session?.id, id);
+    if (draft) sendToPublishForm(draft);
   },
+  onOpenScript: (id) => {
+    const s = library.find((x) => x.id === id);
+    if (s) scriptPage.open(s);
+  },
+  onGenerate: () => generator.open(),
+  onRequireAuth: () => auth.open("signup"),
 });
 
 /* --------------------------------------------------------------- browse */
@@ -153,6 +177,7 @@ const chrome = buildChrome({
   onDashboard: () => dashboard.open(),
   onAuth: () => auth.open("signup"),
   onLibrary: () => gameLibrary.open(),
+  onMine: () => mine.open("drafts"),
 });
 
 choreography = createChoreography({ chrome });
@@ -192,6 +217,7 @@ document.addEventListener("click", (e) => {
 }, true);
 
 document.addEventListener("lucrit:generate", () => generator.open());
+document.addEventListener("lucrit:mine", () => mine.open("drafts"));
 
 // Hearts are drawn per-account, so every surface that shows cards has to
 // repaint when the session or the shelf changes. Without this, signing out
@@ -201,6 +227,7 @@ function repaintShelf() {
   chapters.refresh();
   gamePage.refresh();
   gameLibrary.refresh();
+  mine.refresh();
 }
 account.onChange(repaintShelf);
 onVaultChange(repaintShelf);
@@ -291,7 +318,7 @@ else if (location.hash === "#library") gameLibrary.open();
 window.__lucrit = {
   world, scroller, library, account,
   auth, dashboard, info, scriptPage, libraryPanel, gamePage, gameLibrary,
-  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography, generator,
+  ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography, generator, mine,
   snap() {
     smoothed = progress;
     world?.setProgress(choreography.toCameraProgress(smoothed));

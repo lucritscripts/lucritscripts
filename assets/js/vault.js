@@ -62,6 +62,13 @@ export function saveDraft(userId, draft) {
     code: String(draft.code || ""),
     game: String(draft.game || ""),
     category: draft.category || "utilities",
+    // The conversation that produced it, so reopening a script picks the chat
+    // back up instead of dropping you in front of a stranger's code. Bounded,
+    // because this all has to fit in one localStorage entry.
+    turns: (Array.isArray(draft.turns) ? draft.turns : [])
+      .slice(-20)
+      .filter((t) => t && (t.role === "user" || t.role === "ai") && typeof t.text === "string")
+      .map((t) => ({ role: t.role, text: t.text.slice(0, 600) })),
     updatedAt: new Date().toISOString(),
   };
 
