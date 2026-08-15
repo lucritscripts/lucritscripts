@@ -1743,6 +1743,12 @@ html.is-gated { overflow: hidden; }
 }
 .botgate__sub { color: var(--ink-2); max-width: 34ch; margin: 0 0 24px; }
 .botgate .hcheck { width: 100%; text-align: left; }
+/* Turnstile draws its own fixed-width box; centre it and hold the space so
+   the panel does not jump when Managed mode resolves without showing one. */
+.botgate__turnstile {
+  display: flex; justify-content: center; width: 100%;
+  min-height: 65px; margin: 0;
+}
 .botgate__note {
   margin-top: 20px; max-width: 38ch;
   font-family: var(--mono); font-size: 0.68rem; line-height: 1.6; color: var(--ink-3);
