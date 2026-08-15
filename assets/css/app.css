@@ -1892,3 +1892,7 @@ html.is-gated { overflow: hidden; }
   text-align: center;
   color: var(--ink-2);
 }
+
+/* Turnstile ------------------------------------------------------------- */
+
+.turnstile { margin: 4px 0 2px; min-height: 65px; }
