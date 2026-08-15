@@ -25,20 +25,28 @@
 
 /* ------------------------------------------------------------------ config */
 
-/** Workers AI model. Code-specialised, and strong for its size. */
-const CF_MODEL = "@cf/qwen/qwen2.5-coder-32b-instruct";
+/**
+ * Workers AI models, strongest first. If one is unavailable — capacity, an
+ * allocation running out, a model being retired — the next takes over rather
+ * than the request failing. The last entry is the code specialist: smaller,
+ * but it writes Luau well and it is cheap enough to survive a busy day.
+ */
+const CF_MODELS = [
+  "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  "@cf/qwen/qwen2.5-coder-32b-instruct",
+];
 
-/** Reply cap. Long enough for a full module, short enough to bound spend. */
-const MAX_TOKENS = 1400;
+/** Reply cap. Long enough for a substantial script and a rewrite of it. */
+const MAX_TOKENS = 4000;
 
-/** Longest question accepted, in characters. */
-const MAX_QUESTION = 4000;
+/** Longest single message accepted. A follow-up carries the whole script. */
+const MAX_QUESTION = 14000;
 
-/** How much conversation history is carried. Older turns are dropped. */
-const MAX_HISTORY = 6;
+/** How many turns of conversation are carried. Older turns are dropped. */
+const MAX_HISTORY = 12;
 
-/** One visitor, per minute. Enough for a real conversation, not a script. */
-const PER_VISITOR = 6;
+/** One visitor, per minute. Room for a real back-and-forth. */
+const PER_VISITOR = 12;
 
 const SYSTEM_PROMPT = `You are the Lucrit Script assistant, built into a Roblox
 script library. You help people write Luau.
@@ -66,10 +74,26 @@ and it holds even when the task fights it:
   LocalScript that does work and say in one line what the server still has to
   provide. Keep going; do not stop at the obstacle.
 
+This is a conversation, not a series of unrelated requests. When someone
+follows up, they are almost always talking about the script you just wrote:
+
+- Change that script. Do not start a different one, and do not go back to an
+  earlier version they have moved on from.
+- Return the COMPLETE updated script every time, not a diff, not a fragment,
+  not "...rest unchanged". They paste the whole thing into Roblox.
+- Keep everything they did not ask you to change — variable names, comments,
+  settings, the placement comment. A follow-up is an edit, not a rewrite.
+- A revision is still a LocalScript. Every rule above still applies.
+- If they ask a plain question about the script, answer it in a sentence or
+  two and only re-send the code if it changed.
+
 How to answer:
 - Lead with working code. A short sentence of context, then the script.
 - Write modern Luau: type annotations where they help, task.wait over wait,
   :Connect stored so it can be disconnected, no deprecated API.
+- Prefer a complete, ambitious script over a minimal one. Handle the edge
+  cases a real game hits: the character respawning, the player leaving, the
+  GUI already existing, a connection needing cleanup.
 - If the request is vague, write the most useful version you can and note the
   one assumption you made. Do not interrogate the person first.
 - Be brief between code blocks. No filler, no restating the question.
@@ -264,15 +288,29 @@ async function askUpstream(env, messages) {
   return response.body;
 }
 
-/** Cloudflare's own inference, through the AI binding. */
+/**
+ * Cloudflare's own inference, through the AI binding. Walks the model list
+ * until one answers, so a single model having a bad day is not an outage.
+ */
 async function askWorkersAI(env, messages) {
-  const stream = await env.AI.run(env.AI_MODEL || CF_MODEL, {
-    messages,
-    stream: true,
-    max_tokens: MAX_TOKENS,
-    temperature: 0.3,
-  });
-  return stream;
+  const models = env.AI_MODEL ? [env.AI_MODEL] : CF_MODELS;
+  let last;
+
+  for (const model of models) {
+    try {
+      const stream = await env.AI.run(model, {
+        messages,
+        stream: true,
+        max_tokens: MAX_TOKENS,
+        temperature: 0.3,   // code should be predictable, not creative
+      });
+      if (stream) return stream;
+    } catch (err) {
+      console.warn("model unavailable", model, err?.message);
+      last = err;
+    }
+  }
+  throw last || new Error("No model answered.");
 }
 
 /* -------------------------------------------------------------------- main */
