@@ -403,6 +403,61 @@ export function createAuth({ onDone }) {
     if (signup) mountTurnstile(sheet.body);
   }
 
+  /**
+   * Earnings.
+   *
+   * Two numbers, never added together: unlocks that a sponsor provider
+   * actually confirmed (the ones worth money) and unlocks that happened while
+   * no provider was configured (worth nothing). Summing them would tell an
+   * author they are owed for traffic nobody paid for.
+   */
+  async function paintEarnings() {
+    const slot = $("[data-earnings]", sheet.body);
+    if (!slot) return;
+
+    let data = null;
+    try {
+      const res = await fetch("/api/account/earnings", { credentials: "same-origin" });
+      const body = await res.json();
+      if (body.ok) data = body.data;
+    } catch { /* handled below */ }
+
+    if (!data) {
+      slot.innerHTML = `<p class="muted">Earnings aren't available here — this
+        copy of the site has no server behind it.</p>`;
+      return;
+    }
+
+    const free = Math.max(0, (data.unlocks || 0) - (data.verified || 0));
+
+    slot.innerHTML = `
+      <div class="stats">
+        ${statCard("Paid unlocks", data.verified || 0)}
+        ${statCard("Free unlocks", free)}
+        ${statCard("Scripts unlocked", (data.scripts || []).length)}
+      </div>
+
+      ${!data.providerLive ? `
+        <p class="note note--warn">The sponsor step isn't switched on yet, so every
+          unlock so far has been free and earned nothing. Once the provider is
+          configured these start counting as paid.</p>` : ""}
+
+      ${(data.scripts || []).length ? `
+        <table class="rows">
+          <thead><tr><th>Script</th><th>Paid</th><th>Free</th></tr></thead>
+          <tbody>
+            ${data.scripts.map((s) => `
+              <tr>
+                <td>${esc(s.title)}</td>
+                <td>${fmt(s.verified)}</td>
+                <td>${fmt(Math.max(0, (s.unlocks || 0) - (s.verified || 0)))}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>`
+        : `<p class="muted">No unlocks yet. Once someone unlocks one of your
+             scripts it shows up here.</p>`}`;
+  }
+
   sheet.body.addEventListener("click", async (e) => {
     const google = e.target.closest("[data-google]");
     if (google) {
@@ -570,7 +625,7 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
       </header>
 
       <nav class="tabs" role="tablist">
-        ${[["stats","Stats"],["publishes","Publishes"],["drafts","Drafts"],["saved","Saved"],["profile","Profile"],["security","Security"]]
+        ${[["stats","Stats"],["earnings","Earnings"],["publishes","Publishes"],["drafts","Drafts"],["saved","Saved"],["profile","Profile"],["security","Security"]]
           .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}" data-tab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
@@ -600,6 +655,13 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
                  <strong>No activity in this window.</strong>
                  <span>Every time someone opens or copies one of your scripts it lands here.</span>
                </div>`}
+        </div>
+      </section>
+
+      <section class="pane" data-pane="earnings" ${tab === "earnings" ? "" : "hidden"}>
+        <div class="pane__head"><h3>Earnings</h3></div>
+        <div data-earnings>
+          <p class="muted">Loading…</p>
         </div>
       </section>
 
@@ -767,6 +829,9 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
       tab = tabBtn.dataset.tab;
       $$(".tab", sheet.body).forEach((t) => t.classList.toggle("is-on", t === tabBtn));
       $$(".pane", sheet.body).forEach((p) => { p.hidden = p.dataset.pane !== tab; });
+      // Earnings come from the server, so they are fetched when asked for
+      // rather than on every dashboard open.
+      if (tab === "earnings") paintEarnings();
       return;
     }
 
