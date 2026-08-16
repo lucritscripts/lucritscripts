@@ -59,7 +59,9 @@ const json = (status, body, extra = {}) =>
   });
 
 const ok = (data = {}) => json(200, { ok: true, ...data });
-const bad = (status, error) => json(status, { ok: false, error });
+/** `extra` carries diagnostic detail — never anything secret. */
+const bad = (status, error, extra) =>
+  json(status, extra ? { ok: false, error, ...extra } : { ok: false, error });
 
 const enc = new TextEncoder();
 
@@ -1170,6 +1172,9 @@ async function handleUnlockStart(request, env) {
 
   const site = env.SITE_URL || new URL(request.url).origin;
   try {
+    // Kept well under the edge's own patience. A 15s wait here meant the
+    // platform gave up first and returned its own HTML 502, which no amount of
+    // try/catch in this function could turn into a useful message.
     const res = await fetch(LOOTLABS_API + "/content_locker", {
       method: "POST",
       headers: { Authorization: "Bearer " + env.LOOTLABS_TOKEN, "Content-Type": "application/json" },
@@ -1180,11 +1185,31 @@ async function handleUnlockStart(request, env) {
         tier_id: LOOT_TIER,
         number_of_tasks: LOOT_TASKS,
       }),
-      signal: AbortSignal.timeout(15000),
+      signal: AbortSignal.timeout(8000),
     });
-    const data = await res.json().catch(() => ({}));
-    const base = data?.message?.loot_url || data?.loot_url || "";
-    if (!base) return bad(502, "The sponsor step is unavailable right now.");
+
+    const raw = await res.text();
+    let data = {};
+    try { data = JSON.parse(raw); } catch { /* provider sent something else */ }
+
+    // LootLabs' docs show `message` as an object, but the live API returns it
+    // as a single-element ARRAY:
+    //   {"type":"created","message":[{"short":"...","loot_url":"..."}]}
+    // Reading data.message.loot_url gives undefined on an array, so this fell
+    // into the failure path every time while LootLabs had actually succeeded —
+    // it created a locker link on every click and we threw it away. Accept
+    // both shapes so a future doc-shaped response keeps working too.
+    const envelope = Array.isArray(data?.message) ? data.message[0] : data?.message;
+    const base = envelope?.loot_url || data?.loot_url || "";
+    if (!base) {
+      // Say what the provider actually replied. Debugging this blind cost an
+      // hour once; the token is never echoed, only their answer.
+      console.warn("lootlabs rejected", res.status, raw.slice(0, 300));
+      return bad(502, "The sponsor step is unavailable right now.", {
+        providerStatus: res.status,
+        providerSaid: raw.slice(0, 200),
+      });
+    }
 
     // THE PART THAT MAKES VERIFICATION POSSIBLE.
     //
