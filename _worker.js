@@ -1417,8 +1417,14 @@ async function handleUnlockClaim(request, env) {
      VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(subject, script_id) DO UPDATE SET
        verified = MAX(grants.verified, excluded.verified),
+       at = excluded.at,
        expires = excluded.expires`
   ).bind(subject, script.id, provider, verified, now, now + grantMinutes(env) * 60).run();
+  // `at` moves with `expires` on a repeat unlock. Leaving it at the first
+  // claim's time made `expires - at` drift away from the actual window, so a
+  // row could read as a six-minute grant when the window is five. Nothing
+  // enforced off `at` — `expires` is the only thing checked — but a stored
+  // number that means something should keep meaning it.
 
   // The grant says "this person may read the code". The event says "an unlock
   // happened" — a separate fact, appended, because the grant above is upserted
