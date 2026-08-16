@@ -846,7 +846,18 @@ const SCRIPT_COLUMNS = `s.id, s.author_id, s.title, s.game, s.category, s.descr,
 
 const SCRIPT_LIMITS = { title: 70, game: 90, descr: 6000, code: 200000, tag: 24 };
 const MIN_DESC_WORDS = 100;
-const GRANT_HOURS = 24;
+/**
+ * How long an unlock lasts before the sponsor step has to be repeated.
+ *
+ * Short on purpose: the grant is the thing being sold, so a long one means one
+ * completed step pays for unlimited returns. Five minutes is enough to copy the
+ * script and paste it, and not much more.
+ *
+ * Note this does NOT re-lock code someone already copied — nothing can. What it
+ * limits is how long the door stays open on this server.
+ */
+const GRANT_MINUTES_DEFAULT = 5;
+const grantMinutes = (env) => clampInt(env.UNLOCK_MINUTES, 1, 10080, GRANT_MINUTES_DEFAULT);
 
 /** The row shape the site's cards and script page already expect. */
 function publicScript(row, extra = {}) {
@@ -1116,15 +1127,49 @@ const LOOTLABS_API = "https://creators.lootlabs.gg/api/public";
 const CLICK_TTL_SEC = 3600;
 
 /**
- * Ad tier (1-4) and how many tasks a visitor completes (1-5).
+ * How the locker looks and how hard it pushes.
  *
- * Both are revenue-versus-patience dials. Tier 1 with one task is the gentlest
- * setting: a visitor is far more likely to finish it than a five-task tier-4
- * gauntlet, and an abandoned unlock pays nothing at all. Raise these once
- * there is enough traffic to see where people actually give up.
+ *   tier   1 Trending & Recommended · 2 Gaming Offers · 3 Profit Maximization
+ *          4 Maximum Profit + Software Products
+ *   tasks  1-5 ads before the visitor reaches the script
+ *   theme  1 Classic · 2 Sims · 3 Minecraft · 4 GTA · 5 Space
+ *
+ * Tier and task count are a revenue-versus-abandonment trade, and the right
+ * answer is a judgement about the audience rather than a technical one — so
+ * they are environment variables. Tuning them is a settings change and a
+ * redeploy, not a code change.
+ *
+ * LootLabs rejects the whole request if any of these is out of range, and a
+ * rejected request means no link and a visitor who cannot unlock anything.
+ * So every value is clamped rather than trusted: a typo in the dashboard
+ * degrades to a working locker instead of a broken one.
  */
-const LOOT_TIER = 1;
-const LOOT_TASKS = 1;
+const clampInt = (value, min, max, fallback) => {
+  const n = Number.parseInt(value, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+};
+
+const lootSettings = (env) => ({
+  tier: clampInt(env.LOOT_TIER, 1, 4, 4),
+  tasks: clampInt(env.LOOT_TASKS, 1, 5, 3),
+  theme: clampInt(env.LOOT_THEME, 1, 5, 3),
+});
+
+/**
+ * The script's own artwork, if it is something LootLabs can actually fetch.
+ *
+ * Publishers can upload a thumbnail as a data: URL, which lives happily in our
+ * own pages but is meaningless to a third party — sending one would be a
+ * megabyte of base64 in an API call that then fails validation. Only real
+ * http(s) links go out.
+ */
+function lootThumbnail(script) {
+  const raw = String(script?.thumbnail || "").trim();
+  if (!/^https?:\/\//i.test(raw)) return null;
+  if (raw.length > 500) return null;
+  return raw;
+}
 
 /**
  * Which sponsor providers are actually wired up.
@@ -1138,7 +1183,44 @@ const LOOT_TASKS = 1;
 function unlockProviders(env) {
   const live = [];
   if (env.LOOTLABS_TOKEN) live.push("lootlabs");
+  // Linkvertise needs BOTH: the anti-bypass token to verify with, and the link
+  // itself, which is created by hand in their dashboard because their API does
+  // not offer link creation. Without either one there is nothing to send a
+  // visitor to, or no way to know they arrived honestly.
+  if (env.LINKVERTISE_TOKEN && env.LINKVERTISE_URL) live.push("linkvertise");
   return live;
+}
+
+/**
+ * Linkvertise verification.
+ *
+ * Their model is the mirror image of LootLabs'. There is no postback: when the
+ * visitor finishes the ad-step, Linkvertise redirects them back carrying a
+ * `hash`, and we ask their API whether that hash is real.
+ *
+ * "you can only verify the hash once" — it is consumed on the first check, so
+ * a hash cannot be shared, replayed, or handed round a Discord.
+ *
+ * Fails CLOSED, unlike the human check. A bot check that locks people out is
+ * worse than the bots it stops; an unlock that opens on a failed verification
+ * is just giving the script away, which is the exact thing this exists to
+ * prevent. If Linkvertise is unreachable the visitor is told to try again.
+ */
+async function linkvertiseVerified(env, hash) {
+  if (!/^[a-f0-9]{64}$/i.test(String(hash || ""))) return false;
+  try {
+    const url = "https://publisher.linkvertise.com/api/v1/anti_bypassing"
+      + `?token=${encodeURIComponent(env.LINKVERTISE_TOKEN)}`
+      + `&hash=${encodeURIComponent(hash)}`;
+    const res = await fetch(url, { method: "POST", signal: AbortSignal.timeout(8000) });
+    const body = (await res.text()).trim().toLowerCase();
+    // Documented to answer TRUE or FALSE as bare text; tolerate a JSON-ish
+    // wrapper in case that changes, but never treat anything else as a pass.
+    return body === "true" || body === '"true"' || body === "{\"status\":true}";
+  } catch (err) {
+    console.warn("linkvertise unreachable", err?.message);
+    return false;
+  }
 }
 
 function unlockConfigured(env) {
@@ -1152,7 +1234,7 @@ async function handleUnlockStart(request, env) {
 
   const { scriptId, provider } = await request.json().catch(() => ({}));
   const script = await env.DB.prepare(
-    `SELECT id, title FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
+    `SELECT id, title, thumbnail FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
   if (!script) return bad(404, "That script doesn't exist.");
 
   const user = await currentUser(request, env);
@@ -1170,7 +1252,16 @@ async function handleUnlockStart(request, env) {
     return ok({ data: { clickId, url: "", configured: false } });
   }
 
+  // Linkvertise links are made by hand in their dashboard and point at a fixed
+  // destination, so there is no per-unlock API call — the click row we just
+  // wrote is what ties this visitor to this script when they come back.
+  if (provider === "linkvertise" && unlockProviders(env).includes("linkvertise")) {
+    return ok({ data: { clickId, url: env.LINKVERTISE_URL, configured: true, provider: "linkvertise" } });
+  }
+
   const site = env.SITE_URL || new URL(request.url).origin;
+  const loot = lootSettings(env);
+  const thumb = lootThumbnail(script);
   try {
     // Kept well under the edge's own patience. A 15s wait here meant the
     // platform gave up first and returned its own HTML 502, which no amount of
@@ -1182,8 +1273,13 @@ async function handleUnlockStart(request, env) {
         // LootLabs caps the title at 30 characters and rejects longer ones.
         title: String(script.title).slice(0, 30),
         url: `${site}/?unlocked=${encodeURIComponent(script.id)}&click=${clickId}`,
-        tier_id: LOOT_TIER,
-        number_of_tasks: LOOT_TASKS,
+        tier_id: loot.tier,
+        number_of_tasks: loot.tasks,
+        theme: loot.theme,
+        // Showing the script's own artwork on the locker tells the visitor
+        // they are still in the right place mid-sponsor-step, which is worth
+        // real completions on a three-task flow.
+        ...(thumb ? { thumbnail: thumb } : {}),
       }),
       signal: AbortSignal.timeout(8000),
     });
@@ -1245,7 +1341,7 @@ async function handleUnlockClaim(request, env) {
   if (!(await underLimit(env, `claim:${ip}`, 40, 600)))
     return bad(429, "Too many attempts. Try again shortly.");
 
-  const { scriptId, clickId } = await request.json().catch(() => ({}));
+  const { scriptId, clickId, hash } = await request.json().catch(() => ({}));
   const script = await env.DB.prepare(
     `SELECT id, author_id FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
   if (!script) return bad(404, "That script doesn't exist.");
@@ -1257,7 +1353,28 @@ async function handleUnlockClaim(request, env) {
   let verified = 0;
   let provider = "";
 
-  if (unlockConfigured(env)) {
+  // ── Linkvertise ────────────────────────────────────────────────────────
+  // Proof is the hash they came back with, not a click id we can look up.
+  // We still require a click row we minted for THIS subject and script, so a
+  // valid hash cannot be pointed at a script the visitor never started.
+  if (hash && unlockProviders(env).includes("linkvertise")) {
+    const pending = await env.DB.prepare(
+      `SELECT click_id FROM unlock_clicks
+        WHERE subject = ? AND script_id = ? AND provider = 'linkvertise' AND expires > ?
+        ORDER BY at DESC LIMIT 1`
+    ).bind(subject, script.id, now).first();
+
+    if (!pending) return bad(400, "Start the unlock from the script page first.");
+    if (!(await linkvertiseVerified(env, hash)))
+      return bad(400, "That unlock couldn't be verified. Try the sponsor step again.");
+
+    await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(pending.click_id).run();
+    verified = 1;
+    provider = "linkvertise";
+
+  // ── LootLabs ───────────────────────────────────────────────────────────
+  // Proof is a click id their postback already marked done.
+  } else if (unlockConfigured(env)) {
     const click = await env.DB.prepare(
       `SELECT script_id, subject, provider, done FROM unlock_clicks
         WHERE click_id = ? AND expires > ?`
@@ -1283,7 +1400,7 @@ async function handleUnlockClaim(request, env) {
      ON CONFLICT(subject, script_id) DO UPDATE SET
        verified = MAX(grants.verified, excluded.verified),
        expires = excluded.expires`
-  ).bind(subject, script.id, provider, verified, now, now + GRANT_HOURS * 3600).run();
+  ).bind(subject, script.id, provider, verified, now, now + grantMinutes(env) * 60).run();
 
   // The grant says "this person may read the code". The event says "an unlock
   // happened" — a separate fact, appended, because the grant above is upserted
@@ -1381,6 +1498,7 @@ const ROUTES = {
       // showing a paying-looking button that earns nothing.
       unlockLive: unlockConfigured(env),
       unlockProviders: unlockProviders(env),
+      unlockMinutes: grantMinutes(env),
     },
   }),
 };
