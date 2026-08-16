@@ -18,7 +18,7 @@ import { safeHref, safeImageSrc } from "./safe.js";
 import { drafts as myDrafts, deleteDraft, savedIds } from "./vault.js";
 import {
   libraryOnline, fetchScript, fetchCode, deleteScript, likeScript, reportScript,
-  startUnlock, claimUnlock,
+  startUnlock, claimUnlock, rememberStartedUnlock,
 } from "./library-api.js";
 
 export const esc = (s) => String(s ?? "")
@@ -1060,7 +1060,8 @@ export function createScriptPage({ onRequireAuth }) {
                     ${busy ? "Opening…" : `Unlock with ${esc(LABEL[id] || id)}`}
                   </button>`).join("")}
               </div>
-              <p class="gate__note">You'll come straight back here with the script open.</p>`;
+              <p class="gate__note">You'll come straight back here with the script open,
+                 and it stays unlocked for ${account.unlockMinutes} minutes.</p>`;
           })()}
         </div>
       `}`;
@@ -1076,10 +1077,13 @@ export function createScriptPage({ onRequireAuth }) {
   }
 
   /** Comes back from the sponsor round-trip and asks the server to confirm it. */
-  async function finishUnlock(clickId) {
-    const res = await claimUnlock(current.id, clickId);
+  async function finishUnlock(clickId, hash) {
+    const res = await claimUnlock(current.id, clickId, hash);
     if (!res.ok) { toast(res.error || "That unlock couldn't be verified.", "warn"); return false; }
     current.unlocked = true;
+    // Only remember it locally when the server did NOT verify — otherwise the
+    // local note would outlive the server's grant and show an unlocked page
+    // whose code request then fails.
     if (!res.data.verified) unlocked.add(current.id), persistUnlocks();
     code = null;
     render();
@@ -1140,8 +1144,10 @@ export function createScriptPage({ onRequireAuth }) {
         if (!res.ok) return toast(res.error || "Couldn't start the unlock.", "warn");
 
         if (res.data.url) {
-          // Off to the sponsor. They come back to /?unlocked=..&click=..,
-          // which main.js picks up and hands to finishUnlock.
+          // Off to the sponsor. LootLabs returns them to a URL naming the
+          // script; Linkvertise returns them to one fixed page with only a
+          // hash, so park which script this was for before leaving.
+          rememberStartedUnlock(current.id);
           location.href = res.data.url;
           return;
         }
@@ -1179,14 +1185,14 @@ export function createScriptPage({ onRequireAuth }) {
       if (canSee(current)) await loadCode();
     },
     /** Called when the visitor lands back from a sponsor step. */
-    async resume(scriptId, clickId) {
+    async resume(scriptId, clickId, hash) {
       const script = await fetchScript(scriptId);
       if (!script) return false;
       current = script;
       code = null;
       render();
       sheet.open();
-      return finishUnlock(clickId);
+      return finishUnlock(clickId, hash);
     },
     close: () => sheet.close(),
   };

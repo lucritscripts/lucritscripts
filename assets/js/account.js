@@ -342,6 +342,9 @@ export const account = {
    */
   get unlockProviders() { return backend.config?.unlockProviders || []; },
 
+  /** How many minutes an unlock lasts before the sponsor step repeats. */
+  get unlockMinutes() { return backend.config?.unlockMinutes || 5; },
+
   /** Google One Tap, if this browser already knows the person. */
   tryAutoSignIn: () => backend.tryAutoSignIn?.() ?? Promise.resolve(false),
   confirmPasswordReset: (details) => backend.confirmPasswordReset?.(details)

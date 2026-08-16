@@ -323,7 +323,7 @@ refreshLibrary()
   .then(async () => {
     const pending = takePendingUnlock();
     if (pending) {
-      const done = await scriptPage.resume(pending.scriptId, pending.clickId);
+      const done = await scriptPage.resume(pending.scriptId, pending.clickId, pending.hash);
       if (done) toast("Unlocked — here's the script");
       return;
     }

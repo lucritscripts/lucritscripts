@@ -93,9 +93,15 @@ export async function startUnlock(scriptId, provider) {
   return call("/api/unlock/start", { method: "POST", body: { scriptId, provider } });
 }
 
-/** Asks the server to check the sponsor step really completed. */
-export async function claimUnlock(scriptId, clickId) {
-  return call("/api/unlock/claim", { method: "POST", body: { scriptId, clickId } });
+/**
+ * Asks the server to check the sponsor step really completed.
+ *
+ * LootLabs proves it with a click id their postback already confirmed;
+ * Linkvertise proves it with a hash carried back on the return URL. The server
+ * decides which applies — the caller just forwards whatever it was given.
+ */
+export async function claimUnlock(scriptId, clickId, hash) {
+  return call("/api/unlock/claim", { method: "POST", body: { scriptId, clickId, hash } });
 }
 
 /**
@@ -106,22 +112,48 @@ export async function claimUnlock(scriptId, clickId) {
  * the address bar does not carry it around.
  */
 const PENDING = "lucrit:pendingUnlock";
+const STARTED = "lucrit:startedUnlock";
 
 export function capturePendingUnlock() {
   try {
     const url = new URL(location.href);
-    const scriptId = url.searchParams.get("unlocked");
     const clickId = url.searchParams.get("click");
-    if (!scriptId || !clickId) return null;
+    const hash = url.searchParams.get("hash");
 
-    sessionStorage.setItem(PENDING, JSON.stringify({ scriptId, clickId }));
+    // LootLabs sends them back to a URL we built, so it names the script.
+    // Linkvertise links point at one fixed destination configured by hand in
+    // their dashboard, so the return carries only a hash — which script it was
+    // for is what we parked in `started` on the way out.
+    let scriptId = url.searchParams.get("unlocked");
+    if (!scriptId && hash) {
+      try { scriptId = JSON.parse(sessionStorage.getItem(STARTED) || "null")?.scriptId || null; }
+      catch { scriptId = null; }
+    }
+    if (!scriptId || (!clickId && !hash)) return null;
+
+    sessionStorage.setItem(PENDING, JSON.stringify({ scriptId, clickId, hash }));
+    sessionStorage.removeItem(STARTED);
     url.searchParams.delete("unlocked");
     url.searchParams.delete("click");
+    url.searchParams.delete("hash");
     history.replaceState(null, "", url.toString());
-    return { scriptId, clickId };
+    return { scriptId, clickId, hash };
   } catch {
     return null;
   }
+}
+
+/**
+ * Remembers which script a Linkvertise trip was for.
+ *
+ * Their link has one fixed destination, so nothing in the return URL says what
+ * the visitor was unlocking. This is only a hint for the client — the server
+ * still requires an unlock it minted for this person and this script, so
+ * editing it cannot unlock anything.
+ */
+export function rememberStartedUnlock(scriptId) {
+  try { sessionStorage.setItem(STARTED, JSON.stringify({ scriptId, at: Date.now() })); }
+  catch { /* private mode — the trip just cannot be resumed */ }
 }
 
 export function takePendingUnlock() {
