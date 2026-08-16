@@ -897,6 +897,24 @@ async function grantSubject(request, env, user) {
   return "a:" + (await sha256Hex("grant-subject:" + clientIp(request)));
 }
 
+/**
+ * Whether a grant row may actually open the code.
+ *
+ * Expiry is handled by the query that fetched it. This is the other half:
+ * `verified = 0` means the unlock happened while no sponsor step existed, so
+ * nobody was paid for it. Those rows were written freely during the free era
+ * and outlived it — one of them was still serving code to a signed-out
+ * visitor after LootLabs went live. Once a provider is configured they stop
+ * counting and the gate comes back.
+ *
+ * Both the listing flag and the code endpoint go through here, so the page
+ * cannot show "unlocked" while the code request answers 403.
+ */
+function grantOpens(env, grant) {
+  if (!grant) return false;
+  return Boolean(grant.verified) || unlockProviders(env).length === 0;
+}
+
 async function handleScriptList(request, env) {
   const url = new URL(request.url);
   const category = String(url.searchParams.get("category") || "").slice(0, 40);
@@ -948,7 +966,7 @@ async function handleScriptGet(request, env, { id }) {
   return ok({
     data: publicScript(row, {
       // The author never has to unlock their own work.
-      unlocked: Boolean(mine || grant),
+      unlocked: Boolean(mine) || grantOpens(env, grant),
       mine: Boolean(mine),
       liked: user ? Boolean(await env.DB.prepare(
         `SELECT 1 FROM likes WHERE user_id = ? AND script_id = ?`
@@ -1041,7 +1059,7 @@ async function handleScriptCode(request, env, { id }) {
     `SELECT verified FROM grants WHERE subject = ? AND script_id = ? AND expires > ?`
   ).bind(subject, id, nowSec()).first();
 
-  if (!grant) return bad(403, "Unlock the script first.");
+  if (!grantOpens(env, grant)) return bad(403, "Unlock the script first.");
 
   // Counting here rather than at claim time means the number reflects code
   // actually collected, not sponsor steps abandoned at the last moment.
