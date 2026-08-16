@@ -1531,12 +1531,42 @@ function harden(response) {
   return out;
 }
 
+/**
+ * How long a browser may reuse a file without asking.
+ *
+ * Pages defaults every asset to `max-age=14400` — four hours during which a
+ * browser does not contact the server at all. The filenames are not
+ * content-hashed, so that default meant a fix to the paywall kept being
+ * bypassed by a copy of `pages.js` from before the fix, on the very machines
+ * that most needed it. "Hard-reload to see the fix" is not a deployment
+ * strategy.
+ *
+ * Code and markup therefore revalidate every time. That is an ETag round trip
+ * per file, answered `304` from the edge — cheap, and it means a deploy is
+ * live on the next page load rather than up to four hours later.
+ *
+ * Images and fonts go the other way — a day, no revalidation. They are the
+ * big files, they change about never, and a stale logo is not a security
+ * problem. (Pages' own default for them is `max-age=0`, which would mean a
+ * conditional request for every icon on every page load.)
+ */
+function cacheFor(pathname) {
+  if (/\.(js|mjs|css|map)$/i.test(pathname)) return "no-cache, must-revalidate";
+  if (/\.(png|jpe?g|gif|webp|avif|svg|ico|woff2?|ttf|otf)$/i.test(pathname))
+    return "public, max-age=86400";
+  // Markup, data, and extensionless routes: always ask.
+  return "no-cache, must-revalidate";
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith("/api/")) {
-      return harden(await env.ASSETS.fetch(request));
+      const asset = harden(await env.ASSETS.fetch(request));
+      const cache = cacheFor(url.pathname);
+      if (cache) asset.headers.set("Cache-Control", cache);
+      return asset;
     }
 
     const key = `${request.method.padEnd(4)} ${url.pathname}`.replace(/\s+/, " ");
