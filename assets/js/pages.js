@@ -955,13 +955,66 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
 
 const UNLOCK_KEY = "lucrit:unlocked";
 
-const unlocked = (() => {
-  try { return new Set(JSON.parse(localStorage.getItem(UNLOCK_KEY) || "[]")); }
-  catch { return new Set(); }
+/**
+ * Locally-remembered unlocks — a fallback, never the authority.
+ *
+ * This used to be a bare array of script ids with no expiry, written whenever
+ * an unlock completed without a sponsor. Anything unlocked during the free
+ * era therefore stayed open on that device forever: the gate never came back,
+ * and the author was never paid for the next read. Worse, the array was the
+ * whole check, so editing localStorage by hand opened any script.
+ *
+ * Entries now carry their own expiry, and the legacy array is discarded rather
+ * than migrated — every id in it was granted free.
+ */
+const localUnlocks = new Map();
+
+(function loadLocalUnlocks() {
+  let stale = false;
+  try {
+    const stored = localStorage.getItem(UNLOCK_KEY);
+    if (stored === null) return;
+    const raw = JSON.parse(stored);
+
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+      stale = true;               // the legacy array, or junk
+    } else {
+      for (const [id, until] of Object.entries(raw)) {
+        if (Number.isFinite(until) && until > Date.now()) localUnlocks.set(id, until);
+        else stale = true;
+      }
+    }
+  } catch {
+    stale = true;                 // unreadable — start empty
+  }
+  // Write back rather than leaving what we refused to honour sitting there
+  // looking authoritative. If it cannot open a gate, it should not be stored.
+  if (stale) {
+    try { localStorage.setItem(UNLOCK_KEY, JSON.stringify(Object.fromEntries(localUnlocks))); }
+    catch { /* private mode */ }
+  }
 })();
 
 function persistUnlocks() {
-  try { localStorage.setItem(UNLOCK_KEY, JSON.stringify([...unlocked])); } catch { /* ignore */ }
+  try {
+    localStorage.setItem(UNLOCK_KEY, JSON.stringify(Object.fromEntries(localUnlocks)));
+  } catch { /* private mode — the note just does not outlive the tab */ }
+}
+
+/** Remembers an unlock for as long as the server would have kept it. */
+function noteLocalUnlock(id) {
+  localUnlocks.set(id, Date.now() + account.unlockMinutes * 60000);
+  persistUnlocks();
+}
+
+/** True only while the note is still inside its window; expired ones are dropped. */
+function heldLocally(id) {
+  const until = localUnlocks.get(id);
+  if (until === undefined) return false;
+  if (until > Date.now()) return true;
+  localUnlocks.delete(id);
+  persistUnlocks();
+  return false;
 }
 
 export function createScriptPage({ onRequireAuth }) {
@@ -978,12 +1031,17 @@ export function createScriptPage({ onRequireAuth }) {
    * Whether the code may be shown.
    *
    * On a server-backed site this is the server's answer (`s.unlocked`), which
-   * is the only one that counts — the local set below is just a hint so the
-   * page does not flash locked while we ask. On static hosting there is no
-   * server to ask and the local set is all there is.
+   * is the only one that counts. On static hosting there is no server to ask
+   * and the local note is all there is.
+   *
+   * The order matters: once a sponsor step exists, a local note must not open
+   * the gate. Otherwise one unlock — or one edit of localStorage — would buy
+   * permanent free reads, which is the whole thing the paywall exists to stop.
    */
   function canSee(s) {
-    return isOwner(s) || Boolean(s.unlocked) || unlocked.has(s.id);
+    if (isOwner(s) || Boolean(s.unlocked)) return true;
+    if (account.unlockProviders.length) return false;
+    return heldLocally(s.id);
   }
 
   function render() {
@@ -1084,7 +1142,7 @@ export function createScriptPage({ onRequireAuth }) {
     // Only remember it locally when the server did NOT verify — otherwise the
     // local note would outlive the server's grant and show an unlocked page
     // whose code request then fails.
-    if (!res.data.verified) unlocked.add(current.id), persistUnlocks();
+    if (!res.data.verified) noteLocalUnlock(current.id);
     code = null;
     render();
     await loadCode();
