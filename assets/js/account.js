@@ -335,6 +335,13 @@ export const account = {
   /** Turnstile's public site key, or "" when it is not configured yet. */
   get turnstileKey() { return backend.config?.turnstileSiteKey || ""; },
 
+  /**
+   * Sponsor providers the server can actually send someone to AND verify.
+   * Empty means the unlock step is not live — the UI must say so rather than
+   * offering a button that quietly hands the script over for nothing.
+   */
+  get unlockProviders() { return backend.config?.unlockProviders || []; },
+
   /** Google One Tap, if this browser already knows the person. */
   tryAutoSignIn: () => backend.tryAutoSignIn?.() ?? Promise.resolve(false),
   confirmPasswordReset: (details) => backend.confirmPasswordReset?.(details)

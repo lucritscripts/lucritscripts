@@ -1035,16 +1035,33 @@ export function createScriptPage({ onRequireAuth }) {
             <svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
           </div>
           <h3>Get this script</h3>
-          <p>Complete one short sponsor step to unlock the code. It pays the person who wrote it.</p>
-          <div class="gate__actions">
-            <button class="btn btn--primary" data-act="lootlabs" ${busy ? "disabled" : ""}>
-              ${busy ? "Opening…" : "Unlock with Lootlabs"}
-            </button>
-            <button class="btn btn--primary btn--alt" data-act="linkvertise" ${busy ? "disabled" : ""}>
-              ${busy ? "Opening…" : "Unlock with Linkvertise"}
-            </button>
-          </div>
-          <p class="gate__note">You'll come straight back here with the script open.</p>
+          ${(() => {
+            const live = account.unlockProviders;
+            const LABEL = { lootlabs: "Lootlabs", linkvertise: "Linkvertise" };
+
+            // No provider configured. Offering a sponsor button here would be
+            // a lie — there is no ad to show and no author to pay.
+            if (!live.length) {
+              return `
+                <p>The sponsor step isn't switched on yet, so this one is on the house.</p>
+                <div class="gate__actions">
+                  <button class="btn btn--primary" data-act="free" ${busy ? "disabled" : ""}>
+                    ${busy ? "Opening…" : "Show me the script"}
+                  </button>
+                </div>
+                <p class="gate__note">Once sponsors are live, unlocking pays the person who wrote this.</p>`;
+            }
+
+            return `
+              <p>Complete one short sponsor step to unlock the code. It pays the person who wrote it.</p>
+              <div class="gate__actions">
+                ${live.map((id, i) => `
+                  <button class="btn btn--primary${i ? " btn--alt" : ""}" data-act="${esc(id)}" ${busy ? "disabled" : ""}>
+                    ${busy ? "Opening…" : `Unlock with ${esc(LABEL[id] || id)}`}
+                  </button>`).join("")}
+              </div>
+              <p class="gate__note">You'll come straight back here with the script open.</p>`;
+          })()}
         </div>
       `}`;
   }
@@ -1115,7 +1132,7 @@ export function createScriptPage({ onRequireAuth }) {
       toast("Report sent — thanks for flagging it", "warn");
     }
 
-    if (act === "linkvertise" || act === "lootlabs") {
+    if (act === "free" || account.unlockProviders.includes(act)) {
       if (busy) return;
       busy = true; render();
       try {
