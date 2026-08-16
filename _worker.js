@@ -1113,8 +1113,34 @@ async function handleScriptReport(request, env, { id }) {
 const LOOTLABS_API = "https://creators.lootlabs.gg/api/public";
 const CLICK_TTL_SEC = 3600;
 
+/**
+ * Ad tier (1-4) and how many tasks a visitor completes (1-5).
+ *
+ * Both are revenue-versus-patience dials. Tier 1 with one task is the gentlest
+ * setting: a visitor is far more likely to finish it than a five-task tier-4
+ * gauntlet, and an abandoned unlock pays nothing at all. Raise these once
+ * there is enough traffic to see where people actually give up.
+ */
+const LOOT_TIER = 1;
+const LOOT_TASKS = 1;
+
+/**
+ * Which sponsor providers are actually wired up.
+ *
+ * The site shows a button per entry. It used to show LootLabs AND Linkvertise
+ * unconditionally while both ran the same LootLabs code path — so picking
+ * Linkvertise did something other than what it said. A provider appears here
+ * only when it has credentials AND a way to verify completion; an unverifiable
+ * provider is a free bypass wearing a paywall's clothes.
+ */
+function unlockProviders(env) {
+  const live = [];
+  if (env.LOOTLABS_TOKEN) live.push("lootlabs");
+  return live;
+}
+
 function unlockConfigured(env) {
-  return Boolean(env.LOOTLABS_TOKEN);
+  return unlockProviders(env).length > 0;
 }
 
 async function handleUnlockStart(request, env) {
@@ -1148,16 +1174,27 @@ async function handleUnlockStart(request, env) {
       method: "POST",
       headers: { Authorization: "Bearer " + env.LOOTLABS_TOKEN, "Content-Type": "application/json" },
       body: JSON.stringify({
-        title: script.title.slice(0, 60),
+        // LootLabs caps the title at 30 characters and rejects longer ones.
+        title: String(script.title).slice(0, 30),
         url: `${site}/?unlocked=${encodeURIComponent(script.id)}&click=${clickId}`,
-        tier_id: 1,
-        number_of_tasks: 1,
+        tier_id: LOOT_TIER,
+        number_of_tasks: LOOT_TASKS,
       }),
       signal: AbortSignal.timeout(15000),
     });
     const data = await res.json().catch(() => ({}));
-    const url = data?.message?.loot_url || data?.loot_url || "";
-    if (!url) return bad(502, "The sponsor step is unavailable right now.");
+    const base = data?.message?.loot_url || data?.loot_url || "";
+    if (!base) return bad(502, "The sponsor step is unavailable right now.");
+
+    // THE PART THAT MAKES VERIFICATION POSSIBLE.
+    //
+    // LootLabs' postback tells us `click_id`, and that value comes from a
+    // `puid` parameter attached to the link the visitor followed. Without
+    // this, the postback arrives with no way to say WHICH unlock completed,
+    // so every claim would fail its check and nobody could get a script —
+    // the paywall would fail closed rather than open.
+    const url = base + (base.includes("?") ? "&" : "?") + "puid=" + encodeURIComponent(clickId);
+
     return ok({ data: { clickId, url, configured: true } });
   } catch {
     return bad(502, "Couldn't reach the sponsor step. Try again.");
@@ -1318,6 +1355,7 @@ const ROUTES = {
       // The site tells people the truth about the sponsor step rather than
       // showing a paying-looking button that earns nothing.
       unlockLive: unlockConfigured(env),
+      unlockProviders: unlockProviders(env),
     },
   }),
 };
