@@ -144,3 +144,26 @@ CREATE TABLE IF NOT EXISTS reports (
   at         INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS reports_script ON reports(script_id);
+
+-- Every completed unlock, appended, one row each.
+--
+-- This is the payout ledger, and it exists because `grants` cannot be one.
+-- A grant is keyed (subject, script_id) and upserted, so the same person
+-- unlocking the same script a second time UPDATES the row rather than adding
+-- one — correct for "may this person read the code", useless for "how many
+-- unlocks did this author earn". Counting grants would quietly undercount.
+--
+-- author_id is denormalised on purpose: earnings must still be attributable
+-- after a script is deleted, and a soft-deleted script should not erase the
+-- history of what it earned.
+CREATE TABLE IF NOT EXISTS unlock_events (
+  id         TEXT PRIMARY KEY,
+  script_id  TEXT NOT NULL,
+  author_id  TEXT NOT NULL,
+  subject    TEXT NOT NULL,
+  provider   TEXT NOT NULL DEFAULT '',
+  verified   INTEGER NOT NULL DEFAULT 0,   -- 1 only when a provider confirmed it
+  at         INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS unlock_events_author ON unlock_events(author_id, at);
+CREATE INDEX IF NOT EXISTS unlock_events_script ON unlock_events(script_id);

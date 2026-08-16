@@ -1185,7 +1185,7 @@ async function handleUnlockClaim(request, env) {
 
   const { scriptId, clickId } = await request.json().catch(() => ({}));
   const script = await env.DB.prepare(
-    `SELECT id FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
+    `SELECT id, author_id FROM scripts WHERE id = ? AND removed = 0`).bind(scriptId).first();
   if (!script) return bad(404, "That script doesn't exist.");
 
   const user = await currentUser(request, env);
@@ -1223,7 +1223,57 @@ async function handleUnlockClaim(request, env) {
        expires = excluded.expires`
   ).bind(subject, script.id, provider, verified, now, now + GRANT_HOURS * 3600).run();
 
+  // The grant says "this person may read the code". The event says "an unlock
+  // happened" — a separate fact, appended, because the grant above is upserted
+  // and would lose the second and third unlock by the same person.
+  await env.DB.prepare(
+    `INSERT INTO unlock_events (id, script_id, author_id, subject, provider, verified, at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind("e_" + randomHex(8), script.id, script.author_id, subject, provider, verified, now).run();
+
   return ok({ data: { unlocked: true, verified: Boolean(verified) } });
+}
+
+/**
+ * What an author has earned.
+ *
+ * Only `verified` events represent money: an unverified one is an unlock that
+ * happened while no sponsor provider was configured, so nobody paid for it.
+ * Both are reported, separately and labelled, rather than adding them together
+ * into a number that would overstate what is owed.
+ */
+async function handleEarnings(request, env) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in first.");
+
+  const totals = await env.DB.prepare(
+    `SELECT COUNT(*) AS unlocks,
+            COALESCE(SUM(verified), 0) AS verified
+       FROM unlock_events WHERE author_id = ?`
+  ).bind(user.id).first();
+
+  const { results } = await env.DB.prepare(
+    `SELECT e.script_id AS id,
+            COALESCE(s.title, 'Removed script') AS title,
+            COUNT(*) AS unlocks,
+            COALESCE(SUM(e.verified), 0) AS verified
+       FROM unlock_events e
+       LEFT JOIN scripts s ON s.id = e.script_id
+      WHERE e.author_id = ?
+      GROUP BY e.script_id
+      ORDER BY verified DESC, unlocks DESC
+      LIMIT 100`
+  ).bind(user.id).all();
+
+  return ok({
+    data: {
+      unlocks: totals?.unlocks || 0,
+      verified: totals?.verified || 0,
+      // So the UI can say why the number is zero rather than looking broken.
+      providerLive: unlockConfigured(env),
+      scripts: results || [],
+    },
+  });
 }
 
 /* ═══════════════════════════════════════════════════════════════════ router ══ */
@@ -1255,6 +1305,7 @@ const ROUTES = {
   "POST /api/account/username": handleUsername,
   "POST /api/account/profile": handleProfile,
   "POST /api/account/password": handlePassword,
+  "GET  /api/account/earnings": handleEarnings,
   "POST /api/auth/reset/request": handleResetRequest,
   "POST /api/auth/reset/confirm": handleResetConfirm,
   "POST /api/ai": handleAI,
