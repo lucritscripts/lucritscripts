@@ -101,6 +101,9 @@ export function createOverlay({ id, label, wide = false }) {
     if (!$$(".sheet:not([hidden])").length)
       document.documentElement.classList.remove("is-locked");
     lastFocus?.focus?.();
+    // Overlays that own a URL need to know, so the address bar does not keep
+    // pointing at a page that is no longer on screen.
+    document.dispatchEvent(new CustomEvent(`lucrit:${id}-closed`));
   }
 
   node.addEventListener("click", (e) => {

@@ -13,6 +13,7 @@ import {
 import { createAssistant } from "./assistant.js";
 import { createGenerator } from "./generator.js";
 import { createMyScripts } from "./mine.js";
+import { createAdminPage } from "./admin.js";
 import { toggleSaved, getDraft, onVaultChange } from "./vault.js";
 import { account } from "./account.js";
 import { runBotCheck } from "./gate.js";
@@ -339,11 +340,49 @@ refreshLibrary()
 // Deleting from the script page has to reach the cached list too.
 document.addEventListener("lucrit:script-removed", (e) => removeScript(e.detail.id));
 
+/* ----------------------------------------------------------------- /admin */
+
+// A real URL, not a hash. The Worker serves the app shell for /admin so a
+// direct visit or a refresh lands here rather than on a 404, and closing the
+// page puts the address bar back rather than leaving /admin pointing at the
+// library.
+const adminPage = createAdminPage({
+  // An admin action can take a script down, put one back, or delete an account
+  // along with everything it published. The cached library knows none of that,
+  // so it is refetched rather than patched.
+  onChanged: () => { refreshLibrary(); },
+});
+
+function openAdmin(push = true) {
+  if (push && location.pathname !== "/admin") history.pushState(null, "", "/admin");
+  adminPage.open();
+}
+
+document.addEventListener("click", (e) => {
+  const link = e.target.closest('a[href="/admin"], [data-open-admin]');
+  if (!link) return;
+  e.preventDefault();
+  openAdmin();
+});
+
+// Back out of /admin the way the browser expects.
+addEventListener("popstate", () => {
+  if (/^\/admin\/?$/.test(location.pathname)) openAdmin(false);
+  else adminPage.close();
+});
+
+document.addEventListener("lucrit:admin-closed", () => {
+  if (/^\/admin\/?$/.test(location.pathname)) history.replaceState(null, "", "/");
+});
+
+if (/^\/admin\/?$/.test(location.pathname)) openAdmin(false);
+
 const deepGame = /#game=([\w-]+)/.exec(location.hash);
 if (deepGame) gamePage.open(deepGame[1]);
 else if (location.hash === "#library") gameLibrary.open();
 
 window.__lucrit = {
+  adminPage, openAdmin,
   world, scroller, library, account,
   auth, dashboard, info, scriptPage, libraryPanel, gamePage, gameLibrary,
   ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography, generator, mine,

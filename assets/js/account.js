@@ -345,6 +345,16 @@ export const account = {
   /** How many minutes an unlock lasts before the sponsor step repeats. */
   get unlockMinutes() { return backend.config?.unlockMinutes || 5; },
 
+  /**
+   * Whether this session runs the site.
+   *
+   * Comes from the server with the session, never from anything the browser
+   * decides. It only chooses whether to draw the Admin tab — every admin route
+   * checks for itself, so flipping this in the console reveals an empty panel
+   * and a row of 403s.
+   */
+  get isAdmin() { return Boolean(session?.admin); },
+
   /** Google One Tap, if this browser already knows the person. */
   tryAutoSignIn: () => backend.tryAutoSignIn?.() ?? Promise.resolve(false),
   confirmPasswordReset: (details) => backend.confirmPasswordReset?.(details)
