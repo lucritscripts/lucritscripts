@@ -34,8 +34,29 @@ CREATE TABLE IF NOT EXISTS users (
   youtube             TEXT NOT NULL DEFAULT '',
   tiktok              TEXT NOT NULL DEFAULT '',
 
+  -- Suspended by the site owner. A banned account cannot sign in, its existing
+  -- sessions are deleted the moment one is used, and its scripts drop out of
+  -- every public listing and board. Nothing is erased — a ban is reversible,
+  -- which is the whole reason it exists alongside deletion.
+  banned              INTEGER NOT NULL DEFAULT 0,
+
   created_at          TEXT NOT NULL
 );
+
+-- A live /admin session, minted by the passcode and nothing else.
+--
+-- Deliberately unrelated to `sessions`: signing in to the site is not what
+-- opens the admin page, and being the owner of an account is not either. One
+-- passcode, one short-lived ticket, revocable on its own.
+--
+-- The passcode itself is nowhere in this database. The browser stretches it
+-- with PBKDF2 and the Worker compares a SHA-256 of the result against
+-- ADMIN_PASS_HASH, so what is stored is a verifier, not a password.
+CREATE TABLE IF NOT EXISTS admin_gate (
+  token_hash TEXT PRIMARY KEY,
+  expires    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS admin_gate_expiry ON admin_gate(expires);
 
 -- Sessions are opaque random tokens. We store only their hash, so a leak of
 -- this table does not hand anybody a working login.

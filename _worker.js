@@ -152,9 +152,19 @@ const clientIp = (request) => request.headers.get("CF-Connecting-IP") || "unknow
 const SESSION_COOKIE = "__Host-lucrit";
 const SESSION_DAYS = 30;
 
-function cookieHeader(token, maxAgeSec) {
+// The second key to /admin. Short-lived by design: the passcode is meant to be
+// typed again after a break, not once a month.
+const ADMIN_COOKIE = "__Host-lucrit-admin";
+const ADMIN_GATE_MINUTES = 30;
+
+// Public on purpose — the browser has to stretch with the same parameters the
+// stored verifier was built from. A salt only has to be unique.
+const ADMIN_PASS_SALT = "lucrit-admin-v1";
+const ADMIN_PASS_ITERATIONS = 310000;
+
+function cookieHeader(token, maxAgeSec, name = SESSION_COOKIE) {
   const parts = [
-    `${SESSION_COOKIE}=${token}`,
+    `${name}=${token}`,
     "Path=/",
     "HttpOnly",
     "Secure",
@@ -206,13 +216,35 @@ async function currentUser(request, env) {
     await env.DB.prepare(`DELETE FROM sessions WHERE token_hash = ?`).bind(hash).run();
     return null;
   }
+
+  // A banned account is signed out everywhere, immediately — not just refused
+  // at the next sign-in. Their existing sessions are deleted rather than
+  // ignored, so nothing is left to reactivate if the ban is lifted by hand.
+  if (row.banned) {
+    await env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(row.id).run();
+    return null;
+  }
   return row;
 }
 
 /** The shape the site's UI already expects. Note there is no email in here. */
-function publicSession(row) {
+/**
+ * Whether this account runs the site.
+ *
+ * One id in an environment variable, compared exactly. Deliberately not a
+ * column: an admin flag in the users table is one SQL injection or one
+ * mistaken UPDATE away from somebody promoting themselves, and there is
+ * exactly one operator here. With ADMIN_USER_ID unset nobody is an admin and
+ * every admin route answers 403 — the safe default.
+ */
+function isAdmin(env, user) {
+  return Boolean(env.ADMIN_USER_ID && user && user.id === env.ADMIN_USER_ID);
+}
+
+function publicSession(row, env) {
   if (!row) return null;
   return {
+    admin: isAdmin(env, row),
     id: row.id,
     email: row.email,
     username: row.username,
@@ -440,7 +472,7 @@ async function handleSignUp(request, env) {
 
   const row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(id).first();
   const token = await startSession(env, id);
-  return json(200, { ok: true, data: publicSession(row) },
+  return json(200, { ok: true, data: publicSession(row, env) },
     { "Set-Cookie": cookieHeader(token, SESSION_DAYS * 86400) });
 }
 
@@ -462,8 +494,13 @@ async function handleSignIn(request, env) {
   const expect = await sha256Hex(row.auth_salt + ":" + authKey);
   if (!sameSecret(expect, row.auth_hash)) return bad(400, wrong);
 
+  // Checked AFTER the password, on purpose. Answering "this account is banned"
+  // to any password would turn the sign-in form into a way to find out which
+  // emails are registered.
+  if (row.banned) return bad(403, "This account has been suspended.");
+
   const token = await startSession(env, row.id);
-  return json(200, { ok: true, data: publicSession(row) },
+  return json(200, { ok: true, data: publicSession(row, env) },
     { "Set-Cookie": cookieHeader(token, SESSION_DAYS * 86400) });
 }
 
@@ -509,8 +546,11 @@ async function handleGoogle(request, env) {
     row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(id).first();
   }
 
+  // Google proves who they are, not that they are welcome.
+  if (row.banned) return bad(403, "This account has been suspended.");
+
   const token = await startSession(env, row.id);
-  return json(200, { ok: true, data: publicSession(row) },
+  return json(200, { ok: true, data: publicSession(row, env) },
     { "Set-Cookie": cookieHeader(token, SESSION_DAYS * 86400) });
 }
 
@@ -521,7 +561,7 @@ async function handleSignOut(request, env) {
 
 async function handleSession(request, env) {
   const row = await currentUser(request, env);
-  return ok({ data: publicSession(row) });
+  return ok({ data: publicSession(row, env) });
 }
 
 async function handleUsername(request, env) {
@@ -553,7 +593,7 @@ async function handleUsername(request, env) {
   }
 
   const row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(me.id).first();
-  return ok({ data: publicSession(row) });
+  return ok({ data: publicSession(row, env) });
 }
 
 async function handleProfile(request, env) {
@@ -573,7 +613,7 @@ async function handleProfile(request, env) {
   ).bind(bio, avatar, youtube, tiktok, me.id).run();
 
   const row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(me.id).first();
-  return ok({ data: publicSession(row) });
+  return ok({ data: publicSession(row, env) });
 }
 
 async function handlePassword(request, env) {
@@ -921,7 +961,9 @@ async function handleScriptList(request, env) {
   const author = String(url.searchParams.get("author") || "").slice(0, 40);
   const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 200));
 
-  const where = ["s.removed = 0"];
+  // A suspended account's scripts come off the site with them. Leaving them up
+  // would make a ban cosmetic — the work stays, and keeps earning.
+  const where = ["s.removed = 0", "u.banned = 0"];
   const binds = [];
   if (category) { where.push("s.category = ?"); binds.push(category); }
   if (author) { where.push("s.author_id = ?"); binds.push(author); }
@@ -971,7 +1013,7 @@ async function handleScriptGet(request, env, { id }) {
     `SELECT ${SCRIPT_COLUMNS},
             (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
        FROM scripts s JOIN users u ON u.id = s.author_id
-      WHERE s.id = ? AND s.removed = 0`
+      WHERE s.id = ? AND s.removed = 0 AND u.banned = 0`
   ).bind(id).first();
 
   if (!row) return bad(404, "That script doesn't exist.");
@@ -1544,6 +1586,324 @@ async function handleEarnings(request, env) {
   });
 }
 
+/* ══════════════════════════════════════════════════════════════════ admin ══ */
+
+/**
+ * Everything behind this gate can destroy things, so the gate is one function
+ * and every route calls it first.
+ *
+ * Returns the admin's own row on success, or a Response to send back. Callers
+ * check with `instanceof Response` — that way it is impossible to write a
+ * handler that forgets to return the refusal, which a boolean would allow.
+ */
+/**
+ * Whether this request carries a live passcode ticket.
+ *
+ * Expired rows are deleted on the way past rather than swept on a schedule —
+ * there is one admin, so the table never grows enough to need one.
+ */
+async function adminUnlocked(request, env) {
+  const token = readCookie(request, ADMIN_COOKIE);
+  if (!token) return false;
+
+  const hash = await sha256Hex(token);
+  const row = await env.DB.prepare(
+    `SELECT expires FROM admin_gate WHERE token_hash = ?`).bind(hash).first();
+  if (!row) return false;
+
+  if (row.expires <= nowSec()) {
+    await env.DB.prepare(`DELETE FROM admin_gate WHERE token_hash = ?`).bind(hash).run();
+    return false;
+  }
+  return true;
+}
+
+async function requireAdmin(request, env) {
+  // Fails closed when no passcode is configured. An admin area whose lock is
+  // simply absent is worse than one that admits it is not ready: the first
+  // looks protected.
+  if (!env.ADMIN_PASS_HASH)
+    return bad(503, "The admin passcode isn't set, so the admin area is closed.");
+
+  if (!(await adminUnlocked(request, env)))
+    return bad(423, "Enter the admin passcode.", { locked: true });
+
+  // Whoever holds the ticket is the operator. A session, if there is one, is
+  // only used to stop them suspending or deleting the account they are
+  // currently using.
+  return (await currentUser(request, env)) || { id: null };
+}
+
+/**
+ * Reports what the admin page is allowed to draw, without leaking anything.
+ *
+ * Answers for anybody — that is the point, the page has to know whether to
+ * show a passcode box, a sign-in prompt, or nothing at all. It never says
+ * whether a passcode is correct, only whether one has already been accepted.
+ */
+async function handleAdminState(request, env) {
+  return ok({
+    data: {
+      configured: Boolean(env.ADMIN_PASS_HASH),
+      unlocked: Boolean(env.ADMIN_PASS_HASH) && (await adminUnlocked(request, env)),
+      // The browser needs this to stretch the passcode the same way the server
+      // expects. It is not a secret — a salt's job is to be unique, not
+      // hidden, and it stops one precomputed table covering every site.
+      salt: ADMIN_PASS_SALT,
+      iterations: ADMIN_PASS_ITERATIONS,
+    },
+  });
+}
+
+/**
+ * Trades the passcode for a ticket.
+ *
+ * The passcode itself is never stored and never travels as plaintext past the
+ * browser. The page stretches it with PBKDF2 exactly the way account passwords
+ * are handled here — 310k rounds on the machine with spare cycles, because the
+ * Worker only gets 10ms — and sends the derived key. We keep a fast SHA-256 of
+ * that key in ADMIN_PASS_HASH, so the environment variable is a verifier, not
+ * a password: reading it off the dashboard does not let anybody in.
+ */
+async function handleAdminUnlock(request, env) {
+  const ip = clientIp(request);
+  // Ten tries per quarter hour. This passcode is the only thing between the
+  // internet and the delete button, so guessing has to be slow.
+  if (!(await underLimit(env, `adminpass:${ip}`, 10, 900)))
+    return bad(429, "Too many attempts. Wait a few minutes.");
+
+  if (!env.ADMIN_PASS_HASH) return bad(503, "The admin passcode isn't set.");
+
+  const { derived } = await request.json().catch(() => ({}));
+  if (!AUTH_KEY.test(String(derived || ""))) return bad(400, "That passcode isn't right.");
+
+  const expect = await sha256Hex(String(derived));
+  if (!sameSecret(expect, String(env.ADMIN_PASS_HASH)))
+    return bad(400, "That passcode isn't right.");
+
+  const token = randomHex(32);
+  await env.DB.prepare(
+    `INSERT INTO admin_gate (token_hash, expires) VALUES (?, ?)`
+  ).bind(await sha256Hex(token), nowSec() + ADMIN_GATE_MINUTES * 60).run();
+
+  return json(200, { ok: true, data: { unlocked: true, minutes: ADMIN_GATE_MINUTES } },
+    { "Set-Cookie": cookieHeader(token, ADMIN_GATE_MINUTES * 60, ADMIN_COOKIE) });
+}
+
+async function handleAdminLock(request, env) {
+  const token = readCookie(request, ADMIN_COOKIE);
+  if (token) {
+    await env.DB.prepare(`DELETE FROM admin_gate WHERE token_hash = ?`)
+      .bind(await sha256Hex(token)).run();
+  }
+  return json(200, { ok: true }, { "Set-Cookie": cookieHeader("", 0, ADMIN_COOKIE) });
+}
+
+async function handleAdminOverview(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const one = async (sql) => Number((await env.DB.prepare(sql).first())?.n || 0);
+  return ok({
+    data: {
+      users: await one(`SELECT COUNT(*) AS n FROM users`),
+      banned: await one(`SELECT COUNT(*) AS n FROM users WHERE banned = 1`),
+      scripts: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 0`),
+      removed: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 1`),
+      unlocks: await one(`SELECT COUNT(*) AS n FROM unlock_events`),
+      verified: await one(`SELECT COUNT(*) AS n FROM unlock_events WHERE verified = 1`),
+      reports: await one(`SELECT COUNT(*) AS n FROM reports`),
+    },
+  });
+}
+
+async function handleAdminUsers(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const url = new URL(request.url);
+  const q = String(url.searchParams.get("q") || "").trim().toLowerCase().slice(0, 60);
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+
+  const where = q ? `WHERE u.username_lower LIKE ? OR u.email_lower LIKE ?` : "";
+  const binds = q ? [`%${q}%`, `%${q}%`] : [];
+
+  const { results } = await env.DB.prepare(
+    `SELECT u.id, u.username, u.email, u.created_at, u.banned,
+            (SELECT COUNT(*) FROM scripts s WHERE s.author_id = u.id AND s.removed = 0) AS scripts,
+            (SELECT COUNT(*) FROM unlock_events e WHERE e.author_id = u.id) AS unlocks
+       FROM users u ${where}
+      ORDER BY u.created_at DESC
+      LIMIT ?`
+  ).bind(...binds, limit).all();
+
+  return ok({
+    data: (results || []).map((r) => ({
+      id: r.id,
+      username: r.username,
+      email: r.email,
+      createdAt: String(r.created_at || "").slice(0, 10),
+      banned: Boolean(r.banned),
+      scripts: Number(r.scripts) || 0,
+      unlocks: Number(r.unlocks) || 0,
+      self: Boolean(admin.id) && r.id === admin.id,
+    })),
+  });
+}
+
+async function handleAdminUserBan(request, env, { id }) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  // Banning yourself deletes your own sessions and leaves nobody able to
+  // unban anyone, because the only way back in is the admin panel.
+  if (admin.id && id === admin.id) return bad(400, "You can't suspend the account you're signed in as.");
+
+  const row = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "No such account.");
+
+  const body = await request.json().catch(() => ({}));
+  const banned = body.banned === false ? 0 : 1;
+
+  await env.DB.prepare(`UPDATE users SET banned = ? WHERE id = ?`).bind(banned, id).run();
+  if (banned) await env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(id).run();
+
+  return ok({ data: { id, banned: Boolean(banned) } });
+}
+
+async function handleAdminUserDelete(request, env, { id }) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  if (admin.id && id === admin.id) return bad(400, "You can't delete the account you're signed in as.");
+
+  const row = await env.DB.prepare(`SELECT id, username FROM users WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "No such account.");
+
+  // The username has to be typed back. Not security — the request is already
+  // authenticated — but a deliberate speed bump in front of the one action on
+  // this site that cannot be undone.
+  const body = await request.json().catch(() => ({}));
+  if (String(body.confirm || "").trim().toLowerCase() !== String(row.username).toLowerCase())
+    return bad(400, "Type the username exactly to confirm.");
+
+  // Their unlock history is kept. It records what happened, not who they were,
+  // and deleting it would silently rewrite every earnings total on the site.
+  await env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(id).run();
+  return ok({ data: { id, deleted: true } });
+}
+
+async function handleAdminScripts(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const url = new URL(request.url);
+  const q = String(url.searchParams.get("q") || "").trim().toLowerCase().slice(0, 60);
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+
+  const where = q ? `WHERE LOWER(s.title) LIKE ? OR LOWER(u.username) LIKE ?` : "";
+  const binds = q ? [`%${q}%`, `%${q}%`] : [];
+
+  // Unlike the public listing this includes removed scripts — seeing what was
+  // taken down, and putting it back, is most of the point of the panel.
+  const { results } = await env.DB.prepare(
+    `SELECT s.id, s.title, s.game, s.views, s.copies, s.removed, s.created_at,
+            u.username AS author, u.id AS author_id,
+            (SELECT COUNT(*) FROM reports r WHERE r.script_id = s.id) AS reports
+       FROM scripts s JOIN users u ON u.id = s.author_id
+       ${where}
+      ORDER BY s.created_at DESC
+      LIMIT ?`
+  ).bind(...binds, limit).all();
+
+  return ok({
+    data: (results || []).map((r) => ({
+      id: r.id,
+      title: r.title,
+      game: r.game,
+      author: r.author,
+      authorId: r.author_id,
+      views: Number(r.views) || 0,
+      copies: Number(r.copies) || 0,
+      reports: Number(r.reports) || 0,
+      removed: Boolean(r.removed),
+      createdAt: String(r.created_at || "").slice(0, 10),
+    })),
+  });
+}
+
+async function handleAdminScriptState(request, env, { id }) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const row = await env.DB.prepare(`SELECT id FROM scripts WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const body = await request.json().catch(() => ({}));
+  const removed = body.removed === false ? 0 : 1;
+  await env.DB.prepare(`UPDATE scripts SET removed = ? WHERE id = ?`).bind(removed, id).run();
+  return ok({ data: { id, removed: Boolean(removed) } });
+}
+
+/**
+ * Resets a script's view and copy counters.
+ *
+ * These ran away once already: copies were incremented per code fetch with no
+ * per-person window, so one script read 17 views and 44 copies. The counting
+ * is fixed, but a number inflated before the fix stays inflated, and there was
+ * no way to correct it without opening the database by hand.
+ */
+async function handleAdminScriptCounters(request, env, { id }) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const row = await env.DB.prepare(`SELECT id FROM scripts WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const body = await request.json().catch(() => ({}));
+  const clean = (v) => Math.min(1e9, Math.max(0, Math.floor(Number(v) || 0)));
+  const views = clean(body.views);
+  const copies = clean(body.copies);
+
+  await env.DB.prepare(`UPDATE scripts SET views = ?, copies = ? WHERE id = ?`)
+    .bind(views, copies, id).run();
+  return ok({ data: { id, views, copies } });
+}
+
+async function handleAdminReports(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const { results } = await env.DB.prepare(
+    `SELECT r.id, r.script_id, r.reason, r.at,
+            s.title, s.removed, u.username AS author
+       FROM reports r
+       LEFT JOIN scripts s ON s.id = r.script_id
+       LEFT JOIN users u ON u.id = s.author_id
+      ORDER BY r.at DESC
+      LIMIT 200`
+  ).all();
+
+  return ok({
+    data: (results || []).map((r) => ({
+      id: r.id,
+      scriptId: r.script_id,
+      title: r.title || "(deleted script)",
+      author: r.author || "",
+      reason: r.reason || "",
+      at: Number(r.at) || 0,
+      removed: Boolean(r.removed),
+    })),
+  });
+}
+
+async function handleAdminReportDismiss(request, env, { id }) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  await env.DB.prepare(`DELETE FROM reports WHERE id = ?`).bind(id).run();
+  return ok({ data: { id, dismissed: true } });
+}
+
 /* ════════════════════════════════════════════════════════════ leaderboard ══ */
 
 /**
@@ -1565,7 +1925,7 @@ async function handleEarnings(request, env) {
 const BOARD_SQL = {
   scripts: `SELECT u.username AS username, COUNT(*) AS value
               FROM scripts s JOIN users u ON u.id = s.author_id
-             WHERE s.removed = 0
+             WHERE s.removed = 0 AND u.banned = 0
              GROUP BY s.author_id HAVING value > 0
              ORDER BY value DESC, u.username ASC LIMIT ?`,
 
@@ -1573,18 +1933,19 @@ const BOARD_SQL = {
             FROM scripts s
             JOIN users u ON u.id = s.author_id
             JOIN likes l ON l.script_id = s.id
-           WHERE s.removed = 0
+           WHERE s.removed = 0 AND u.banned = 0
            GROUP BY s.author_id HAVING value > 0
            ORDER BY value DESC, u.username ASC LIMIT ?`,
 
   views: `SELECT u.username AS username, SUM(s.views) AS value
             FROM scripts s JOIN users u ON u.id = s.author_id
-           WHERE s.removed = 0
+           WHERE s.removed = 0 AND u.banned = 0
            GROUP BY s.author_id HAVING value > 0
            ORDER BY value DESC, u.username ASC LIMIT ?`,
 
   unlocks: `SELECT u.username AS username, COUNT(*) AS value
               FROM unlock_events e JOIN users u ON u.id = e.author_id
+             WHERE u.banned = 0
              GROUP BY e.author_id HAVING value > 0
              ORDER BY value DESC, u.username ASC LIMIT ?`,
 };
@@ -1617,11 +1978,23 @@ const PATTERNS = [
   ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/report$/, handleScriptReport],
+  ["POST", /^\/api\/admin\/users\/([A-Za-z0-9_-]{1,40})\/ban$/, handleAdminUserBan],
+  ["DELETE", /^\/api\/admin\/users\/([A-Za-z0-9_-]{1,40})$/, handleAdminUserDelete],
+  ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/state$/, handleAdminScriptState],
+  ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/counters$/, handleAdminScriptCounters],
+  ["POST", /^\/api\/admin\/reports\/([A-Za-z0-9_-]{1,40})\/dismiss$/, handleAdminReportDismiss],
 ];
 
 const ROUTES = {
   "GET  /api/scripts": handleScriptList,
   "GET  /api/leaderboard": handleLeaderboard,
+  "GET  /api/admin/state": handleAdminState,
+  "POST /api/admin/unlock": handleAdminUnlock,
+  "POST /api/admin/lock": handleAdminLock,
+  "GET  /api/admin/overview": handleAdminOverview,
+  "GET  /api/admin/users": handleAdminUsers,
+  "GET  /api/admin/scripts": handleAdminScripts,
+  "GET  /api/admin/reports": handleAdminReports,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,
@@ -1696,7 +2069,15 @@ export default {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith("/api/")) {
-      const asset = harden(await env.ASSETS.fetch(request));
+      // /admin is a route the app draws, not a file on disk. Without this, a
+      // direct visit or a refresh there is a 404 from the asset server before
+      // any JavaScript gets a chance to run.
+      // Ask for "/" rather than "/index.html": Pages canonicalises the latter
+      // with a 308 back to "/", which the browser follows — so /admin bounced
+      // to the home page before any script ran.
+      const spa = /^\/admin\/?$/.test(url.pathname);
+      const asset = harden(await env.ASSETS.fetch(
+        spa ? new Request(new URL("/", url), request) : request));
       const cache = cacheFor(url.pathname);
       if (cache) asset.headers.set("Cache-Control", cache);
       return asset;
