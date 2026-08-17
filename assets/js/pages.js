@@ -1017,11 +1017,69 @@ function heldLocally(id) {
   return false;
 }
 
+/** m:ss, or 0:07 — the shape people read a countdown in. */
+function asClock(seconds) {
+  const s = Math.max(0, Math.ceil(seconds));
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
 export function createScriptPage({ onRequireAuth }) {
   const sheet = createOverlay({ id: "script", label: "Script", wide: true });
   let current = null;
   let code = null;         // fetched separately, and only once we're allowed it
   let busy = false;
+
+  // When this visitor's access runs out, as a local monotonic-ish deadline.
+  //
+  // The server sends how many seconds are LEFT rather than when it ends, so
+  // this is built from the arrival time here. A clock that disagrees with
+  // Cloudflare's — and plenty do, by hours — cannot make the countdown lie.
+  let expiresAt = null;
+  let ticking = null;
+
+  function stopClock() {
+    if (ticking) { clearInterval(ticking); ticking = null; }
+  }
+
+  /**
+   * Ticks the visible countdown once a second.
+   *
+   * It only rewrites the one element rather than re-rendering the sheet: a
+   * full render every second would fight with text selection and scroll
+   * position while somebody is trying to read the code.
+   */
+  function startClock() {
+    stopClock();
+    if (!expiresAt) return;
+
+    const tick = () => {
+      const left = (expiresAt - Date.now()) / 1000;
+      const el = sheet.body.querySelector("[data-clock]");
+
+      if (left <= 0) {
+        // The server would refuse the code from here anyway. Re-rendering as
+        // locked keeps the page honest instead of leaving an expired unlock
+        // on screen — and drops the code rather than keeping it in memory.
+        stopClock();
+        expiresAt = null;
+        if (current) current.unlocked = false;
+        code = null;
+        render();
+        // Say so. Code vanishing off the screen unannounced reads as a bug.
+        toast("Your unlock ran out — one more sponsor step reopens it", "warn");
+        return;
+      }
+      if (el) el.textContent = asClock(left);
+    };
+
+    tick();
+    ticking = setInterval(tick, 1000);
+  }
+
+  /** Reads the window off a server answer. Absent or null means no clock. */
+  function noteWindow(seconds) {
+    expiresAt = Number.isFinite(seconds) && seconds > 0 ? Date.now() + seconds * 1000 : null;
+  }
 
   function isOwner(s) {
     return Boolean(account.session && s.authorId && s.authorId === account.session.id);
@@ -1074,6 +1132,10 @@ export function createScriptPage({ onRequireAuth }) {
       ${open ? `
         <div class="script__toolbar">
           ${isOwner(s) ? `<span class="chip chip--ok">Your script — unlocked automatically</span>` : ""}
+          ${!isOwner(s) && expiresAt ? `
+            <span class="chip chip--warn" title="When this runs out, the sponsor step comes back.">
+              <span data-clock>${esc(asClock((expiresAt - Date.now()) / 1000))}</span> left
+            </span>` : ""}
           <button class="btn btn--primary" data-act="copy">Copy code</button>
           <button class="btn btn--ghost" data-act="raw">Open raw</button>
           <button class="btn btn--ghost${s.liked ? " is-on" : ""}" data-act="like">
@@ -1123,6 +1185,11 @@ export function createScriptPage({ onRequireAuth }) {
           })()}
         </div>
       `}`;
+
+    // The markup was just replaced, so any element the clock was writing to is
+    // gone. Re-attach if there is still a window to count down.
+    if (open && expiresAt && !isOwner(s)) startClock();
+    else stopClock();
   }
 
   /** The code is never in the listing, so opening an unlocked script fetches it. */
@@ -1143,6 +1210,7 @@ export function createScriptPage({ onRequireAuth }) {
     // local note would outlive the server's grant and show an unlocked page
     // whose code request then fails.
     if (!res.data.verified) noteLocalUnlock(current.id);
+    noteWindow(res.data.unlockedFor);
     code = null;
     render();
     await loadCode();
@@ -1226,6 +1294,11 @@ export function createScriptPage({ onRequireAuth }) {
       current = { ...script };
       code = null;
       busy = false;
+      // The listing does not carry a window; only the detail fetch below does.
+      // Starting from null means a stale card cannot show a countdown for an
+      // unlock that has already run out.
+      expiresAt = null;
+      stopClock();
       render();
       sheet.open();
 
@@ -1235,6 +1308,7 @@ export function createScriptPage({ onRequireAuth }) {
         const fresh = await fetchScript(script.id);
         if (fresh && current && fresh.id === current.id) {
           current = fresh;
+          noteWindow(fresh.unlockedFor);
           render();
         }
       } else {
@@ -1248,11 +1322,15 @@ export function createScriptPage({ onRequireAuth }) {
       if (!script) return false;
       current = script;
       code = null;
+      noteWindow(script.unlockedFor);
       render();
       sheet.open();
       return finishUnlock(clickId, hash);
     },
-    close: () => sheet.close(),
+    close() {
+      stopClock();
+      sheet.close();
+    },
   };
 }
 
