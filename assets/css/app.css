@@ -479,7 +479,7 @@ a.btn:hover { text-decoration: none; }
   font-size: 0.7rem; color: var(--ink-3); letter-spacing: 0.03em;
 }
 
-.card__actions { display: flex; gap: 8px; margin-top: 3px; }
+.card__actions { display: flex; gap: 8px; margin-top: 3px; align-items: center; flex-wrap: wrap; }
 
 /* =====================================================================
    Vault + featured
