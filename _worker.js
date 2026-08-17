@@ -935,7 +935,35 @@ async function handleScriptList(request, env) {
       LIMIT ?`
   ).bind(...binds, limit).all();
 
-  return ok({ data: (results || []).map((r) => publicScript(r)) });
+  // Which of these this visitor currently holds, and for how long.
+  //
+  // One query for every live grant they have, rather than one per script —
+  // the free plan allows 10ms of CPU per request and a per-row lookup would
+  // spend it. The listing still carries no code; this is only the clock.
+  const user = await currentUser(request, env);
+  const subject = await grantSubject(request, env, user);
+  const now = nowSec();
+
+  const held = new Map();
+  const mine = await env.DB.prepare(
+    `SELECT script_id, verified, expires FROM grants WHERE subject = ? AND expires > ?`
+  ).bind(subject, now).all();
+
+  for (const g of mine.results || []) {
+    if (grantOpens(env, g)) held.set(g.script_id, Math.max(0, g.expires - now));
+  }
+
+  return ok({
+    data: (results || []).map((r) => {
+      const own = user && user.id === r.author_id;
+      const left = held.get(r.id);
+      return publicScript(r, {
+        unlocked: Boolean(own) || left !== undefined,
+        unlockedFor: own ? null : (left ?? null),
+        mine: Boolean(own),
+      });
+    }),
+  });
 }
 
 async function handleScriptGet(request, env, { id }) {
