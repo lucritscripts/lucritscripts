@@ -1103,7 +1103,23 @@ async function handleScriptCode(request, env, { id }) {
 
   // Counting here rather than at claim time means the number reflects code
   // actually collected, not sponsor steps abandoned at the last moment.
-  await env.DB.prepare(`UPDATE scripts SET copies = copies + 1 WHERE id = ?`).bind(id).run();
+  //
+  // But it has to be deduplicated the same way a view is, and originally it
+  // was not: one person with a five-minute unlock could re-open the sheet, or
+  // the page could re-render, and every single fetch added a copy. A script
+  // ended up reading "17 views · 44 copies" — three copies per person who ever
+  // looked at it, which is nonsense on its face. One per person per hour, the
+  // same window views use, so the two numbers stay comparable.
+  if (await underLimit(env, `copy:${subject}:${id}`, 1, 3600)) {
+    await env.DB.prepare(`UPDATE scripts SET copies = copies + 1 WHERE id = ?`).bind(id).run();
+
+    // Reading the code is a view of the script by any sane reading, and the
+    // detail fetch that normally records one can be skipped. Without this,
+    // copies could still outrun views.
+    if (await underLimit(env, `view:${subject}:${id}`, 1, 3600)) {
+      await env.DB.prepare(`UPDATE scripts SET views = views + 1 WHERE id = ?`).bind(id).run();
+    }
+  }
   return ok({ data: { code: row.code } });
 }
 
@@ -1528,6 +1544,67 @@ async function handleEarnings(request, env) {
   });
 }
 
+/* ════════════════════════════════════════════════════════════ leaderboard ══ */
+
+/**
+ * The boards, as SQL.
+ *
+ * This endpoint exists because the leaderboard did not. The page rendered a
+ * real board with real tabs and then called `getRows: () => []` — a hardcoded
+ * empty array — so it said "Nobody on the board yet" no matter how many
+ * scripts had been published. Decoration, in the same family as the paywall
+ * that used to hand out the code.
+ *
+ * Aggregating in the database rather than over a fetched listing matters: the
+ * listing is capped at 200 rows, so a client-side board would quietly rank a
+ * slice of the site and present it as the whole thing.
+ *
+ * Removed scripts are excluded everywhere. A deleted script should not keep
+ * earning its author a place.
+ */
+const BOARD_SQL = {
+  scripts: `SELECT u.username AS username, COUNT(*) AS value
+              FROM scripts s JOIN users u ON u.id = s.author_id
+             WHERE s.removed = 0
+             GROUP BY s.author_id HAVING value > 0
+             ORDER BY value DESC, u.username ASC LIMIT ?`,
+
+  likes: `SELECT u.username AS username, COUNT(l.script_id) AS value
+            FROM scripts s
+            JOIN users u ON u.id = s.author_id
+            JOIN likes l ON l.script_id = s.id
+           WHERE s.removed = 0
+           GROUP BY s.author_id HAVING value > 0
+           ORDER BY value DESC, u.username ASC LIMIT ?`,
+
+  views: `SELECT u.username AS username, SUM(s.views) AS value
+            FROM scripts s JOIN users u ON u.id = s.author_id
+           WHERE s.removed = 0
+           GROUP BY s.author_id HAVING value > 0
+           ORDER BY value DESC, u.username ASC LIMIT ?`,
+
+  unlocks: `SELECT u.username AS username, COUNT(*) AS value
+              FROM unlock_events e JOIN users u ON u.id = e.author_id
+             GROUP BY e.author_id HAVING value > 0
+             ORDER BY value DESC, u.username ASC LIMIT ?`,
+};
+
+async function handleLeaderboard(request, env) {
+  const url = new URL(request.url);
+  const board = String(url.searchParams.get("board") || "scripts");
+  const limit = Math.min(50, Math.max(1, Number(url.searchParams.get("limit")) || 10));
+
+  const sql = BOARD_SQL[board];
+  if (!sql) return bad(400, "No such board.", { boards: Object.keys(BOARD_SQL) });
+
+  const { results } = await env.DB.prepare(sql).bind(limit).all();
+  return ok({
+    data: (results || [])
+      .filter((r) => r.username)
+      .map((r) => ({ username: r.username, value: Number(r.value) || 0 })),
+  });
+}
+
 /* ═══════════════════════════════════════════════════════════════════ router ══ */
 
 /**
@@ -1544,6 +1621,7 @@ const PATTERNS = [
 
 const ROUTES = {
   "GET  /api/scripts": handleScriptList,
+  "GET  /api/leaderboard": handleLeaderboard,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,
