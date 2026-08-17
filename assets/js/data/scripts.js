@@ -48,11 +48,15 @@ export const SORTS = [
 ];
 
 /** Leaderboard rankings. */
+// "Best Rating" used to be here. Nothing in the site ever produced a rating,
+// so that tab could only ever be empty — a board promising a ranking that did
+// not exist. Unlocks replace it: a real number, and the one that decides who
+// gets paid.
 export const BOARDS = [
   { id: "scripts", label: "Most Scripts", metric: "scripts", suffix: "scripts" },
   { id: "likes",   label: "Most Likes",   metric: "likes",   suffix: "likes" },
-  { id: "rating",  label: "Best Rating",  metric: "rating",  suffix: "avg" },
   { id: "views",   label: "Highest Views",metric: "views",   suffix: "views" },
+  { id: "unlocks", label: "Most Unlocks", metric: "unlocks", suffix: "unlocks" },
 ];
 
 /** Every script is user-published. Nothing is seeded. */
