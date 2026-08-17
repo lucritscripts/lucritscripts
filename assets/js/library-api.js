@@ -58,6 +58,19 @@ export async function fetchScript(id) {
   return res.ok ? res.data : null;
 }
 
+/**
+ * One leaderboard.
+ *
+ * Returns null rather than [] when the request fails, so the caller can tell
+ * "nobody is on this board" apart from "we could not find out" — the page says
+ * different things for the two, and conflating them was how an empty board
+ * looked like a working one for weeks.
+ */
+export async function fetchBoard(board) {
+  const res = await call(`/api/leaderboard?board=${encodeURIComponent(board)}`);
+  return res.ok ? res.data : null;
+}
+
 export async function publishScript(script) {
   return call("/api/scripts", { method: "POST", body: script });
 }

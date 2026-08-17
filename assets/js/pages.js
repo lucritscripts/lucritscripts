@@ -1301,12 +1301,26 @@ export async function copyText(text) {
    Leaderboard
    ============================================================ */
 
-export function createLeaderboard({ getRows }) {
+/**
+ * The leaderboard.
+ *
+ * `getRows` stays for the static build, which has no server to ask. `load` is
+ * the real path: an async fetch per board, because the ranking has to be
+ * computed across every script rather than the slice a listing returns.
+ *
+ * Each board is fetched once and kept — flipping between tabs should not
+ * re-query, and the numbers do not move minute to minute.
+ */
+export function createLeaderboard({ getRows, load }) {
   const node = el("div", { class: "board" });
   let board = BOARDS[0].id;
+  const cache = new Map();
+  const failed = new Set();
+  let loading = false;
 
   function render() {
-    const rows = getRows?.(board) || [];
+    const rows = cache.get(board) || getRows?.(board) || [];
+    const waiting = loading && !cache.has(board);
     node.innerHTML = `
       <div class="board__tabs" role="tablist">
         ${BOARDS.map((b) => `<button class="${b.id === board ? "is-on" : ""}" data-board="${b.id}" role="tab">${b.label}</button>`).join("")}
@@ -1318,13 +1332,39 @@ export function createLeaderboard({ getRows }) {
               <span class="board__rank">${i + 1}</span>
               <span class="avatar" style="--seed:${(r.username || "?").length * 37}">${esc((r.username || "?").slice(0, 2).toUpperCase())}</span>
               <span class="board__name">@${esc(r.username)}</span>
-              <span class="board__value">${fmt(r.value)} <small>${esc(r.suffix || "")}</small></span>
+              <span class="board__value">${fmt(r.value)} <small>${
+                esc(r.suffix || BOARDS.find((b) => b.id === board)?.suffix || "")
+              }</small></span>
             </li>`).join("")}
-        </ol>` : `
+        </ol>` : waiting ? `
+        <div class="empty"><strong>Counting…</strong></div>` : failed.has(board) ? `
+        <div class="empty">
+          <strong>Couldn't load the board.</strong>
+          <span>Try again in a moment.</span>
+        </div>` : `
         <div class="empty">
           <strong>Nobody on the board yet.</strong>
           <span>Publish the first script and you'll be number one by default.</span>
         </div>`}`;
+  }
+
+  async function fill() {
+    if (!load || cache.has(board)) return;
+    const want = board;
+    loading = true;
+    render();
+    try {
+      const rows = await load(want);
+      if (rows) { cache.set(want, rows); failed.delete(want); }
+      else failed.add(want);
+    } catch {
+      failed.add(want);
+    } finally {
+      loading = false;
+      // The tab may have been changed while this was in flight; render whatever
+      // is current rather than whatever this call was for.
+      render();
+    }
   }
 
   node.addEventListener("click", (e) => {
@@ -1332,8 +1372,19 @@ export function createLeaderboard({ getRows }) {
     if (!b) return;
     board = b.dataset.board;
     render();
+    fill();
   });
 
   render();
-  return { node, refresh: render };
+  fill();
+
+  return {
+    node,
+    refresh() {
+      cache.clear();
+      failed.clear();
+      render();
+      fill();
+    },
+  };
 }

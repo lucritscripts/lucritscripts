@@ -11,7 +11,7 @@ import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLead
 import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import { createGamePicker } from "./gamepicker.js";
 import { tileGames, searchGames, searchScripts, gameArt, allGames } from "./games.js";
-import { libraryOnline, fetchScripts, publishScript } from "./library-api.js";
+import { libraryOnline, fetchScripts, publishScript, fetchBoard } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -105,6 +105,14 @@ export function cardMarkup(script, { large = false } = {}) {
   const cat = categoryOf(script.category);
   const t = scriptTotals(script.id);
   const saved = isSaved(account.session?.id, script.id);
+
+  // The server's counts win when there are any. The card used to show only the
+  // local tallies, which are always zero for someone who has never opened the
+  // script — so every card read "0 views · 0 likes" until you clicked in, and
+  // then the real numbers appeared, as if opening it had created them.
+  const views = script.views ?? t.views;
+  const likes = script.likes ?? t.likes;
+  const copies = script.copies ?? t.copies ?? 0;
   return `
     <article class="card${large ? " card--lg" : ""}" data-id="${esc(script.id)}" style="--cat:${cat.accent}">
       <div class="card__glow" aria-hidden="true"></div>
@@ -124,13 +132,15 @@ export function cardMarkup(script, { large = false } = {}) {
         <div class="card__meta">
           <span class="by">@${esc(script.author)}</span>
           <span class="dot" aria-hidden="true"></span>
-          <span>${fmt(t.views)} views</span>
+          <span>${fmt(views)} views</span>
           <span class="dot" aria-hidden="true"></span>
-          <span>${fmt(t.likes)} like${t.likes === 1 ? "" : "s"}</span>
-          <span class="dot" aria-hidden="true"></span>
-          <span class="card__rating">${script.rating
-            ? `<b>${Number(script.rating).toFixed(1)}</b>★`
-            : "unrated"}</span>
+          <span>${fmt(likes)} like${likes === 1 ? "" : "s"}</span>
+          ${copies ? `
+            <span class="dot" aria-hidden="true"></span>
+            <span>${fmt(copies)} cop${copies === 1 ? "y" : "ies"}</span>` : ""}
+          ${script.rating ? `
+            <span class="dot" aria-hidden="true"></span>
+            <span class="card__rating"><b>${Number(script.rating).toFixed(1)}</b>★</span>` : ""}
         </div>
         <div class="card__actions">
           <button class="btn btn--sm btn--primary" data-act="get">${
@@ -510,7 +520,15 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
   }).join("");
 
   /* ---- leaderboard ---- */
-  const board = createLeaderboard({ getRows: () => [] });
+  const board = createLeaderboard({
+    // Static hosting has no server to rank anything, so the board stays empty
+    // there rather than inventing numbers.
+    getRows: () => [],
+    async load(which) {
+      if (!(await libraryOnline())) return [];
+      return fetchBoard(which);
+    },
+  });
   $("#board-mount", content).appendChild(board.node);
 
   /* ---- publish ---- */
