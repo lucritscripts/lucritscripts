@@ -953,8 +953,18 @@ async function handleScriptGet(request, env, { id }) {
   const mine = user && user.id === row.author_id;
 
   const grant = mine ? null : await env.DB.prepare(
-    `SELECT verified FROM grants WHERE subject = ? AND script_id = ? AND expires > ?`
+    `SELECT verified, expires FROM grants WHERE subject = ? AND script_id = ? AND expires > ?`
   ).bind(subject, id, nowSec()).first();
+
+  // How long is left, in seconds — not the deadline itself.
+  //
+  // A timestamp would need the visitor's clock to agree with ours to mean
+  // anything, and it often does not: a laptop an hour fast would show an
+  // unlock that expired before it started. A duration is measured entirely
+  // here and stays true whatever their clock says.
+  const unlockedFor = grantOpens(env, grant)
+    ? Math.max(0, grant.expires - nowSec())
+    : null;
 
   // A view is one per subject per script per hour, so a refresh loop cannot
   // inflate somebody's numbers.
@@ -965,8 +975,10 @@ async function handleScriptGet(request, env, { id }) {
 
   return ok({
     data: publicScript(row, {
-      // The author never has to unlock their own work.
+      // The author never has to unlock their own work, and so has no clock
+      // running — `unlockedFor` stays null for them rather than reading zero.
       unlocked: Boolean(mine) || grantOpens(env, grant),
+      unlockedFor,
       mine: Boolean(mine),
       liked: user ? Boolean(await env.DB.prepare(
         `SELECT 1 FROM likes WHERE user_id = ? AND script_id = ?`
@@ -1434,7 +1446,16 @@ async function handleUnlockClaim(request, env) {
      VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).bind("e_" + randomHex(8), script.id, script.author_id, subject, provider, verified, now).run();
 
-  return ok({ data: { unlocked: true, verified: Boolean(verified) } });
+  // The countdown starts here, so the claim says how long it runs for. Without
+  // this the page would have to re-fetch the script just to learn the number
+  // it is about to display.
+  return ok({
+    data: {
+      unlocked: true,
+      verified: Boolean(verified),
+      unlockedFor: grantMinutes(env) * 60,
+    },
+  });
 }
 
 /**
