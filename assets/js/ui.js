@@ -12,6 +12,7 @@ import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import { createGamePicker } from "./gamepicker.js";
 import { tileGames, searchGames, searchScripts, gameArt, allGames } from "./games.js";
 import { libraryOnline, fetchScripts, publishScript } from "./library-api.js";
+import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -49,10 +50,17 @@ const listeners = new Set();
 export function onLibraryChange(fn) { listeners.add(fn); return () => listeners.delete(fn); }
 function libraryChanged() { for (const fn of listeners) fn(library); }
 
+// A window running out has to reach the cards, not just the open sheet:
+// otherwise a card sits there saying "Open script" for an unlock that ended.
+onExpire(() => libraryChanged());
+
 /** Replaces the cache wholesale with what the server just said. */
 export function setLibrary(scripts) {
   library.length = 0;
   library.push(...scripts);
+  // The listing now carries how long each unlock this visitor holds has left,
+  // so the cards can show it without opening anything.
+  for (const s of scripts) noteWindow(s.id, s.unlockedFor);
   libraryChanged();
 }
 
@@ -125,7 +133,10 @@ export function cardMarkup(script, { large = false } = {}) {
             : "unrated"}</span>
         </div>
         <div class="card__actions">
-          <button class="btn btn--sm btn--primary" data-act="get">Get Script</button>
+          <button class="btn btn--sm btn--primary" data-act="get">${
+            secondsLeft(script.id) !== null ? "Open script" : "Get Script"
+          }</button>
+          ${clockChip(script.id)}
         </div>
       </div>
     </article>`;
