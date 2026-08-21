@@ -23,9 +23,6 @@ const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 export const DISCORD_INVITE = "https://discord.gg/JUSmn4ZYe";
 
-/** The two category shortcuts worth a permanent button. */
-const PINNED = ["combat", "universal"];
-
 const el = (tag, attrs = {}, html) => {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
@@ -197,9 +194,10 @@ function attachTilt(root, strength = 8) {
  * yet" — a directory of absence. People come here for scripts, so scripts are
  * what it shows; the game is a filter above them, not a gate in front of them.
  *
- * Two categories stay pinned: Combat, and Universal for everything that is not
- * tied to a single game. Everything else is reachable through search, the
- * Library, or a game's own page.
+ * There is no category filter here on purpose: every card already wears its
+ * category, which is enough to scan by. Category still narrows the list when
+ * something else asks for it — a chapter, or the Categories page — and the
+ * count line then offers a way back out.
  */
 export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLibrary }) {
   const state = { query: "", cat: "", game: "" };
@@ -221,13 +219,6 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
         <span class="sr-only">Filter by game</span>
         <select class="library__game" data-gamepick></select>
       </label>
-    </div>
-
-    <div class="library__pinned">
-      ${PINNED.map((c) => `
-        <button class="filter filter--pin" type="button" data-cat="${esc(c)}"
-                style="--cat:${esc(categoryOf(c).accent)}">${esc(categoryOf(c).label)}</button>`).join("")}
-      <span class="library__pinnote">Pinned categories</span>
       <button class="btn btn--ghost btn--xs library__all" type="button" data-more>Browse all games</button>
     </div>
 
@@ -236,7 +227,6 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
   const input = $(".library__input", root);
   const clear = $(".library__clear", root);
-  const pins = $$(".filter--pin", root);
   const gamePick = $("[data-gamepick]", root);
   const results = $(".library__results", root);
   const count = $(".library__count", root);
@@ -335,7 +325,6 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
   }
 
   function render() {
-    for (const p of pins) p.classList.toggle("is-on", state.cat === p.dataset.cat);
     clear.hidden = !state.query;
     paintGameMenu();
 
@@ -362,17 +351,6 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
     input.focus();
     render();
   });
-
-  for (const p of pins) {
-    p.addEventListener("click", () => {
-      // Clicking the pin you are already on clears it, so the same button
-      // both applies and removes the filter.
-      state.cat = state.cat === p.dataset.cat ? "" : p.dataset.cat;
-      state.query = "";
-      input.value = "";
-      render();
-    });
-  }
 
   gamePick.addEventListener("change", () => {
     state.game = gamePick.value;
