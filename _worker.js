@@ -1299,12 +1299,42 @@ function lootThumbnail(script) {
 function unlockProviders(env) {
   const live = [];
   if (env.LOOTLABS_TOKEN) live.push("lootlabs");
-  // Linkvertise needs BOTH: the anti-bypass token to verify with, and the link
-  // itself, which is created by hand in their dashboard because their API does
-  // not offer link creation. Without either one there is nothing to send a
+  // Linkvertise needs the anti-bypass token to verify with, plus somewhere to
+  // send people: either a publisher id (dynamic links, built per unlock) or a
+  // single hand-made link. Without one of each there is nothing to send a
   // visitor to, or no way to know they arrived honestly.
-  if (env.LINKVERTISE_TOKEN && env.LINKVERTISE_URL) live.push("linkvertise");
+  if (env.LINKVERTISE_TOKEN && (env.LINKVERTISE_USER_ID || env.LINKVERTISE_URL))
+    live.push("linkvertise");
   return live;
+}
+
+/**
+ * A Linkvertise dynamic link, built per unlock.
+ *
+ * Their dashboard links point at one fixed destination, which is why the first
+ * version of this had to park the script id in sessionStorage and hope the
+ * visitor came back in the same tab. Dynamic links take the destination as a
+ * base64 parameter, so the return URL can name the script itself — the same
+ * property `puid` gives us on the LootLabs side, and a much better one to rely
+ * on than a client-side hint.
+ *
+ * Format is `link-to.net/{publisherId}/{nonce}/dynamic?r={base64(target)}`.
+ * The nonce is theirs, not ours; it only has to vary.
+ */
+function linkvertiseLink(env, target, nonce) {
+  const id = encodeURIComponent(String(env.LINKVERTISE_USER_ID));
+  // btoa is not available in Workers for arbitrary bytes, and the target is
+  // URI-encoded first exactly as their own script does it.
+  const encoded = base64Url(encodeURI(target));
+  return `https://link-to.net/${id}/${nonce}/dynamic?r=${encoded}`;
+}
+
+/** Base64 of a string, standard alphabet — what their `r` parameter expects. */
+function base64Url(text) {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
 }
 
 /**
@@ -1368,14 +1398,21 @@ async function handleUnlockStart(request, env) {
     return ok({ data: { clickId, url: "", configured: false } });
   }
 
-  // Linkvertise links are made by hand in their dashboard and point at a fixed
-  // destination, so there is no per-unlock API call — the click row we just
-  // wrote is what ties this visitor to this script when they come back.
+  const site = env.SITE_URL || new URL(request.url).origin;
+
+  // Linkvertise needs no per-unlock API call either way: the click row written
+  // above is what ties this visitor to this script when they come back.
   if (provider === "linkvertise" && unlockProviders(env).includes("linkvertise")) {
-    return ok({ data: { clickId, url: env.LINKVERTISE_URL, configured: true, provider: "linkvertise" } });
+    const url = env.LINKVERTISE_USER_ID
+      // Dynamic: the destination carries the script id, so the return does too.
+      ? linkvertiseLink(env, `${site}/?unlocked=${encodeURIComponent(script.id)}`,
+                        clickId.replace(/\D/g, "").slice(0, 6) || "1")
+      // Fixed link: one destination for everything, so which script this was
+      // for is only known from the click row and the client's own hint.
+      : env.LINKVERTISE_URL;
+    return ok({ data: { clickId, url, configured: true, provider: "linkvertise" } });
   }
 
-  const site = env.SITE_URL || new URL(request.url).origin;
   const loot = lootSettings(env);
   const thumb = lootThumbnail(script);
   try {
