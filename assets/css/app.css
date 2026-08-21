@@ -1426,6 +1426,32 @@ html.no-webgl .panel { background: rgba(10, 15, 26, 0.86); }
 }
 .results__head:first-child { margin-top: 2px; }
 
+/* The game picker sits between the search box and the pinned categories:
+   narrower than the search field so it reads as a filter on the results
+   rather than a second thing to search. */
+.library__filters { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.library__gamepick { flex: 1 1 260px; max-width: 340px; display: block; }
+
+.library__game {
+  width: 100%; appearance: none;
+  padding: 11px 38px 11px 14px;
+  border: 1px solid var(--line-2); border-radius: 12px;
+  background: var(--panel-2, rgba(255,255,255,.04));
+  color: var(--ink); font: inherit; font-size: 0.92rem; cursor: pointer;
+  /* The chevron is drawn rather than imported so it inherits the text colour
+     and needs no asset. */
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+                    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: calc(100% - 20px) 51%, calc(100% - 14px) 51%;
+  background-size: 6px 6px, 6px 6px;
+  background-repeat: no-repeat;
+}
+.library__game:hover { border-color: var(--line-3, var(--line-2)); }
+.library__game:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+/* Native menus paint with the OS palette, so the options need explicit
+   colours or they render black-on-black in a dark theme. */
+.library__game option, .library__game optgroup { background: #0d1220; color: #e8eefc; }
+
 .library__pinned {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px;
 }
