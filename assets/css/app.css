@@ -1429,7 +1429,9 @@ html.no-webgl .panel { background: rgba(10, 15, 26, 0.86); }
 /* The game picker sits between the search box and the pinned categories:
    narrower than the search field so it reads as a filter on the results
    rather than a second thing to search. */
-.library__filters { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.library__filters {
+  display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap;
+}
 .library__gamepick { flex: 1 1 260px; max-width: 340px; display: block; }
 
 .library__game {
@@ -1452,21 +1454,10 @@ html.no-webgl .panel { background: rgba(10, 15, 26, 0.86); }
    colours or they render black-on-black in a dark theme. */
 .library__game option, .library__game optgroup { background: #0d1220; color: #e8eefc; }
 
-.library__pinned {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 14px;
-}
-.library__pinnote {
-  font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.12em;
-  text-transform: uppercase; color: var(--ink-3);
-}
-.library__all { margin-left: auto; }
+/* Sits on the filters row now that the pinned categories are gone; pushed to
+   the far end so the picker keeps the left. */
+.library__all { margin-left: auto; align-self: center; }
 .btn--xs { padding: 7px 13px; font-size: 0.74rem; }
-
-.filter--pin { border-color: var(--line-2); }
-.filter--pin.is-on {
-  background: color-mix(in srgb, var(--cat) 22%, transparent);
-  border-color: var(--cat); color: var(--ink);
-}
 
 .library__clear {
   border: 0; background: none; color: var(--ink-3); font-size: 1.25rem; line-height: 1;
