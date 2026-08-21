@@ -10,7 +10,9 @@ import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLead
          mountTurnstile, turnstileToken } from "./pages.js";
 import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import { createGamePicker } from "./gamepicker.js";
-import { tileGames, searchGames, searchScripts, gameArt, allGames } from "./games.js";
+import {
+  tileGames, searchGames, searchScripts, gameArt, allGames, gameId, findGame,
+} from "./games.js";
 import { libraryOnline, fetchScripts, publishScript, fetchBoard } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 
@@ -20,6 +22,9 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const clamp01 = (v) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
 export const DISCORD_INVITE = "https://discord.gg/JUSmn4ZYe";
+
+/** The two category shortcuts worth a permanent button. */
+const PINNED = ["combat", "universal"];
 
 const el = (tag, attrs = {}, html) => {
   const node = document.createElement(tag);
@@ -188,13 +193,16 @@ function attachTilt(root, strength = 8) {
 /**
  * Find a script.
  *
- * People arrive knowing the game they play, not the abstract category a
- * script belongs to — so the section leads with games. Combat stays pinned
- * as the one category shortcut worth having up front; everything else is
- * reachable through search, the Library, or a game's own page.
+ * This used to open on a wall of game tiles, most of them reading "No scripts
+ * yet" — a directory of absence. People come here for scripts, so scripts are
+ * what it shows; the game is a filter above them, not a gate in front of them.
+ *
+ * Two categories stay pinned: Combat, and Universal for everything that is not
+ * tied to a single game. Everything else is reachable through search, the
+ * Library, or a game's own page.
  */
 export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLibrary }) {
-  const state = { query: "", cat: "" };
+  const state = { query: "", cat: "", game: "" };
   const root = el("div", { class: "library", id });
 
   root.innerHTML = `
@@ -208,9 +216,18 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
       <kbd class="library__kbd">/</kbd>
     </div>
 
+    <div class="library__filters">
+      <label class="library__gamepick">
+        <span class="sr-only">Filter by game</span>
+        <select class="library__game" data-gamepick></select>
+      </label>
+    </div>
+
     <div class="library__pinned">
-      <button class="filter filter--pin" type="button" data-cat="combat" style="--cat:${esc(categoryOf("combat").accent)}">Combat</button>
-      <span class="library__pinnote">Pinned category</span>
+      ${PINNED.map((c) => `
+        <button class="filter filter--pin" type="button" data-cat="${esc(c)}"
+                style="--cat:${esc(categoryOf(c).accent)}">${esc(categoryOf(c).label)}</button>`).join("")}
+      <span class="library__pinnote">Pinned categories</span>
       <button class="btn btn--ghost btn--xs library__all" type="button" data-more>Browse all games</button>
     </div>
 
@@ -219,40 +236,78 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
   const input = $(".library__input", root);
   const clear = $(".library__clear", root);
-  const pin = $(".filter--pin", root);
+  const pins = $$(".filter--pin", root);
+  const gamePick = $("[data-gamepick]", root);
   const results = $(".library__results", root);
   const count = $(".library__count", root);
 
   /* ------------------------------------------------------------ views */
 
-  function gamesView() {
-    const { tiles, overflow, total } = tileGames(library);
+  /**
+   * Rebuilds the game menu.
+   *
+   * Games that actually have scripts come first with their counts; the rest of
+   * the catalogue follows, so someone can still pick a game nobody has
+   * published for and be told so plainly rather than not finding it at all.
+   */
+  function paintGameMenu() {
+    const games = allGames(library);
+    const withScripts = games.filter((g) => g.scripts > 0);
+    const empty = games.filter((g) => !g.scripts)
+      .sort((a, b) => a.name.localeCompare(b.name));
 
-    count.textContent = total === 1 ? "1 game" : `${total} games`;
-    results.innerHTML = `
-      <div class="games">
-        ${tiles.map(gameTileMarkup).join("")}
-        ${overflow ? `
-          <button class="gtile gtile--more" type="button" data-more
-                  aria-label="Browse all ${total} games in the Library">
-            <span class="gtile__bubble">+${overflow}</span>
-            <span class="gtile__name">More games</span>
-            <span class="gtile__count">Open the Library</span>
-          </button>` : ""}
-      </div>`;
+    const option = (g) =>
+      `<option value="${esc(g.id)}"${g.id === state.game ? " selected" : ""}>` +
+      `${esc(g.name)}${g.scripts ? ` (${g.scripts})` : ""}</option>`;
+
+    gamePick.innerHTML = `
+      <option value=""${state.game ? "" : " selected"}>All games</option>
+      ${withScripts.length ? `<optgroup label="Has scripts">${withScripts.map(option).join("")}</optgroup>` : ""}
+      ${empty.length ? `<optgroup label="Nothing published yet">${empty.map(option).join("")}</optgroup>` : ""}`;
   }
 
-  function categoryView() {
-    const cat = categoryOf(state.cat);
-    const list = library.filter((s) => s.category === state.cat);
+  /** Everything currently published, narrowed by whatever filters are on. */
+  function filtered() {
+    return library.filter((s) =>
+      (!state.game || gameId(s.game) === state.game) &&
+      (!state.cat || s.category === state.cat));
+  }
 
-    count.innerHTML = `${list.length} ${cat.label} script${list.length === 1 ? "" : "s"}
-      <button class="library__undo" type="button" data-clear-cat>clear</button>`;
+  function scriptsView() {
+    const list = filtered();
+    const cat = state.cat ? categoryOf(state.cat) : null;
+    const game = state.game ? findGame(library, state.game) : null;
 
-    results.innerHTML = list.length
-      ? `<div class="results__grid">${list.map((s) => cardMarkup(s)).join("")}</div>`
-      : emptyState(`No ${cat.label.toLowerCase()} scripts yet.`,
-          "Be the first to publish one and it sits at the top of this list.");
+    const bits = [`${list.length} script${list.length === 1 ? "" : "s"}`];
+    if (cat) bits.push(`in ${cat.label}`);
+    if (game) bits.push(`for ${game.name}`);
+
+    count.innerHTML = `${esc(bits.join(" "))}` +
+      (cat || game ? ` <button class="library__undo" type="button" data-clear-filters>clear</button>` : "");
+
+    if (list.length) {
+      results.innerHTML = `<div class="results__grid">${list.map((s) => cardMarkup(s)).join("")}</div>`;
+      return;
+    }
+
+    // Say which filter emptied the list, rather than a blanket "nothing here".
+    if (game && cat) {
+      results.innerHTML = emptyState(
+        `No ${cat.label.toLowerCase()} scripts for ${esc(game.name)} yet.`,
+        "Clear one of the filters, or publish the first one.");
+    } else if (game) {
+      results.innerHTML = emptyState(
+        `Nothing published for ${esc(game.name)} yet.`,
+        "Be the first — it sits at the top of this list.");
+    } else if (cat) {
+      results.innerHTML = emptyState(
+        `No ${cat.label.toLowerCase()} scripts yet.`,
+        "Be the first to publish one and it sits at the top of this list.");
+    } else {
+      results.innerHTML = emptyState(
+        "No scripts published yet.",
+        "The first one lands right here.");
+    }
   }
 
   function searchView() {
@@ -280,12 +335,12 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
   }
 
   function render() {
-    pin.classList.toggle("is-on", state.cat === "combat");
+    for (const p of pins) p.classList.toggle("is-on", state.cat === p.dataset.cat);
     clear.hidden = !state.query;
+    paintGameMenu();
 
     if (state.query.trim()) searchView();
-    else if (state.cat) categoryView();
-    else gamesView();
+    else scriptsView();
   }
 
   function emptyState(title, line) {
@@ -308,8 +363,20 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
     render();
   });
 
-  pin.addEventListener("click", () => {
-    state.cat = state.cat === "combat" ? "" : "combat";
+  for (const p of pins) {
+    p.addEventListener("click", () => {
+      // Clicking the pin you are already on clears it, so the same button
+      // both applies and removes the filter.
+      state.cat = state.cat === p.dataset.cat ? "" : p.dataset.cat;
+      state.query = "";
+      input.value = "";
+      render();
+    });
+  }
+
+  gamePick.addEventListener("change", () => {
+    state.game = gamePick.value;
+    // A search would hide the very list the picker just filtered.
     state.query = "";
     input.value = "";
     render();
@@ -317,7 +384,12 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
   root.addEventListener("click", (e) => {
     if (e.target.closest("[data-more]")) { onOpenLibrary?.(); return; }
-    if (e.target.closest("[data-clear-cat]")) { state.cat = ""; render(); return; }
+    if (e.target.closest("[data-clear-filters]")) {
+      state.cat = "";
+      state.game = "";
+      render();
+      return;
+    }
     if (e.target.closest('[data-act="publish"]')) { onPublish?.(); return; }
 
     const tile = e.target.closest("[data-game]");
@@ -332,7 +404,7 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
   attachTilt(results, 6);
   onLibraryChange(render);
-  onStatsChange(() => { if (!state.query && !state.cat) render(); });
+  onStatsChange(() => { if (!state.query) render(); });
   render();
 
   return {
@@ -343,6 +415,12 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
       state.query = "";
       input.value = "";
       state.cat = cat || "";
+      render();
+    },
+    setGame(gameKey) {
+      state.query = "";
+      input.value = "";
+      state.game = gameKey || "";
       render();
     },
     refresh: render,
