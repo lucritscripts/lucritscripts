@@ -6,6 +6,11 @@
 // keeps only the category and sort vocabularies.
 
 export const CATEGORIES = [
+  // Universal comes first because it is the honest answer for most of what
+  // gets published: a script that does not belong to one game. Without it,
+  // people picked whatever category was closest and the game filter buried
+  // their script under a title it had nothing to do with.
+  { id: "universal",   label: "Universal",    accent: "#7cc4ff" },
   { id: "combat",      label: "Combat",       accent: "#ff4d5e" },
   { id: "movement",    label: "Movement",     accent: "#4ff0d0" },
   { id: "ui",          label: "UI",           accent: "#39d7ff" },
