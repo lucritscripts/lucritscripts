@@ -1797,6 +1797,25 @@ html.is-gated { overflow: hidden; }
 .btn--google:disabled { opacity: 0.6; cursor: default; }
 .btn--google svg { flex: none; }
 
+/* Discord's own blurple, unlike the Google button above — their brand rules
+   are happy on a coloured surface, and a second white button next to the first
+   would read as two Googles. */
+.btn--discordauth {
+  background: var(--discord);
+  color: #fff;
+  border-color: transparent;
+  gap: 10px;
+  font-weight: 600;
+  box-shadow: 0 2px 12px rgba(88, 101, 242, 0.32);
+}
+.btn--discordauth:hover { background: #6b77f5; box-shadow: 0 6px 20px rgba(88, 101, 242, 0.44); }
+.btn--discordauth:disabled { opacity: 0.6; cursor: default; }
+.btn--discordauth svg { flex: none; fill: currentColor; }
+
+/* Live member counts, appended inside the Join button. Quieter than the label
+   so the button still reads as one thing rather than two. */
+[data-discord-stats] { opacity: 0.78; font-weight: 500; font-variant-numeric: tabular-nums; }
+
 .sheet__or {
   display: flex;
   align-items: center;
