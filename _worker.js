@@ -975,7 +975,10 @@ async function handleScriptList(request, env) {
 
   // A suspended account's scripts come off the site with them. Leaving them up
   // would make a ban cosmetic — the work stays, and keeps earning.
-  const where = ["s.removed = 0", "u.banned = 0"];
+  // `status` keeps held submissions out of the library while a human decides.
+  // Rows written before the review queue existed default to 'approved', so
+  // nothing that was already published disappears.
+  const where = ["s.removed = 0", "u.banned = 0", "s.status = 'approved'"];
   const binds = [];
   if (category) { where.push("s.category = ?"); binds.push(category); }
   if (author) { where.push("s.author_id = ?"); binds.push(author); }
@@ -1029,6 +1032,13 @@ async function handleScriptGet(request, env, { id }) {
   ).bind(id).first();
 
   if (!row) return bad(404, "That script doesn't exist.");
+
+  // A held script is reachable by its author and by nobody else — they should
+  // be able to see what they submitted while it waits, without it being live.
+  if (row.status && row.status !== "approved") {
+    const me = await currentUser(request, env);
+    if (!me || me.id !== row.author_id) return bad(404, "That script doesn't exist.");
+  }
 
   const user = await currentUser(request, env);
   const subject = await grantSubject(request, env, user);
@@ -1179,14 +1189,26 @@ async function handleScriptPublish(request, env, _params, ctx) {
       ? thumbRaw
       : safeSocial(thumbRaw, ["roblox.com", "rbxcdn.com"]);
 
+  // The checker runs before anything is written. Three outcomes: publish,
+  // hold for a human, or refuse. It is looking for spam and empty
+  // submissions — NOT deciding whether the code is safe, which it cannot do
+  // and must never claim to.
+  const verdict = checkSubmission({ code, descr, title, game });
+  if (verdict.status === "rejected") return bad(400, verdict.note);
+
+  // The creator may have accepted an AI rewrite in the publish form. Their own
+  // words are kept either way, so a rewrite that drifted is recoverable.
+  const original = String(body.descOriginal || "").trim() || descr;
+
   const id = "s_" + randomHex(8);
   await env.DB.prepare(
     `INSERT INTO scripts (id, author_id, title, game, category, descr, code, tags,
-                          keyless, thumbnail, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                          keyless, thumbnail, created_at, status, check_note, descr_original)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(
     id, user.id, title, game, category, descr, code, JSON.stringify(tags),
-    body.keyless === false ? 0 : 1, thumbnail, new Date().toISOString()
+    body.keyless === false ? 0 : 1, thumbnail, new Date().toISOString(),
+    verdict.status, verdict.note, original
   ).run();
 
   const row = await env.DB.prepare(
@@ -1195,14 +1217,32 @@ async function handleScriptPublish(request, env, _params, ctx) {
   ).bind(id).first();
 
   // Tell Discord, but never at the publisher's expense. waitUntil keeps the
-  // request from waiting on it, and announceScript swallows its own failures,
-  // so a dead webhook is a missing message rather than a publish that appears
-  // to have gone wrong.
-  const announce = announceScript(
-    env, { id, title, game, descr, thumbnail, keyless: body.keyless !== false }, user.username);
-  if (ctx?.waitUntil) ctx.waitUntil(announce); else announce.catch(() => {});
+  // request from waiting on it, and every announce path swallows its own
+  // failures, so a dead webhook is a missing message rather than a publish
+  // that appears to have gone wrong.
+  //
+  // Held submissions are NOT announced. Posting something to the server and
+  // then pulling it after review is worse than posting it a few minutes late.
+  const shaped = {
+    id, title, game, descr, thumbnail, created_at: new Date().toISOString(),
+    tags: JSON.stringify(tags), keyless: body.keyless !== false,
+    views: 0, copies: 0, likes: 0,
+  };
+  const after = verdict.status === "approved"
+    ? Promise.all([
+        announceScript(env, shaped, user.username),
+        announceScriptBot(env, shaped, user.username),
+      ])
+    : modLog(env, "Held for review",
+        `**${title}** by @${user.username} — ${verdict.note}`, 0xf6c343);
 
-  return ok({ data: publicScript(row, { unlocked: true, mine: true, liked: false }) });
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({
+    data: publicScript(row, { unlocked: true, mine: true, liked: false }),
+    status: verdict.status,
+    note: verdict.note,
+  });
 }
 
 /**
@@ -1256,11 +1296,14 @@ async function handleScriptCode(request, env, { id }) {
   return ok({ data: { code: row.code } });
 }
 
-async function handleScriptDelete(request, env, { id }) {
+async function handleScriptDelete(request, env, { id }, ctx) {
   const user = await currentUser(request, env);
   if (!user) return bad(401, "Sign in first.");
 
-  const row = await env.DB.prepare(`SELECT author_id FROM scripts WHERE id = ?`).bind(id).first();
+  const row = await env.DB.prepare(
+    `SELECT s.*, u.username AS author FROM scripts s
+       JOIN users u ON u.id = s.author_id WHERE s.id = ?`
+  ).bind(id).first();
   if (!row) return bad(404, "That script doesn't exist.");
 
   const admin = env.ADMIN_USER_ID && user.id === env.ADMIN_USER_ID;
@@ -1269,6 +1312,16 @@ async function handleScriptDelete(request, env, { id }) {
   // Soft delete: the row stays so counts and any payout history survive, but
   // nothing that lists or serves scripts will look at it again.
   await env.DB.prepare(`UPDATE scripts SET removed = 1 WHERE id = ?`).bind(id).run();
+
+  // ...and Discord has to hear about it. Without this the server keeps a live
+  // "Get Script" button for something the site will answer 404 to — the exact
+  // reason script_posts stores message ids in the first place.
+  const after = Promise.all([
+    retireScriptPosts(env, row, row.author),
+    modLog(env, "Script removed", `**${row.title}** by @${row.author}`, 0xef5350),
+  ]);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
   return ok({ data: { id } });
 }
 
@@ -1965,17 +2018,56 @@ async function handleAdminScripts(request, env) {
   });
 }
 
-async function handleAdminScriptState(request, env, { id }) {
+/**
+ * Take a script down, put it back, or resolve a held submission.
+ *
+ * `status` is the review queue's half of this: approving one publishes it AND
+ * announces it, which is the whole point of holding rather than rejecting —
+ * an honest upload the checker was unsure about reaches the server the moment
+ * a human says yes, not never.
+ */
+async function handleAdminScriptState(request, env, { id }, ctx) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
 
-  const row = await env.DB.prepare(`SELECT id FROM scripts WHERE id = ?`).bind(id).first();
+  const row = await env.DB.prepare(
+    `SELECT s.*, u.username AS author FROM scripts s
+       JOIN users u ON u.id = s.author_id WHERE s.id = ?`
+  ).bind(id).first();
   if (!row) return bad(404, "That script doesn't exist.");
 
   const body = await request.json().catch(() => ({}));
-  const removed = body.removed === false ? 0 : 1;
-  await env.DB.prepare(`UPDATE scripts SET removed = ? WHERE id = ?`).bind(removed, id).run();
-  return ok({ data: { id, removed: Boolean(removed) } });
+  const wasHeld = row.status && row.status !== "approved";
+
+  const status = ["approved", "review", "rejected"].includes(body.status)
+    ? body.status : row.status || "approved";
+  const removed = body.removed === undefined
+    ? row.removed : (body.removed === false ? 0 : 1);
+
+  await env.DB.prepare(`UPDATE scripts SET removed = ?, status = ? WHERE id = ?`)
+    .bind(removed, status, id).run();
+
+  const live = !removed && status === "approved";
+  const shaped = { ...row, removed, status };
+
+  const after = (async () => {
+    if (live && wasHeld) {
+      // Approved out of the queue: this is its first appearance anywhere.
+      await announceScriptBot(env, shaped, row.author);
+      await modLog(env, "Approved from review", `**${row.title}** by @${row.author}`, 0x66bb6a);
+      return;
+    }
+    if (live) {
+      await syncScriptPosts(env, shaped, row.author, { state: "live" });
+      return;
+    }
+    await retireScriptPosts(env, shaped, row.author);
+    await modLog(env, removed ? "Script taken down" : "Script held",
+      `**${row.title}** by @${row.author}`, 0xef5350);
+  })();
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: { id, removed: Boolean(removed), status } });
 }
 
 /**
@@ -2098,6 +2190,219 @@ async function handleLeaderboard(request, env) {
       .filter((r) => r.username)
       .map((r) => ({ username: r.username, value: Number(r.value) || 0 })),
   });
+}
+
+/* ═════════════════════════════════════════════════ submission checks ══ */
+
+/**
+ * Does this submission look like a script at all?
+ *
+ * IMPORTANT, and the reason this function is named `looksLikeCode` rather than
+ * anything with "safe" in it: passing here means the upload is not obviously
+ * junk. It does NOT mean the code is harmless. Luau that looks perfectly
+ * ordinary can still steal a token or nuke a place. Nothing in this file may
+ * ever be presented to a visitor as a safety guarantee — the job is keeping
+ * spam and empty submissions out of the library, not vetting behaviour.
+ *
+ * Heuristics only, deliberately: they are instant, they cost no CPU budget,
+ * and they cannot be talked out of a verdict the way a model can.
+ */
+function looksLikeCode(code) {
+  const src = String(code || "");
+  const trimmed = src.trim();
+  if (!trimmed) return { ok: false, why: "The submission is empty." };
+  if (trimmed.length < 20) return { ok: false, why: "That's too short to be a script." };
+
+  // Luau/Lua signals. A real script hits several of these; prose hits none.
+  const signals = [
+    // Case-insensitive on the keyword sets. Luau's own keywords are lowercase,
+    // but "LocalScript" and "PlayerScripts" are everywhere in real code, and a
+    // case-sensitive \bscript\b misses both — which held an honest two-line
+    // LocalScript for review purely because of a capital letter.
+    /\b(local|function|end|then|elseif|repeat|until)\b/i,
+    /\b(game|workspace|script|Instance|Enum|task|wait|spawn)\b/i,
+    // Roblox's own names, which are compound words: a \bscript\b can never
+    // match inside "LocalScript", so the set above misses the single most
+    // common word in Roblox code. These are matched as whole identifiers.
+    /\b(LocalScript|ModuleScript|ScreenGui|Humanoid|HumanoidRootPart|CFrame|Vector3|UDim2|Color3|Players|ReplicatedStorage|RunService|UserInputService|TweenService|Workspace|HttpGet|GetService|FindFirstChild|WaitForChild)\b/,
+    // Standard-library calls. `print('hello')` is a real, if small, script.
+    /\b(print|warn|pcall|xpcall|ipairs|pairs|tostring|tonumber|typeof|setmetatable|require)\s*\(/,
+    /\bgame[:.]GetService\s*\(/,
+    /:\s*[A-Z][A-Za-z]+\s*\(/,           // method calls
+    /[{}()]\s*$/m,
+    /\bloadstring\b|\bgetgenv\b|\bhookfunction\b|\bsyn\b/,
+    /--\[\[|--/,                          // comments
+    /=\s*(true|false|nil|\d)/,
+  ];
+  const hits = signals.filter((re) => re.test(src)).length;
+
+  // Prose gives itself away: long runs of words with no punctuation of the
+  // kind code is made of.
+  const wordy = /^[A-Za-z ,.'"!?\n-]{120,}$/.test(trimmed);
+
+  if (wordy && hits < 2)
+    return { ok: false, why: "That looks like plain text rather than a script." };
+  if (hits < 2)
+    return { ok: false, why: "That doesn't look like Luau code." };
+
+  // One character or token repeated forever — the classic keyboard-mash spam.
+  const collapsed = trimmed.replace(/\s+/g, "");
+  const unique = new Set(collapsed).size;
+  if (collapsed.length > 80 && unique <= 6)
+    return { ok: false, why: "That looks like repeated characters rather than code." };
+
+  return { ok: true, hits };
+}
+
+/** The same mash test, for the description field. */
+function looksLikeProse(text) {
+  const s = String(text || "").trim();
+  const words = s.split(/\s+/).filter(Boolean);
+  if (words.length < MIN_DESC_WORDS) return { ok: false, why: "The description is too short." };
+
+  const unique = new Set(words.map((w) => w.toLowerCase())).size;
+  // "c c c c c c…" clears a word count and says nothing.
+  if (words.length >= 20 && unique <= Math.max(3, Math.floor(words.length * 0.12)))
+    return { ok: false, why: "The description is the same few words repeated." };
+
+  const letters = (s.match(/[A-Za-z]/g) || []).length;
+  if (letters < s.length * 0.4)
+    return { ok: false, why: "The description is mostly symbols." };
+
+  return { ok: true };
+}
+
+/**
+ * The verdict for one submission.
+ *
+ * Three outcomes, and the middle one is the important one: when the checks
+ * disagree or the signal is weak, the submission is HELD rather than
+ * rejected. Auto-rejecting an honest upload because a regex was unsure is the
+ * failure mode that drives creators off a platform, and it is silent — they
+ * are simply told no and never come back.
+ */
+function checkSubmission({ code, descr, title, game }) {
+  const notes = [];
+
+  const codeCheck = looksLikeCode(code);
+  if (!codeCheck.ok) return { status: "rejected", note: codeCheck.why };
+
+  const prose = looksLikeProse(descr);
+  if (!prose.ok) notes.push(prose.why);
+
+  if (!String(title || "").trim()) notes.push("No title.");
+  if (!String(game || "").trim()) notes.push("No game named.");
+
+  // A title that is one character repeated. Length-gated on purpose: "V4" and
+  // "X" are short, not mash, and flagging them held honest uploads.
+  const t = String(title || "").trim().replace(/\s+/g, "");
+  if (t.length >= 4 && new Set(t).size <= 2)
+    notes.push("The title looks like keyboard mash.");
+
+  // Weak-but-not-absent code signal: hold rather than publish.
+  if (codeCheck.hits < 3) notes.push("Only a weak code signal.");
+
+  if (!notes.length) return { status: "approved", note: "" };
+  return { status: "review", note: notes.join(" ") };
+}
+
+/* ══════════════════════════════════════════════════ AI descriptions ══ */
+
+const DESCRIBE_PROMPT = `You rewrite short descriptions of Roblox scripts for a
+public script library.
+
+Rules, in order of importance:
+1. NEVER add a feature, claim, or guarantee the author did not write. If they
+   did not say it is undetectable, safe, or updated, you must not say so.
+2. Keep their meaning exactly. You are fixing the writing, not the facts.
+3. Fix spelling, grammar and capitalisation. Expand shorthand ("af" ->
+   "auto farm") only when the meaning is unambiguous.
+4. Explain the features they DID mention a little more clearly.
+5. Remove repetition. No marketing language, no hype, no emoji.
+6. 2-4 sentences, plain and professional.
+
+Reply with ONLY minified JSON, no code fence:
+{"description":"...","tags":["...","..."]}
+
+tags: 3-6 short PascalCase topic tags with no "#", drawn from the game name
+and the features the author actually described.`;
+
+/**
+ * Tidies a creator's description without inventing anything.
+ *
+ * The failure mode worth naming: a model asked to "make this sound
+ * professional" will happily promise the script is undetectable, regularly
+ * updated and works on every executor — none of which the author said, all of
+ * which the site would then be publishing as fact. Hence rule 1, a low
+ * temperature, and a caller that falls back to the original text rather than
+ * shipping something it could not parse.
+ */
+async function enhanceDescription(env, { descr, title, game }) {
+  const original = String(descr || "").trim();
+  if (!original || !env.AI) return { description: original, tags: [], ai: false };
+
+  const ask = `Game: ${String(game || "Roblox").slice(0, 60)}
+Script name: ${String(title || "").slice(0, 80)}
+Author's description: ${original.slice(0, 1200)}`;
+
+  const models = env.AI_MODEL ? [env.AI_MODEL] : CF_MODELS;
+  for (const model of models) {
+    try {
+      const out = await env.AI.run(model, {
+        messages: [
+          { role: "system", content: DESCRIBE_PROMPT },
+          { role: "user", content: ask },
+        ],
+        max_tokens: 500,
+        temperature: 0.2,
+      });
+
+      const text = String(out?.response ?? out?.result?.response ?? "").trim();
+      const json = text.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+      const start = json.indexOf("{");
+      const end = json.lastIndexOf("}");
+      if (start === -1 || end === -1) continue;
+
+      const parsed = JSON.parse(json.slice(start, end + 1));
+      const description = String(parsed.description || "").trim();
+      if (!description) continue;
+
+      const tags = (Array.isArray(parsed.tags) ? parsed.tags : [])
+        .map((t) => String(t).replace(/[^A-Za-z0-9]/g, "").slice(0, 24))
+        .filter(Boolean)
+        .slice(0, 6);
+
+      return { description, tags, ai: true };
+    } catch (err) {
+      console.warn("describe model failed", model, err?.message);
+    }
+  }
+  // Every model refused or answered unusably. The author's own words ship.
+  return { description: original, tags: [], ai: false };
+}
+
+/**
+ * Preview endpoint: the creator sees the rewrite BEFORE publishing.
+ *
+ * Deliberately a separate call rather than something publish does silently.
+ * Rewriting somebody's words and posting the result under their name without
+ * showing them first is not a feature, it is a liberty.
+ */
+async function handleDescribe(request, env) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in first.");
+  if (!(await underLimit(env, `describe:${user.id}`, 20, 600)))
+    return bad(429, "That's a lot of rewrites. Try again shortly.");
+
+  const body = await request.json().catch(() => ({}));
+  const descr = String(body.desc || "").trim();
+  if (!descr) return bad(400, "Write a description first.");
+  if (descr.length > SCRIPT_LIMITS.descr) return bad(400, "That description is too long.");
+
+  const out = await enhanceDescription(env, {
+    descr, title: body.title, game: body.game,
+  });
+  return ok({ data: { ...out, original: descr } });
 }
 
 /* ═══════════════════════════════════════════════════════════════ discord ══ */
@@ -2446,6 +2751,343 @@ async function upsertDiscordUser(env, profile) {
   return { user: row };
 }
 
+/* ────────────────────────────────────────────────────── the bot ── */
+
+/**
+ * Discord as a real integration rather than a webhook.
+ *
+ * A webhook can post into ONE channel and can never touch a message again.
+ * That is enough for "tell the server something happened" and nothing more.
+ * Routing a script to its game's channel, editing the post when the creator
+ * changes the description, striking it through when a script is taken down,
+ * creating a channel the first time a game appears — every one of those needs
+ * a bot token, so the webhook is a fallback here, not the mechanism.
+ *
+ * All of it is plain REST. Nothing here opens a gateway socket, because a
+ * Worker cannot hold one open: it wakes for a request and dies. That is fine
+ * for everything the WEBSITE initiates, and it is the reason two things in the
+ * brief cannot live here — see the note on gateway features below.
+ */
+
+const botOn = (env) => Boolean(env.DISCORD_BOT_TOKEN && env.DISCORD_GUILD_ID);
+
+/**
+ * One call to Discord.
+ *
+ * Returns null on any failure rather than throwing. Every caller is a
+ * side-effect on a path that must not fail because Discord had a bad minute —
+ * a publish succeeds whether or not the server hears about it.
+ */
+async function bot(env, path, { method = "GET", body, timeout = 8000 } = {}) {
+  if (!env.DISCORD_BOT_TOKEN) return null;
+  try {
+    const res = await fetch(DISCORD_API + path, {
+      method,
+      headers: {
+        Authorization: "Bot " + env.DISCORD_BOT_TOKEN,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(timeout),
+    });
+
+    if (res.status === 204) return {};
+    const text = await res.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch { /* Discord sent something else */ }
+
+    if (!res.ok) {
+      // 429 carries retry_after; there is no point sleeping inside a Worker
+      // with a 10ms CPU budget, so the caller simply misses this one.
+      console.warn("discord bot", method, path, res.status, String(text).slice(0, 200));
+      return null;
+    }
+    return data ?? {};
+  } catch (err) {
+    console.warn("discord bot failed", method, path, err?.message);
+    return null;
+  }
+}
+
+/* ---------------------------------------------------------- channels */
+
+/** Discord's own rules for a text channel name: lowercase, no spaces, ≤100. */
+function channelName(game) {
+  return String(game || "unknown")
+    .toLowerCase()
+    .normalize("NFKD").replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 90) || "unknown";
+}
+
+/**
+ * The channel a game's scripts go in, creating it if this is the first one.
+ *
+ * Three layers, cheapest first: the mapping table, then the guild's existing
+ * channels (so a channel somebody made by hand is adopted rather than
+ * duplicated), then creating one. That middle step matters — without it,
+ * pointing the bot at a server that already has #blox-fruits produces
+ * #blox-fruits-2 and splits the game in half.
+ */
+async function gameChannel(env, gameName) {
+  if (!botOn(env)) return null;
+  const slug = channelName(gameName);
+
+  const known = await env.DB.prepare(`SELECT channel_id FROM game_channels WHERE game_slug = ?`)
+    .bind(slug).first().catch(() => null);
+  if (known?.channel_id) return known.channel_id;
+
+  const channels = await bot(env, `/guilds/${env.DISCORD_GUILD_ID}/channels`);
+  if (!Array.isArray(channels)) return null;
+
+  // Adopt a matching channel if the server already has one.
+  let found = channels.find((c) => c.type === 0 && c.name === slug);
+
+  if (!found) {
+    const parent = await gamesCategory(env, channels);
+    found = await bot(env, `/guilds/${env.DISCORD_GUILD_ID}/channels`, {
+      method: "POST",
+      body: {
+        name: slug,
+        type: 0,
+        topic: `Scripts for ${String(gameName).slice(0, 80)} — posted automatically from lucritscripts.site`,
+        ...(parent ? { parent_id: parent } : {}),
+      },
+    });
+    if (!found?.id) return null;
+  }
+
+  await env.DB.prepare(
+    `INSERT INTO game_channels (game_slug, game_name, channel_id, at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(game_slug) DO UPDATE SET channel_id = excluded.channel_id`
+  ).bind(slug, String(gameName).slice(0, 80), found.id, nowSec()).run().catch(() => {});
+
+  return found.id;
+}
+
+/** The GAMES category, adopted or created, so new channels are not loose. */
+async function gamesCategory(env, channels) {
+  const existing = channels.find((c) => c.type === 4 && /games/i.test(c.name));
+  if (existing) return existing.id;
+  const made = await bot(env, `/guilds/${env.DISCORD_GUILD_ID}/channels`, {
+    method: "POST", body: { name: "GAMES", type: 4 },
+  });
+  return made?.id || null;
+}
+
+/** A channel by name anywhere in the guild — #all-scripts and friends. */
+async function namedChannel(env, name) {
+  if (!botOn(env)) return null;
+  const slug = channelName(name);
+
+  const known = await env.DB.prepare(`SELECT channel_id FROM game_channels WHERE game_slug = ?`)
+    .bind("~" + slug).first().catch(() => null);
+  if (known?.channel_id) return known.channel_id;
+
+  const channels = await bot(env, `/guilds/${env.DISCORD_GUILD_ID}/channels`);
+  if (!Array.isArray(channels)) return null;
+
+  let found = channels.find((c) => c.type === 0 && c.name === slug);
+  if (!found) {
+    found = await bot(env, `/guilds/${env.DISCORD_GUILD_ID}/channels`, {
+      method: "POST", body: { name: slug, type: 0 },
+    });
+    if (!found?.id) return null;
+  }
+
+  // Stored under a "~" prefix so a game can never collide with a feed channel.
+  await env.DB.prepare(
+    `INSERT INTO game_channels (game_slug, game_name, channel_id, at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(game_slug) DO UPDATE SET channel_id = excluded.channel_id`
+  ).bind("~" + slug, slug, found.id, nowSec()).run().catch(() => {});
+
+  return found.id;
+}
+
+/* ------------------------------------------------------ the embed */
+
+/** Discord's cap is 300 for a field value; trim at a word, not a syllable. */
+function clip(text, max) {
+  const s = String(text || "").trim();
+  if (s.length <= max) return s;
+  return s.slice(0, max).replace(/\s+\S*$/, "") + "…";
+}
+
+/**
+ * One script, as Discord renders it.
+ *
+ * `state` lets the same builder produce the live post and the struck-through
+ * version left behind when a script is taken down — so an edit is one call
+ * with a different flag rather than a second near-identical template that
+ * drifts out of sync with this one.
+ */
+function scriptEmbed(env, script, author, { state = "live" } = {}) {
+  const site = env.SITE_URL || "https://lucritscripts.site";
+  const slug = String(script.id).replace(/^s_/, "");
+  const link = `${site}/creations/${encodeURIComponent(author)}/${encodeURIComponent(slug)}`;
+  const who = `${site}/creators/${encodeURIComponent(author)}`;
+  const gone = state !== "live";
+
+  let tags = [];
+  try { tags = JSON.parse(script.tags || "[]"); } catch { tags = []; }
+  const hashes = [String(script.game || "Roblox"), ...tags, "Roblox"]
+    .map((t) => "#" + String(t).replace(/[^A-Za-z0-9]/g, ""))
+    .filter((t) => t.length > 1)
+    .slice(0, 6)
+    .join(" ");
+
+  // Uploaded artwork is a data: URL, which Discord cannot fetch. Sending one
+  // produces a broken image rather than no image.
+  const art = /^https:\/\//i.test(String(script.thumbnail || "")) ? script.thumbnail : null;
+
+  const stats = [];
+  if (script.views) stats.push(`👁️ ${script.views}`);
+  if (script.copies) stats.push(`📋 ${script.copies}`);
+  if (script.likes) stats.push(`❤️ ${script.likes}`);
+
+  return {
+    title: gone ? `~~${clip(script.title, 240)}~~` : clip(script.title, 256),
+    url: gone ? undefined : link,
+    description: gone
+      ? "**This script is no longer available on Lucrit Scripts.**"
+      : clip(script.descr, 400),
+    color: gone ? 0x4a5568 : 0x7cc4ff,
+    author: { name: `@${author}`, url: who },
+    fields: [
+      { name: "🎮 Game", value: clip(script.game || "Roblox", 100), inline: true },
+      { name: "🔑 Keyless", value: script.keyless ? "Yes" : "Key required", inline: true },
+      ...(stats.length ? [{ name: "📊 Stats", value: stats.join("  ·  "), inline: true }] : []),
+      ...(hashes && !gone ? [{ name: "​", value: hashes }] : []),
+      ...(gone ? [] : [{ name: "​", value: `**[🔗 Get Script](${link})**  ·  [Creator](${who})` }]),
+    ],
+    ...(art && !gone ? { thumbnail: { url: art } } : {}),
+    footer: { text: "Lucrit Scripts · lucritscripts.site" },
+    timestamp: new Date(script.created_at || Date.now()).toISOString(),
+  };
+}
+
+/* ------------------------------------------------ publish / update */
+
+/**
+ * Puts a script in every Discord channel it belongs in, and remembers where.
+ *
+ * The message ids are the point. Fire-and-forget posting means a script taken
+ * down on the website keeps a live Get Script button in the server forever, so
+ * every send is recorded against the script before this returns.
+ *
+ * Never throws. A publish is not allowed to fail because Discord is down.
+ */
+async function announceScriptBot(env, script, author) {
+  if (!botOn(env)) return;
+  try {
+    await postScriptEverywhere(env, script, author);
+  } catch (err) {
+    // A publish must not fail because a channel lookup threw. `bot()` already
+    // swallows network failures; this catches the rest — a malformed embed, a
+    // database hiccup — so the worst case stays "no Discord post".
+    console.warn("discord announce failed", err?.stack || err?.message);
+  }
+}
+
+async function postScriptEverywhere(env, script, author) {
+  const embed = scriptEmbed(env, script, author);
+  const targets = [];
+
+  const all = await namedChannel(env, "all-scripts");
+  if (all) targets.push({ id: all, kind: "all" });
+
+  const game = await gameChannel(env, script.game);
+  // A game whose channel IS #all-scripts would otherwise be posted twice.
+  if (game && game !== all) targets.push({ id: game, kind: "game" });
+
+  for (const t of targets) {
+    const sent = await bot(env, `/channels/${t.id}/messages`, {
+      method: "POST",
+      body: { embeds: [embed], allowed_mentions: { parse: [] } },
+    });
+    if (!sent?.id) continue;
+    await env.DB.prepare(
+      `INSERT INTO script_posts (script_id, channel_id, message_id, kind, at)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(script_id, channel_id) DO UPDATE SET message_id = excluded.message_id`
+    ).bind(script.id, t.id, sent.id, t.kind, nowSec()).run().catch(() => {});
+  }
+}
+
+/**
+ * Re-renders every post for a script after something about it changed.
+ *
+ * Editing rather than reposting is deliberate: a corrected description should
+ * not push the channel's older scripts down, and the link people already have
+ * should keep working.
+ */
+async function syncScriptPosts(env, script, author, { state = "live" } = {}) {
+  if (!botOn(env)) return;
+  const { results } = await env.DB.prepare(
+    `SELECT channel_id, message_id FROM script_posts WHERE script_id = ?`
+  ).bind(script.id).all().catch(() => ({ results: [] }));
+
+  const embed = scriptEmbed(env, script, author, { state });
+  for (const row of results || []) {
+    await bot(env, `/channels/${row.channel_id}/messages/${row.message_id}`, {
+      method: "PATCH",
+      body: { embeds: [embed], allowed_mentions: { parse: [] } },
+    });
+  }
+}
+
+/**
+ * A script left the website.
+ *
+ * Marked rather than deleted by default: a channel where messages silently
+ * vanish reads as a bug, and the struck-through card tells somebody who
+ * bookmarked it what actually happened. DISCORD_DELETE_REMOVED=1 removes them
+ * outright instead.
+ */
+async function retireScriptPosts(env, script, author) {
+  if (!botOn(env)) return;
+
+  if (/^(1|true|yes|on)$/i.test(String(env.DISCORD_DELETE_REMOVED || ""))) {
+    const { results } = await env.DB.prepare(
+      `SELECT channel_id, message_id FROM script_posts WHERE script_id = ?`
+    ).bind(script.id).all().catch(() => ({ results: [] }));
+    for (const row of results || []) {
+      await bot(env, `/channels/${row.channel_id}/messages/${row.message_id}`, { method: "DELETE" });
+    }
+    await env.DB.prepare(`DELETE FROM script_posts WHERE script_id = ?`)
+      .bind(script.id).run().catch(() => {});
+    return;
+  }
+
+  await syncScriptPosts(env, script, author, { state: "removed" });
+}
+
+/**
+ * Anything the staff should see, in one channel.
+ *
+ * Kept deliberately plain — this is a log, not a feed. It exists so that
+ * "why did that script never appear" has an answer that is not "read the
+ * Worker's console".
+ */
+async function modLog(env, title, description, color = 0xf6c343) {
+  if (!botOn(env)) return;
+  const channel = await namedChannel(env, "moderation-logs");
+  if (!channel) return;
+  await bot(env, `/channels/${channel}/messages`, {
+    method: "POST",
+    body: {
+      embeds: [{
+        title: clip(title, 256),
+        description: clip(description, 1000),
+        color,
+        timestamp: new Date().toISOString(),
+      }],
+      allowed_mentions: { parse: [] },
+    },
+  });
+}
+
 /* ------------------------------------------------------------ the gate */
 
 /**
@@ -2635,6 +3277,7 @@ const ROUTES = {
   "POST /api/auth/reset/request": handleResetRequest,
   "POST /api/auth/reset/confirm": handleResetConfirm,
   "POST /api/ai": handleAI,
+  "POST /api/scripts/describe": handleDescribe,
   "POST /api/human": handleHuman,
   "GET  /api/config": async (_request, env) => ok({
     data: {

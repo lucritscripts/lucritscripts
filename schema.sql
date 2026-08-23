@@ -128,11 +128,51 @@ CREATE TABLE IF NOT EXISTS scripts (
   views       INTEGER NOT NULL DEFAULT 0,
   copies      INTEGER NOT NULL DEFAULT 0,       -- completed unlocks
   removed     INTEGER NOT NULL DEFAULT 0,       -- soft delete, so counts survive
+
+  -- The review queue. 'approved' is the default so anything published before
+  -- the checker existed stays visible. 'review' means the checker was not
+  -- confident: saved, hidden from the library, not announced, waiting on a
+  -- human. 'rejected' is kept rather than deleted so a moderation log has
+  -- something to point at.
+  status      TEXT NOT NULL DEFAULT 'approved',
+  check_note  TEXT NOT NULL DEFAULT '',
+
+  -- The creator's own words, before the AI tidied them. An AI rewrite that
+  -- drifts from what somebody meant has to be recoverable.
+  descr_original TEXT NOT NULL DEFAULT '',
+
   created_at  TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS scripts_status ON scripts(status);
 CREATE INDEX IF NOT EXISTS scripts_author ON scripts(author_id);
 CREATE INDEX IF NOT EXISTS scripts_live ON scripts(removed, created_at);
 CREATE INDEX IF NOT EXISTS scripts_category ON scripts(removed, category);
+
+-- Which Discord messages represent a script.
+--
+-- This table is the whole reason a script can be edited or deleted in Discord
+-- later. Without it, publishing is fire-and-forget: the moment a message is
+-- sent the site forgets which message it was, and a script taken down here
+-- keeps a live "Get Script" button in the server forever.
+CREATE TABLE IF NOT EXISTS script_posts (
+  script_id  TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  kind       TEXT NOT NULL DEFAULT 'game',
+  at         INTEGER NOT NULL,
+  PRIMARY KEY (script_id, channel_id)
+);
+CREATE INDEX IF NOT EXISTS script_posts_script ON script_posts(script_id);
+
+-- A game's Discord channel, created on first publish rather than by hand.
+-- Feed channels (#all-scripts, #moderation-logs) are stored under a "~"
+-- prefix so a game can never collide with one.
+CREATE TABLE IF NOT EXISTS game_channels (
+  game_slug  TEXT PRIMARY KEY,
+  game_name  TEXT NOT NULL,
+  channel_id TEXT NOT NULL,
+  at         INTEGER NOT NULL
+);
 
 -- Likes get their own table rather than a counter, so one person cannot like
 -- the same script a thousand times.
