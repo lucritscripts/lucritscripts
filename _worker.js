@@ -3245,6 +3245,51 @@ async function provisionServer(env) {
   return { ok: true, made, kept, failed };
 }
 
+/**
+ * Creates game channels ahead of the first publish.
+ *
+ * The 🎮 GAMES category is deliberately empty after provisioning — channels
+ * appear when a game does, so nobody edits code to add a game. But a brand new
+ * server looks abandoned with an empty category, and people browse by game
+ * before anything has been published for it. This seeds the ones you already
+ * know about.
+ *
+ * It is the same `gameChannel()` the publish path uses, so seeding a game and
+ * publishing to it converge on ONE channel rather than two. Re-running is
+ * free: an existing channel is adopted, not duplicated.
+ */
+async function handleAdminDiscordGames(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  if (!botOn(env)) return bad(503, "The Discord bot isn't configured.");
+
+  const body = await request.json().catch(() => ({}));
+  const wanted = (Array.isArray(body.games) ? body.games : [])
+    .map((g) => String(g || "").trim())
+    .filter(Boolean)
+    .slice(0, 40);
+
+  if (!wanted.length) return bad(400, "Send a list of game names.");
+
+  const made = [];
+  const failed = [];
+  for (const game of wanted) {
+    const before = await env.DB.prepare(
+      `SELECT channel_id FROM game_channels WHERE game_slug = ?`
+    ).bind(channelName(game)).first().catch(() => null);
+
+    const id = await gameChannel(env, game);
+    if (!id) { failed.push(game); continue; }
+    if (!before?.channel_id) made.push("#" + channelName(game));
+  }
+
+  await modLog(env, "Game channels seeded",
+    `Created: ${made.join(", ") || "nothing new"}` +
+    (failed.length ? `\nFailed: ${failed.join(", ")}` : ""), 0x7cc4ff);
+
+  return ok({ data: { made, failed, asked: wanted.length } });
+}
+
 async function handleAdminDiscordSetup(request, env) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
@@ -3656,6 +3701,68 @@ async function handleExecutorGet(request, env, { id }) {
 
 /* ---------------------------------------------------------- staff only */
 
+/**
+ * The staff list, which differs from the public one in exactly one way: it
+ * includes removed rows.
+ *
+ * That difference is the whole reason this endpoint exists. Removal is soft —
+ * `removed = 1`, so the Discord post can be struck through rather than
+ * vanishing — but until now nothing could read a removed row back, and nothing
+ * could clear the flag. An executor taken down by a misclick was unreachable
+ * from every surface the site has, recoverable only by hand in D1.
+ */
+async function handleAdminExecutorList(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM executors ORDER BY removed ASC, updated_at DESC LIMIT 200`
+  ).all();
+
+  return ok({
+    data: (results || []).map((row) => ({ ...publicExecutor(row), removed: row.removed === 1 })),
+  });
+}
+
+/**
+ * Take one down, or put it back. Named `/state` and bodied `{ removed }` to
+ * match the scripts route exactly — the admin page drives both through one
+ * code path, and two endpoints doing the same job under different shapes is
+ * how that page grows a special case.
+ */
+async function handleAdminExecutorState(request, env, { id }, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const key = "x_" + String(id).replace(/^x_/, "");
+  const row = await env.DB.prepare(`SELECT * FROM executors WHERE id = ?`).bind(key).first();
+  if (!row) return bad(404, "No such executor.");
+
+  const body = await request.json().catch(() => ({}));
+  const removed = body.removed !== false;
+  if ((row.removed === 1) === removed) return ok({ data: { id: key, removed } });
+
+  await env.DB.prepare(`UPDATE executors SET removed = ? WHERE id = ?`)
+    .bind(removed ? 1 : 0, key).run();
+
+  const now = await env.DB.prepare(`SELECT * FROM executors WHERE id = ?`).bind(key).first();
+
+  // Restoring re-syncs rather than re-announcing: the Discord posts still
+  // exist, struck through, and editing them back is what a reader sees as
+  // "it's available again". A second announcement would read as a new
+  // executor and would leave the struck-through one sitting above it.
+  const after = Promise.all([
+    removed ? retireExecutorPosts(env, now) : syncExecutorPosts(env, now),
+    modLog(env,
+      removed ? "Executor removed" : "Executor restored",
+      `**${now.name}** by ${now.developer}`,
+      removed ? 0xef5350 : 0x66bb6a),
+  ]);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: { id: key, removed } });
+}
+
 async function handleExecutorCreate(request, env, _params, ctx) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
@@ -3892,6 +3999,7 @@ const PATTERNS = [
   // and the handler decodes it. Length is capped here rather than trusted.
   ["GET", /^\/api\/creators\/([^/]{1,80})$/, handleCreator],
   ["GET", /^\/api\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorGet],
+  ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})\/state$/, handleAdminExecutorState],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
@@ -3912,7 +4020,9 @@ const ROUTES = {
   "GET  /api/discord": handleDiscordStats,
   "GET  /api/executors": handleExecutorList,
   "POST /api/admin/discord/setup": handleAdminDiscordSetup,
+  "POST /api/admin/discord/games": handleAdminDiscordGames,
   "POST /api/admin/discord/leaderboards": handleAdminLeaderboards,
+  "GET  /api/admin/executors": handleAdminExecutorList,
   "POST /api/admin/executors": handleExecutorCreate,
   "GET  /api/leaderboard": handleLeaderboard,
   "GET  /api/admin/state": handleAdminState,
