@@ -13,6 +13,8 @@
 //   /creations/<creator>/<slug>    one script
 //   /creators/<creator>            someone's public profile
 //   /dashboard/<you>               your own dashboard
+//   /executors                     the executor listing
+//   /executors/<slug>              one executor
 //   /admin                         the owner's panel
 //
 // Two decisions worth keeping.
@@ -50,6 +52,18 @@ export function pathForDashboard(name) {
 }
 
 /**
+ * An executor's own address, or the listing when there is no executor.
+ *
+ * Executors carry their slug the way scripts do, and for the same reason: the
+ * id is `x_<slug>` in the database and the `x_` prefix is an implementation
+ * detail nobody should have to type or paste.
+ */
+export function pathForExecutor(x) {
+  const slug = x && (x.slug || String(x.id || "").replace(/^x_/, ""));
+  return slug ? `/executors/${enc(slug)}` : "/executors";
+}
+
+/**
  * Reads a pathname into a route.
  *
  * Segments are decoded here, once, so nothing downstream has to remember to.
@@ -74,6 +88,13 @@ export function parse(pathname = location.pathname) {
 
   if (parts[0] === "dashboard" && parts.length <= 2)
     return { name: "dashboard", creator: parts[1] || "" };
+
+  // Two routes, one prefix. The listing and a single executor are different
+  // enough on screen to be different handlers, but they share a URL root so
+  // that "/executors" is a place you can go rather than only a namespace.
+  if (parts[0] === "executors" && parts.length === 1) return { name: "executors" };
+  if (parts[0] === "executors" && parts.length === 2)
+    return { name: "executor", slug: parts[1] };
 
   return { name: "unknown", pathname };
 }

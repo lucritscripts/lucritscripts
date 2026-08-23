@@ -19,6 +19,7 @@ import { account } from "./account.js";
 import { runBotCheck } from "./gate.js";
 import { capturePendingUnlock, takePendingUnlock, deleteScript } from "./library-api.js";
 import { createCreatorPage } from "./creator.js";
+import { createExecutorsPage } from "./executors.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -110,6 +111,8 @@ const dashboard = createDashboard({
 // inside the app uses `setPath` rather than `go` — the page is already being
 // drawn, and resolving the route would draw it a second time on top of itself.
 
+const executorsPage = createExecutorsPage();
+
 const creatorPage = createCreatorPage({
   onOpenScript: (s) => openScript(s),
   onOpenDashboard: () => openDashboard(),
@@ -177,6 +180,9 @@ function closeRoutedPages(keep = null) {
   if (keep !== "dashboard") dashboard.close();
   if (keep !== "creator") creatorPage.close();
   if (keep !== "admin") adminPage.close();
+  // One sheet, two routes: the listing and a detail view share it, so backing
+  // from an executor to /executors must not shut the thing it is moving into.
+  if (keep !== "executors" && keep !== "executor") executorsPage.close();
   // `hide`, not `close`: closing clears their `#game=` hash, and the history
   // entry we are about to push away from needs to keep it so that Back can
   // land on the game again instead of at the top of the site.
@@ -267,6 +273,16 @@ const router = createRouter({
     dashboard.open();
   },
 
+  executors() {
+    closeRoutedPages("executors");
+    executorsPage.openList();
+  },
+
+  executor({ slug }) {
+    closeRoutedPages("executor");
+    executorsPage.open(slug);
+  },
+
   // A path the app does not own reached the shell somehow. Draw the home page
   // rather than an empty screen.
   unknown() { closeRoutedPages(); setTitle(""); router.correct("/"); },
@@ -281,6 +297,13 @@ document.addEventListener("lucrit:script-closed", () => router.leave("creation")
 document.addEventListener("lucrit:dashboard-closed", () => router.leave("dashboard"));
 document.addEventListener("lucrit:creator-closed", () => router.leave("creator"));
 document.addEventListener("lucrit:admin-closed", () => router.leave("admin"));
+// The executors sheet is `id: "executors"`, so it fires one event for both of
+// its routes. Whichever one the address bar is currently on is the one to hand
+// back; `leave` is a no-op for the other.
+document.addEventListener("lucrit:executors-closed", () => {
+  router.leave("executors");
+  router.leave("executor");
+});
 
 /* ------------------------------------------------------------ generator */
 

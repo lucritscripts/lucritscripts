@@ -106,7 +106,7 @@ export function runBotCheck() {
         node.setAttribute("aria-labelledby", "botgate-title");
         node.innerHTML = `
           <div class="botgate__panel">
-            <img class="botgate__logo" src="assets/img/logo.png" alt="Lucrit Script"
+            <img class="botgate__logo" src="/assets/img/logo.png" alt="Lucrit Script"
                  width="460" height="236" fetchpriority="high">
             <h1 class="botgate__title" id="botgate-title">Quick check</h1>
             <p class="botgate__sub">Confirm you're a person to carry on. This happens

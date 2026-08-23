@@ -83,6 +83,26 @@ export async function fetchBoard(board) {
   return res.ok ? res.data : null;
 }
 
+/**
+ * Executors, newest change first.
+ *
+ * `[]` for both "none listed" and "could not ask", unlike fetchBoard: an
+ * executor list has no meaningful difference to show a visitor between the
+ * two, and the page says "nothing listed yet" either way.
+ */
+export async function fetchExecutors(status = "") {
+  const q = status ? `?status=${encodeURIComponent(status)}` : "";
+  const res = await call(`/api/executors${q}`);
+  return res.ok ? res.data : [];
+}
+
+/** One executor, by the slug in its URL. Null when there is no such listing. */
+export async function fetchExecutor(slug) {
+  const id = "x_" + String(slug).replace(/^x_/, "");
+  const res = await call(`/api/executors/${encodeURIComponent(id)}`);
+  return res.ok ? res.data : null;
+}
+
 export async function publishScript(script) {
   return call("/api/scripts", { method: "POST", body: script });
 }

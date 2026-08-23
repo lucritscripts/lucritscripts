@@ -146,6 +146,7 @@ export function createAdminPage({ onChanged } = {}) {
     const rows =
       tab === "users" ? await get(`/api/admin/users?limit=100${q}`)
       : tab === "scripts" ? await get(`/api/admin/scripts?limit=100${q}`)
+      : tab === "executors" ? await get("/api/admin/executors")
       : await get("/api/admin/reports");
 
     if (rows.status === 423) return passcodeScreen();
@@ -170,12 +171,12 @@ export function createAdminPage({ onChanged } = {}) {
       </div>
 
       <nav class="tabs" role="tablist">
-        ${[["users", "Accounts"], ["scripts", "Scripts"], ["reports", "Reports"]]
+        ${[["users", "Accounts"], ["scripts", "Scripts"], ["executors", "Executors"], ["reports", "Reports"]]
           .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}"
             data-admintab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
-      ${tab === "reports" ? "" : `
+      ${tab === "reports" || tab === "executors" ? "" : `
         <div class="library__search" style="margin:14px 0">
           <input class="library__input" type="search" data-adminq
                  placeholder="${tab === "users" ? "Search name or email" : "Search title or author"}"
@@ -183,6 +184,10 @@ export function createAdminPage({ onChanged } = {}) {
         </div>`}
 
       ${!rows.ok ? `<p class="note note--warn">${esc(rows.error || "Couldn't load that list.")}</p>`
+        // The executors tab draws even when empty: the publish form lives
+        // inside it, so "Nothing here" would be a dead end with no way to add
+        // the first one.
+        : tab === "executors" ? executorsPanel(rows.data)
         : !rows.data.length ? `<p class="muted">Nothing here.</p>`
         : tab === "users" ? usersTable(rows.data)
         : tab === "scripts" ? scriptsTable(rows.data)
@@ -257,6 +262,84 @@ export function createAdminPage({ onChanged } = {}) {
       </table>`;
   }
 
+  /**
+   * The one place on this site that publishes an executor.
+   *
+   * It is a convenience, not a permission. Every button here calls a route
+   * that starts with `requireAdmin` in the Worker, and that check is what
+   * makes executors staff-only — not the fact that this panel sits behind a
+   * passcode screen. Deleting this whole file would change nothing about who
+   * is allowed to publish.
+   */
+  function executorsPanel(rows) {
+    const opts = [["working", "Working"], ["updating", "Updating"], ["unavailable", "Unavailable"]];
+    return `
+      <details class="pane" data-xform ${rows.length ? "" : "open"}>
+        <summary><b>Publish an executor</b></summary>
+        <form class="form form--grid" data-xnew style="margin-top:14px">
+          <label class="field"><span>Name</span>
+            <input name="name" required maxlength="60" placeholder="Solara"></label>
+          <label class="field"><span>Developer</span>
+            <input name="developer" required maxlength="60" placeholder="Who makes it"></label>
+          <label class="field"><span>Version</span>
+            <input name="version" maxlength="30" placeholder="3.1"></label>
+          <label class="field"><span>Status</span>
+            <select name="status">${opts.map(([v, l]) =>
+              `<option value="${v}">${l}</option>`).join("")}</select></label>
+          <label class="field"><span>Platforms</span>
+            <input name="platforms" maxlength="120" placeholder="Windows, Android"></label>
+          <label class="field"><span>Roblox versions</span>
+            <input name="robloxVersions" maxlength="60" placeholder="Latest"></label>
+          <label class="field" style="grid-column:1/-1"><span>Official site</span>
+            <input name="website" maxlength="300" placeholder="https://…"></label>
+          <label class="field" style="grid-column:1/-1"><span>Their Discord</span>
+            <input name="discord" maxlength="300" placeholder="https://discord.gg/…"></label>
+          <label class="field" style="grid-column:1/-1"><span>Description</span>
+            <textarea name="desc" required rows="4" maxlength="2000"
+              placeholder="What it is, in the developer's own terms."></textarea></label>
+          <p class="submit__note" style="grid-column:1/-1">
+            Links are checked against a fixed host list before they are stored;
+            anything else is dropped rather than saved. The description goes
+            through the same tidy-up creators get, which may not add a claim
+            you did not write.
+          </p>
+          <div class="publish__actions" style="grid-column:1/-1">
+            <button class="btn btn--primary" type="submit">Publish</button>
+          </div>
+        </form>
+      </details>
+
+      ${rows.length ? `
+        <table class="rows">
+          <thead><tr><th>Executor</th><th>Status</th><th>Updated</th><th></th></tr></thead>
+          <tbody>
+            ${rows.map((x) => `
+              <tr data-executor="${esc(x.slug)}">
+                <td>
+                  <b>${esc(x.name)}</b>${x.removed ? ` <span class="chip chip--warn">removed</span>` : ""}
+                  <br><span class="muted">${esc(x.developer)}${x.version ? ` · v${esc(x.version)}` : ""}</span>
+                </td>
+                <td>${esc(x.status)}</td>
+                <td class="muted">${esc(x.updated || "")}</td>
+                <td>
+                  <button class="btn btn--ghost btn--xs" data-adminact="xstatus"
+                          data-status="${esc(x.status)}">Status</button>
+                  <button class="btn btn--ghost btn--xs" data-adminact="xversion"
+                          data-version="${esc(x.version || "")}">Version</button>
+                  <button class="btn btn--ghost btn--xs" data-adminact="xstate"
+                          data-removed="${x.removed ? "1" : "0"}">
+                    ${x.removed ? "Restore" : "Take down"}
+                  </button>
+                </td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+        <p class="muted">Taking one down strikes its Discord posts through rather
+           than deleting them, and restoring puts them back. Status and version
+           changes post a note in #executor-updates saying what changed.</p>`
+        : `<p class="muted">No executors listed yet.</p>`}`;
+  }
+
   function reportsTable(rows) {
     return `
       <table class="rows">
@@ -289,6 +372,49 @@ export function createAdminPage({ onChanged } = {}) {
   });
 
   sheet.body.addEventListener("submit", async (e) => {
+    // Two forms live in this sheet now. The publish form is handled first and
+    // returns, so the passcode branch below can keep assuming it owns the
+    // event rather than growing a nested conditional.
+    const xform = e.target.closest("[data-xnew]");
+    if (xform) {
+      e.preventDefault();
+      const btn = xform.querySelector("button[type=submit]");
+      btn.disabled = true;
+      btn.textContent = "Publishing…";
+
+      const list = (v) => String(v || "").split(",").map((t) => t.trim()).filter(Boolean);
+      // Through `elements`, not `xform.<field>` directly.
+      //
+      // The shorthand does work: HTMLFormElement is [LegacyOverrideBuiltIns],
+      // so a control named "name" shadows the form's own `name` property and
+      // `xform.name.value` reads the input — which is exactly the problem. The
+      // shadowing runs the other way too, and it is silent: a field named
+      // `submit`, `action`, `method` or `reset` would quietly replace the form
+      // API of the same name for everyone else holding this element. Reading
+      // through `elements` means naming a field can never do that.
+      const f = (k) => xform.elements[k]?.value || "";
+      const res = await send("/api/admin/executors", "POST", {
+        name: f("name"),
+        developer: f("developer"),
+        version: f("version"),
+        status: f("status"),
+        platforms: list(f("platforms")),
+        robloxVersions: f("robloxVersions"),
+        website: f("website"),
+        discord: f("discord"),
+        desc: f("desc"),
+      });
+
+      btn.disabled = false;
+      btn.textContent = "Publish";
+
+      if (res.status === 423) { toast("The passcode timed out", "warn"); return paint(); }
+      if (!res.ok) return toast(res.error || "That didn't publish", "warn");
+      toast(`Published ${res.data.name}`);
+      panel();
+      return;
+    }
+
     const form = e.target.closest("[data-passform]");
     if (!form) return;
     e.preventDefault();
@@ -331,6 +457,7 @@ export function createAdminPage({ onChanged } = {}) {
 
     const act = btn.dataset.adminact;
     const userId = btn.closest("[data-user]")?.dataset.user;
+    const executor = btn.closest("[data-executor]")?.dataset.executor;
     const scriptId = btn.closest("[data-script]")?.dataset.script;
     const reportId = btn.closest("[data-report]")?.dataset.report;
 
@@ -365,6 +492,22 @@ export function createAdminPage({ onChanged } = {}) {
       if (copies === null) { btn.disabled = false; return; }
       res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/counters`, "POST",
         { views, copies });
+
+    } else if (act === "xstatus") {
+      const next = prompt("Status — working, updating or unavailable:", btn.dataset.status || "working");
+      if (next === null) { btn.disabled = false; return; }
+      res = await send(`/api/admin/executors/${encodeURIComponent(executor)}`, "POST",
+        { status: String(next).trim().toLowerCase() });
+
+    } else if (act === "xversion") {
+      const next = prompt("Version:", btn.dataset.version || "");
+      if (next === null) { btn.disabled = false; return; }
+      res = await send(`/api/admin/executors/${encodeURIComponent(executor)}`, "POST",
+        { version: String(next).trim() });
+
+    } else if (act === "xstate") {
+      res = await send(`/api/admin/executors/${encodeURIComponent(executor)}/state`, "POST",
+        { removed: btn.dataset.removed !== "1" });
 
     } else if (act === "dismiss") {
       res = await send(`/api/admin/reports/${encodeURIComponent(reportId)}/dismiss`);

@@ -469,7 +469,7 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
   content.innerHTML = [
     chapter("hero", "01 / Origin", CHAPTERS[0].len, `
       <div class="hero">
-        <img class="hero__logo" src="assets/img/logo.png" alt="Lucrit Script"
+        <img class="hero__logo" src="/assets/img/logo.png" alt="Lucrit Script"
              width="460" height="236" fetchpriority="high" decoding="async">
         <h1 class="hero__title">
           <span class="line">The ultimate</span>
@@ -875,7 +875,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
       <span class="progress__label" data-label></span>
     </div>
     <a class="nav__brand" href="#ch-hero" data-jump="hero" aria-label="Lucrit Script — home">
-      <img class="nav__mark" src="assets/img/mark.png" alt="" width="184" height="123" decoding="async">
+      <img class="nav__mark" src="/assets/img/mark.png" alt="" width="184" height="123" decoding="async">
       <span aria-hidden="true">Lucrit<b>Script</b></span>
     </a>
     <nav class="nav__links" aria-label="Sections">
@@ -885,6 +885,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
       <button data-jump="categories">Categories</button>
       <button data-jump="featured">Trending</button>
       <button data-jump="community">Leaderboard</button>
+      <a href="/executors">Executors</a>
       <button data-jump="submit">Publish</button>
     </nav>
     <button class="nav__search" aria-label="Search scripts">
