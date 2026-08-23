@@ -54,3 +54,25 @@ ALTER TABLE scripts ADD COLUMN check_note TEXT NOT NULL DEFAULT '';
 -- recoverable, and because "show me what I actually typed" is a fair thing for
 -- a creator to ask.
 ALTER TABLE scripts ADD COLUMN descr_original TEXT NOT NULL DEFAULT '';
+
+-- Executors (staff-published Roblox tools). Run alongside the statements above.
+CREATE TABLE IF NOT EXISTS executors (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  developer       TEXT NOT NULL,
+  logo            TEXT NOT NULL DEFAULT '',
+  descr           TEXT NOT NULL,
+  descr_original  TEXT NOT NULL DEFAULT '',
+  platforms       TEXT NOT NULL DEFAULT '[]',
+  roblox_versions TEXT NOT NULL DEFAULT '',
+  status          TEXT NOT NULL DEFAULT 'working',
+  version         TEXT NOT NULL DEFAULT '',
+  website         TEXT NOT NULL DEFAULT '',
+  discord         TEXT NOT NULL DEFAULT '',
+  tags            TEXT NOT NULL DEFAULT '[]',
+  screenshots     TEXT NOT NULL DEFAULT '[]',
+  removed         INTEGER NOT NULL DEFAULT 0,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS executors_live ON executors(removed, updated_at);
