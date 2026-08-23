@@ -143,14 +143,18 @@ html.no-webgl #grain { opacity: 0.1; }
 /* The artwork carries its own glow and its own transparency. */
 .nav__mark { width: auto; height: 32px; display: block; }
 
-.nav__links { display: flex; gap: 4px; }
-.nav__links button {
+.nav__links { display: flex; gap: 4px; align-items: center; }
+/* One of these is an anchor rather than a button — /executors is a real page
+   with a real URL, not a scroll target — so the pill styling is written for
+   both rather than for `button` alone. */
+.nav__links button, .nav__links a {
   color: var(--ink-2); font-size: 0.875rem; font-weight: 480;
   padding: 7px 13px; border-radius: 999px;
   transition: color 0.25s, background 0.25s;
 }
-.nav__links button:hover { color: var(--ink); background: rgba(160, 200, 255, 0.08); }
+.nav__links button:hover, .nav__links a:hover { color: var(--ink); background: rgba(160, 200, 255, 0.08); }
 .nav__links button.is-on { color: var(--ink); background: rgba(61, 155, 255, 0.14); }
+.nav__links a { text-decoration: none; }
 
 .nav__search {
   display: grid; place-items: center;
@@ -1944,3 +1948,47 @@ html.is-gated { overflow: hidden; }
 /* Turnstile ------------------------------------------------------------- */
 
 .turnstile { margin: 4px 0 2px; min-height: 65px; }
+
+
+/* =====================================================================
+   Executors  —  /executors and /executors/<slug>
+   ===================================================================== */
+
+.xlist { display: grid; gap: 10px; }
+
+.xcard {
+  display: grid; grid-template-columns: 54px 1fr; gap: 14px; align-items: start;
+  padding: 15px 16px; border: 1px solid var(--line); border-radius: var(--r);
+  background: rgba(6, 10, 19, 0.85); text-decoration: none; color: inherit;
+  transition: border-color .2s, background .2s, transform .2s;
+}
+.xcard:hover, .xcard:focus-visible {
+  border-color: var(--line-2); background: rgba(10, 16, 28, 0.95); transform: translateY(-1px);
+}
+
+.xcard__logo {
+  width: 54px; height: 54px; border-radius: 13px; object-fit: cover;
+  border: 1px solid var(--line); background: rgba(12, 18, 30, 0.9); display: block;
+}
+.xcard__logo--none {
+  display: grid; place-items: center;
+  font-weight: 620; font-size: 1rem; letter-spacing: -0.02em; color: var(--ink-2);
+}
+
+.xcard__body { display: grid; gap: 5px; min-width: 0; }
+.xcard__top { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.xcard__name { font-size: 1.02rem; letter-spacing: -0.024em; }
+.xcard__dev { font-size: 0.78rem; color: var(--ink-3); }
+.xcard__desc {
+  font-size: 0.85rem; line-height: 1.5; color: var(--ink-2);
+  /* Two lines in the listing; the whole description is on the detail page. */
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+}
+
+.xshots { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.xshots img { width: 100%; border-radius: var(--r); border: 1px solid var(--line); display: block; }
+
+/* The detail header reuses .dash__head, whose avatar slot is round. An
+   executor's mark is a product logo, not a face. */
+#executors .dash__head .xcard__logo { width: 68px; height: 68px; border-radius: 16px; }
