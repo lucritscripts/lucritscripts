@@ -35,10 +35,17 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap">
 
-<link rel="stylesheet" href="assets/css/app.css">
-<link rel="icon" type="image/png" sizes="64x64" href="assets/img/favicon-64.png">
-<link rel="apple-touch-icon" href="assets/img/apple-touch-icon.png">
-<meta property="og:image" content="assets/img/logo.png">
+<!-- Root-absolute, every one of them.
+     These used to be relative — "assets/css/app.css" — which resolved against
+     whatever directory the URL happened to look like. That was harmless while
+     the site was one page at "/", and became a blank screen the moment a
+     script got its own address: at /creations/lucrit/ab12cd34 the browser went
+     looking for /creations/lucrit/assets/css/app.css and found a 404. Real
+     URLs mean real paths. -->
+<link rel="stylesheet" href="/assets/css/app.css">
+<link rel="icon" type="image/png" sizes="64x64" href="/assets/img/favicon-64.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+<meta property="og:image" content="https://lucritscripts.site/assets/img/logo.png">
 </head>
 
 <body>
@@ -61,8 +68,8 @@
 </noscript>
 
 <!-- Runs first: sends the static GitHub Pages copy to the real domain. -->
-<script type="module" src="assets/js/redirect.js"></script>
-<script type="module" src="assets/js/main.js"></script>
+<script type="module" src="/assets/js/redirect.js"></script>
+<script type="module" src="/assets/js/main.js"></script>
 
 </body>
 </html>

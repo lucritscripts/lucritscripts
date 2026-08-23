@@ -906,6 +906,14 @@ function publicScript(row, extra = {}) {
   try { tags = JSON.parse(row.tags || "[]"); } catch { tags = []; }
   return {
     id: row.id,
+    // The half of the id that shows up in a URL.
+    //
+    // Script ids are `s_<8 hex>`; the prefix is a database convention and says
+    // nothing to a person reading an address bar. The slug is what
+    // /creations/<creator>/<slug> carries, and it comes from here rather than
+    // being sliced off the id in the browser, so the shape of an id stays the
+    // server's business.
+    slug: String(row.id).replace(/^s_/, ""),
     title: row.title,
     game: row.game,
     category: row.category,
@@ -1054,6 +1062,71 @@ async function handleScriptGet(request, env, { id }) {
         `SELECT 1 FROM likes WHERE user_id = ? AND script_id = ?`
       ).bind(user.id, id).first()) : false,
     }),
+  });
+}
+
+/**
+ * One creator, by name, with everything they have published.
+ *
+ * This is what /creators/<name> is drawn from, and it is deliberately its own
+ * endpoint rather than a filter on the listing. A profile needs the person —
+ * bio, links, joined-when — and the listing only ever knew about scripts, so
+ * the page used to be assembled out of whatever happened to be cached and was
+ * blank for anyone whose scripts had scrolled off it.
+ *
+ * Matched on `username_lower`, which is UNIQUE, so a name identifies exactly
+ * one person and the URL can never be ambiguous. The reply echoes the stored
+ * spelling back as `username`: /creators/lucrit and /creators/LUCRIT both
+ * resolve, and the page then corrects the address bar to the real one.
+ *
+ * Email is not in the reply, and must not be. This document is world-readable.
+ */
+async function handleCreator(request, env, { id }) {
+  const name = decodeURIComponent(id || "").trim();
+  if (!name) return bad(404, "No such creator.");
+
+  const user = await env.DB.prepare(
+    `SELECT id, username, bio, avatar, youtube, tiktok, created_at
+       FROM users WHERE username_lower = ? AND banned = 0`
+  ).bind(name.toLowerCase()).first();
+
+  // A suspended account is a 404 here rather than a "suspended" page. Saying
+  // which is which turns the profile route into a way to enumerate bans.
+  if (!user) return bad(404, "No such creator.");
+
+  const { results } = await env.DB.prepare(
+    `SELECT ${SCRIPT_COLUMNS},
+            (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
+       FROM scripts s JOIN users u ON u.id = s.author_id
+      WHERE s.author_id = ? AND s.removed = 0
+      ORDER BY s.created_at DESC LIMIT 200`
+  ).bind(user.id).all();
+
+  const scripts = results || [];
+  const viewer = await currentUser(request, env);
+  const mine = Boolean(viewer && viewer.id === user.id);
+
+  return ok({
+    data: {
+      id: user.id,
+      username: user.username,
+      bio: user.bio || "",
+      avatar: user.avatar || null,
+      youtube: user.youtube || "",
+      tiktok: user.tiktok || "",
+      createdAt: user.created_at,
+      mine,
+      totals: {
+        scripts: scripts.length,
+        views: scripts.reduce((n, r) => n + (r.views || 0), 0),
+        copies: scripts.reduce((n, r) => n + (r.copies || 0), 0),
+        likes: scripts.reduce((n, r) => n + (r.likes || 0), 0),
+      },
+      // No unlock flags and no clocks: a profile lists work, it does not open
+      // any of it. Whether the viewer holds a grant is decided on the script's
+      // own page, by the endpoints that already do it.
+      scripts: scripts.map((r) => publicScript(r, { mine })),
+    },
   });
 }
 
@@ -2011,6 +2084,9 @@ async function handleLeaderboard(request, env) {
  */
 const PATTERNS = [
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptGet],
+  // Usernames allow spaces and dots, so this segment is anything but a slash
+  // and the handler decodes it. Length is capped here rather than trusted.
+  ["GET", /^\/api\/creators\/([^/]{1,80})$/, handleCreator],
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
   ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
@@ -2064,6 +2140,24 @@ const ROUTES = {
   }),
 };
 
+/**
+ * Paths the single-page app owns.
+ *
+ * Every one of these is served the app shell and resolved in the browser. The
+ * segments are permissive on purpose — a username may contain spaces and dots,
+ * and a request for a creator who does not exist should reach the app and get
+ * a "no such creator" page rather than a bare 404 from the asset server.
+ *
+ * Anything not listed here still falls through to the real files, so a typo in
+ * an asset path stays a 404 instead of silently returning HTML.
+ */
+const APP_ROUTES = [
+  /^\/admin\/?$/,
+  /^\/creators\/[^/]+\/?$/,
+  /^\/creations\/[^/]+\/[^/]+\/?$/,
+  /^\/dashboard(\/[^/]+)?\/?$/,
+];
+
 /** Headers GitHub Pages could never send us. */
 function harden(response) {
   const out = new Response(response.body, response);
@@ -2106,13 +2200,14 @@ export default {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith("/api/")) {
-      // /admin is a route the app draws, not a file on disk. Without this, a
-      // direct visit or a refresh there is a 404 from the asset server before
-      // any JavaScript gets a chance to run.
+      // These are routes the app draws, not files on disk. Without this, a
+      // direct visit or a refresh at one of them is a 404 from the asset
+      // server before any JavaScript gets a chance to run — which is what
+      // "give every script its own page" actually costs on static hosting.
       // Ask for "/" rather than "/index.html": Pages canonicalises the latter
       // with a 308 back to "/", which the browser follows — so /admin bounced
       // to the home page before any script ran.
-      const spa = /^\/admin\/?$/.test(url.pathname);
+      const spa = APP_ROUTES.some((re) => re.test(url.pathname));
       const asset = harden(await env.ASSETS.fetch(
         spa ? new Request(new URL("/", url), request) : request));
       const cache = cacheFor(url.pathname);
