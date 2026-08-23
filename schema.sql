@@ -214,6 +214,37 @@ CREATE TABLE IF NOT EXISTS unlock_clicks (
 );
 CREATE INDEX IF NOT EXISTS unlock_clicks_expiry ON unlock_clicks(expires);
 
+-- Executors: Roblox tools, published by STAFF ONLY.
+--
+-- Deliberately its own table rather than a flag on `scripts`. The two have
+-- almost nothing in common — an executor has a version, a platform, a status
+-- and a download link, and no code, no unlock and no author account. Sharing a
+-- table would have meant a dozen nullable columns and a permission check
+-- threaded through every query that touches scripts.
+--
+-- Publishing is gated on the /admin passcode ticket, not on being signed in.
+-- No creator account can reach it by any path the site offers.
+CREATE TABLE IF NOT EXISTS executors (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL,
+  developer       TEXT NOT NULL,
+  logo            TEXT NOT NULL DEFAULT '',
+  descr           TEXT NOT NULL,
+  descr_original  TEXT NOT NULL DEFAULT '',   -- before the AI tidied it
+  platforms       TEXT NOT NULL DEFAULT '[]', -- JSON array
+  roblox_versions TEXT NOT NULL DEFAULT '',
+  status          TEXT NOT NULL DEFAULT 'working',  -- working | updating | unavailable
+  version         TEXT NOT NULL DEFAULT '',
+  website         TEXT NOT NULL DEFAULT '',
+  discord         TEXT NOT NULL DEFAULT '',
+  tags            TEXT NOT NULL DEFAULT '[]',
+  screenshots     TEXT NOT NULL DEFAULT '[]',
+  removed         INTEGER NOT NULL DEFAULT 0,
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS executors_live ON executors(removed, updated_at);
+
 -- Reports from visitors. Live-instantly publishing needs a way for people to
 -- flag what slipped through.
 CREATE TABLE IF NOT EXISTS reports (

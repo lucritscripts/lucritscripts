@@ -3001,6 +3001,12 @@ async function postScriptEverywhere(env, script, author) {
   // A game whose channel IS #all-scripts would otherwise be posted twice.
   if (game && game !== all) targets.push({ id: game, kind: "game" });
 
+  const site = env.SITE_URL || "https://lucritscripts.site";
+  const slug = String(script.id).replace(/^s_/, "");
+  await feedLine(env, "latest-scripts",
+    `🆕 **${clip(script.title, 80)}** · ${clip(script.game || "Roblox", 40)} · by @${author}\n` +
+    `${site}/creations/${encodeURIComponent(author)}/${encodeURIComponent(slug)}`);
+
   for (const t of targets) {
     const sent = await bot(env, `/channels/${t.id}/messages`, {
       method: "POST",
@@ -3085,6 +3091,303 @@ async function modLog(env, title, description, color = 0xf6c343) {
       }],
       allowed_mentions: { parse: [] },
     },
+  });
+}
+
+/* ─────────────────────────────────────────────── server provisioning ── */
+
+/**
+ * The whole server layout, as data.
+ *
+ * Declarative on purpose. Adding `#clips` later is one line here, not a new
+ * function — and because provisioning is idempotent, re-running it creates
+ * only what is missing and leaves everything else alone. That is what makes
+ * this safe to run against a server people are already using.
+ *
+ * `private: true` marks staff channels: @everyone is denied View Channel, so
+ * moderation logs are not a public feed of what got rejected and why.
+ */
+const SERVER_LAYOUT = [
+  {
+    category: "📌 INFORMATION",
+    channels: [
+      { name: "welcome", topic: "Start here — what Lucrit Scripts is and how to use it." },
+      { name: "rules", topic: "Read before posting." },
+      { name: "announcements", topic: "Site updates and news." },
+      { name: "how-to-use", topic: "How to find, unlock and run a script." },
+      { name: "faq", topic: "Common questions." },
+      { name: "website", topic: "https://lucritscripts.site" },
+    ],
+  },
+  {
+    category: "📜 SCRIPTS",
+    channels: [
+      { name: "all-scripts", topic: "Every approved script, newest first. Posted automatically." },
+      { name: "latest-scripts", topic: "The newest releases." },
+      { name: "popular-scripts", topic: "Most viewed and copied." },
+      { name: "updated-scripts", topic: "Scripts their creators have changed." },
+    ],
+  },
+  // Games live in their own category, but the channels inside it are created
+  // on demand by gameChannel() — the first Blox Fruits script makes
+  // #blox-fruits. Listing games here would mean editing code to add a game.
+  { category: "🎮 GAMES", channels: [] },
+  {
+    category: "⚙️ EXECUTORS",
+    channels: [
+      { name: "executors", topic: "Roblox executors, published by staff." },
+      { name: "latest-executors", topic: "Newly added executors." },
+      { name: "executor-updates", topic: "Version and status changes." },
+      { name: "executor-discussion", topic: "Talk about executors here." },
+    ],
+  },
+  {
+    category: "🏆 COMMUNITY",
+    channels: [
+      { name: "leaderboards", topic: "Top creators and scripts, updated automatically." },
+      { name: "script-discussion", topic: "Talk about scripts here." },
+      { name: "suggestions", topic: "Ideas for the site or the server." },
+      { name: "support", topic: "Need help? Ask here." },
+    ],
+  },
+  {
+    category: "🛡️ STAFF",
+    private: true,
+    channels: [
+      { name: "moderation-logs", topic: "Automated record of publishes, removals and admin actions." },
+      { name: "bot-logs", topic: "Integration errors and diagnostics." },
+      { name: "content-review", topic: "Submissions held for a human decision." },
+    ],
+  },
+];
+
+/**
+ * Creates the server structure, skipping anything that already exists.
+ *
+ * Returns a report rather than throwing, because half-provisioned is a real
+ * outcome: Discord rate-limits channel creation hard, and the useful answer to
+ * "it stopped after nine channels" is a list of what was made and what was
+ * not, not a stack trace.
+ */
+async function provisionServer(env) {
+  if (!botOn(env)) return { ok: false, error: "No bot token." };
+
+  const guild = env.DISCORD_GUILD_ID;
+  const existing = await bot(env, `/guilds/${guild}/channels`);
+  if (!Array.isArray(existing)) return { ok: false, error: "Could not read the server's channels." };
+
+  const byName = (name, type) =>
+    existing.find((c) => c.type === type && c.name.toLowerCase() === name.toLowerCase());
+
+  const made = [];
+  const kept = [];
+  const failed = [];
+
+  for (const group of SERVER_LAYOUT) {
+    let cat = byName(group.category, 4);
+    if (!cat) {
+      cat = await bot(env, `/guilds/${guild}/channels`, {
+        method: "POST",
+        body: {
+          name: group.category,
+          type: 4,
+          // Staff categories start closed. Channels inside inherit this, so a
+          // new log channel is never briefly public while somebody remembers
+          // to lock it.
+          ...(group.private ? {
+            permission_overwrites: [{ id: guild, type: 0, deny: String(1 << 10) }],
+          } : {}),
+        },
+      });
+      if (cat?.id) { made.push(group.category); existing.push(cat); }
+      else { failed.push(group.category); continue; }
+    } else kept.push(group.category);
+
+    for (const ch of group.channels) {
+      const found = byName(ch.name, 0);
+      if (found) {
+        kept.push("#" + ch.name);
+        // Adopted channels still get filed under their category, so a server
+        // that already had #faq loose at the top ends up organised.
+        if (found.parent_id !== cat.id) {
+          await bot(env, `/channels/${found.id}`, { method: "PATCH", body: { parent_id: cat.id } });
+        }
+        continue;
+      }
+      const created = await bot(env, `/guilds/${guild}/channels`, {
+        method: "POST",
+        body: {
+          name: ch.name, type: 0, parent_id: cat.id,
+          topic: String(ch.topic || "").slice(0, 1024),
+          ...(group.private ? {
+            permission_overwrites: [{ id: guild, type: 0, deny: String(1 << 10) }],
+          } : {}),
+        },
+      });
+      if (created?.id) { made.push("#" + ch.name); existing.push(created); }
+      else failed.push("#" + ch.name);
+    }
+  }
+
+  // Cache the feed channels so posting does not re-list the guild every time.
+  for (const name of ["all-scripts", "latest-scripts", "popular-scripts", "updated-scripts",
+                      "executors", "latest-executors", "executor-updates",
+                      "moderation-logs", "bot-logs", "content-review", "leaderboards"]) {
+    const c = byName(name, 0);
+    if (c) {
+      await env.DB.prepare(
+        `INSERT INTO game_channels (game_slug, game_name, channel_id, at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(game_slug) DO UPDATE SET channel_id = excluded.channel_id`
+      ).bind("~" + name, name, c.id, nowSec()).run().catch(() => {});
+    }
+  }
+
+  return { ok: true, made, kept, failed };
+}
+
+async function handleAdminDiscordSetup(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  const report = await provisionServer(env);
+  if (!report.ok) return bad(503, report.error);
+  await modLog(env, "Server structure provisioned",
+    `Created: ${report.made.join(", ") || "nothing"}\nAlready there: ${report.kept.length}`, 0x66bb6a);
+  return ok({ data: report });
+}
+
+/* ──────────────────────────────────────────────────────── leaderboards ── */
+
+/**
+ * The leaderboard, as one message that is edited rather than reposted.
+ *
+ * Reposting would bury the channel in a new ranking every hour and make
+ * "current" mean "scroll to the bottom". One pinned message that updates in
+ * place is the whole point — and `script_posts` already knows how to remember
+ * a message id, so the board reuses it under a reserved key.
+ */
+async function postLeaderboards(env) {
+  if (!botOn(env)) return { ok: false, error: "No bot token." };
+  const channel = await namedChannel(env, "leaderboards");
+  if (!channel) return { ok: false, error: "No #leaderboards channel." };
+
+  const rows = async (sql, limit = 10) => {
+    const { results } = await env.DB.prepare(sql).bind(limit).all().catch(() => ({ results: [] }));
+    return results || [];
+  };
+
+  const creators = await rows(
+    `SELECT u.username AS name,
+            COUNT(DISTINCT s.id) AS scripts,
+            COALESCE(SUM(s.views), 0) AS views,
+            COALESCE(SUM(s.copies), 0) AS copies
+       FROM users u JOIN scripts s ON s.author_id = u.id
+      WHERE s.removed = 0 AND s.status = 'approved' AND u.banned = 0
+      GROUP BY u.id
+      ORDER BY (COALESCE(SUM(s.views),0) + COALESCE(SUM(s.copies),0) * 3) DESC
+      LIMIT ?`);
+
+  const popular = await rows(
+    `SELECT s.title AS title, u.username AS author, s.views AS views, s.copies AS copies,
+            (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
+       FROM scripts s JOIN users u ON u.id = s.author_id
+      WHERE s.removed = 0 AND s.status = 'approved' AND u.banned = 0
+      ORDER BY (s.views + s.copies * 3) DESC LIMIT ?`);
+
+  // Trending is unlocks in the last 48 hours, not all-time. Without the window
+  // this is just the popular board again with different words on it.
+  const since = nowSec() - 48 * 3600;
+  const { results: trend } = await env.DB.prepare(
+    `SELECT s.title AS title, u.username AS author, COUNT(*) AS recent
+       FROM unlock_events e
+       JOIN scripts s ON s.id = e.script_id
+       JOIN users u ON u.id = s.author_id
+      WHERE e.at > ? AND s.removed = 0 AND s.status = 'approved' AND u.banned = 0
+      GROUP BY e.script_id ORDER BY recent DESC LIMIT 10`
+  ).bind(since).all().catch(() => ({ results: [] }));
+
+  const medal = (i) => ["🥇", "🥈", "🥉"][i] || `\`${String(i + 1).padStart(2, " ")}\``;
+  const site = env.SITE_URL || "https://lucritscripts.site";
+
+  const creatorLines = creators.map((r, i) =>
+    `${medal(i)} **${clip(r.name, 40)}** — ${r.scripts} script${r.scripts === 1 ? "" : "s"} · ${r.views} views · ${r.copies} copies`);
+  const popularLines = popular.map((r, i) =>
+    `${medal(i)} **${clip(r.title, 60)}** by ${clip(r.author, 30)} — ${r.views} views · ${r.likes} ❤️`);
+  const trendLines = (trend || []).map((r, i) =>
+    `${medal(i)} **${clip(r.title, 60)}** by ${clip(r.author, 30)} — ${r.recent} in 48h`);
+
+  const embeds = [
+    {
+      title: "🏆 Top Creators",
+      description: creatorLines.join("\n") || "_Nobody has published yet._",
+      color: 0xf6c343,
+    },
+    {
+      title: "🔥 Most Popular Scripts",
+      description: popularLines.join("\n") || "_No scripts yet._",
+      color: 0xff7043,
+    },
+    {
+      title: "📈 Trending — last 48 hours",
+      description: trendLines.join("\n") || "_Nothing unlocked in the last two days._",
+      color: 0x7cc4ff,
+      footer: { text: `Lucrit Scripts · ${site.replace(/^https?:\/\//, "")} · updates automatically` },
+      timestamp: new Date().toISOString(),
+    },
+  ];
+
+  const KEY = "~board:main";
+  const known = await env.DB.prepare(
+    `SELECT message_id FROM script_posts WHERE script_id = ? AND channel_id = ?`
+  ).bind(KEY, channel).first().catch(() => null);
+
+  if (known?.message_id) {
+    const edited = await bot(env, `/channels/${channel}/messages/${known.message_id}`, {
+      method: "PATCH", body: { embeds, allowed_mentions: { parse: [] } },
+    });
+    if (edited) return { ok: true, edited: true };
+    // The message was deleted by hand; fall through and post a new one.
+  }
+
+  const sent = await bot(env, `/channels/${channel}/messages`, {
+    method: "POST", body: { embeds, allowed_mentions: { parse: [] } },
+  });
+  if (!sent?.id) return { ok: false, error: "Could not post the board." };
+
+  await env.DB.prepare(
+    `INSERT INTO script_posts (script_id, channel_id, message_id, kind, at)
+     VALUES (?, ?, ?, 'board', ?)
+     ON CONFLICT(script_id, channel_id) DO UPDATE SET message_id = excluded.message_id`
+  ).bind(KEY, channel, sent.id, nowSec()).run().catch(() => {});
+
+  // Pinned so it stays reachable as the channel fills.
+  await bot(env, `/channels/${channel}/pins/${sent.id}`, { method: "PUT" });
+  return { ok: true, posted: true };
+}
+
+async function handleAdminLeaderboards(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  const out = await postLeaderboards(env);
+  if (!out.ok) return bad(503, out.error);
+  return ok({ data: out });
+}
+
+/* ---------------------------------------------------------- feed posts */
+
+/**
+ * The three secondary feeds.
+ *
+ * #latest-scripts gets a line per publish. #popular-scripts and
+ * #updated-scripts are single edited messages like the leaderboard, because a
+ * "most popular" channel that appends is a history of what used to be popular.
+ */
+async function feedLine(env, name, text) {
+  if (!botOn(env)) return;
+  const channel = await namedChannel(env, name);
+  if (!channel) return;
+  await bot(env, `/channels/${channel}/messages`, {
+    method: "POST",
+    body: { content: clip(text, 1900), allowed_mentions: { parse: [] } },
   });
 }
 
@@ -3225,6 +3528,358 @@ async function handleDiscordStats(request, env) {
   return ok({ data: { ...stats, invite } });
 }
 
+/* ═══════════════════════════════════════════════════════════ executors ══ */
+
+/**
+ * Executors are staff-published, and that is enforced in exactly one place:
+ * every write below starts with `requireAdmin`. Nothing about this depends on
+ * the publishing page being hidden — the page not existing in somebody's menu
+ * is a UI convenience, not a permission. Calling the endpoint directly with a
+ * signed-in creator's cookie gets a 423 like everyone else, because the check
+ * is on the route, not on the button.
+ *
+ * `requireAdmin` is the passcode gate that already guards /admin: a separate
+ * short-lived ticket, unrelated to being signed in and unrelated to owning an
+ * account. A creator cannot escalate into it by any path the site offers.
+ */
+
+const EXECUTOR_STATUS = ["working", "updating", "unavailable"];
+const EXECUTOR_LIMITS = { name: 60, developer: 60, version: 30, descr: 2000, tag: 24 };
+
+const STATUS_LABEL = {
+  working: "🟢 Working",
+  updating: "🟡 Updating",
+  unavailable: "🔴 Unavailable",
+};
+
+function publicExecutor(row) {
+  if (!row) return null;
+  const list = (v) => { try { const p = JSON.parse(v || "[]"); return Array.isArray(p) ? p : []; } catch { return []; } };
+  return {
+    id: row.id,
+    slug: String(row.id).replace(/^x_/, ""),
+    name: row.name,
+    developer: row.developer,
+    logo: row.logo || "",
+    desc: row.descr,
+    platforms: list(row.platforms),
+    robloxVersions: row.roblox_versions || "",
+    status: row.status,
+    version: row.version || "",
+    website: row.website || "",
+    discord: row.discord || "",
+    tags: list(row.tags),
+    screenshots: list(row.screenshots),
+    added: String(row.created_at || "").slice(0, 10),
+    updated: String(row.updated_at || "").slice(0, 10),
+  };
+}
+
+/** Reads an executor out of a request body, or returns the reason it cannot. */
+function readExecutor(body) {
+  const name = String(body.name || "").trim();
+  const developer = String(body.developer || "").trim();
+  const descr = String(body.desc || "").trim();
+
+  if (!name) return { error: "Give the executor a name." };
+  if (name.length > EXECUTOR_LIMITS.name) return { error: "That name is too long." };
+  if (!developer) return { error: "Say who develops it." };
+  if (developer.length > EXECUTOR_LIMITS.developer) return { error: "That developer name is too long." };
+  if (!descr) return { error: "Write a description." };
+  if (descr.length > EXECUTOR_LIMITS.descr) return { error: "That description is too long." };
+
+  const status = EXECUTOR_STATUS.includes(body.status) ? body.status : "working";
+
+  const platforms = (Array.isArray(body.platforms) ? body.platforms : [])
+    .map((p) => String(p).trim().slice(0, 24)).filter(Boolean).slice(0, 8);
+
+  const tags = (Array.isArray(body.tags) ? body.tags : [])
+    .map((t) => String(t).replace(/[^A-Za-z0-9]/g, "").slice(0, EXECUTOR_LIMITS.tag))
+    .filter(Boolean).slice(0, 8);
+
+  // Links are pinned the same way profile links are: a listing page is
+  // world-readable, so an unchecked href here is stored XSS with a download
+  // button next to it.
+  const website = safeSocial(String(body.website || ""), [
+    "wearedevs.net", "krnl.place", "getsolara.dev", "swiftexploits.com",
+    "delta-executor.com", "codex.lol", "arceusx.com", "fluxus.pro",
+    "hydrogen.click", "evon.cc", "trigonevo.pro", "sea-executor.com",
+    "github.com", "discord.gg", "discord.com",
+  ]);
+  const discord = safeSocial(String(body.discord || ""), ["discord.gg", "discord.com"]);
+
+  const logoRaw = String(body.logo || "").trim();
+  const logo =
+    /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(logoRaw) && logoRaw.length < 400000
+      ? logoRaw
+      : safeSocial(logoRaw, ["githubusercontent.com", "imgur.com", "rbxcdn.com", "discordapp.com", "discord.com"]);
+
+  const screenshots = (Array.isArray(body.screenshots) ? body.screenshots : [])
+    .map((s) => safeSocial(String(s), ["githubusercontent.com", "imgur.com", "discordapp.com", "discord.com"]))
+    .filter(Boolean).slice(0, 6);
+
+  return {
+    value: {
+      name, developer, descr, status, logo, website, discord,
+      platforms: JSON.stringify(platforms),
+      tags: JSON.stringify(tags),
+      screenshots: JSON.stringify(screenshots),
+      version: String(body.version || "").trim().slice(0, EXECUTOR_LIMITS.version),
+      roblox_versions: String(body.robloxVersions || "").trim().slice(0, 60),
+    },
+  };
+}
+
+/* --------------------------------------------------------------- public */
+
+async function handleExecutorList(request, env) {
+  const url = new URL(request.url);
+  const status = String(url.searchParams.get("status") || "");
+  const where = ["removed = 0"];
+  const binds = [];
+  if (EXECUTOR_STATUS.includes(status)) { where.push("status = ?"); binds.push(status); }
+
+  const { results } = await env.DB.prepare(
+    `SELECT * FROM executors WHERE ${where.join(" AND ")} ORDER BY updated_at DESC LIMIT 200`
+  ).bind(...binds).all();
+
+  return ok({ data: (results || []).map(publicExecutor) });
+}
+
+async function handleExecutorGet(request, env, { id }) {
+  const row = await env.DB.prepare(
+    `SELECT * FROM executors WHERE id = ? AND removed = 0`
+  ).bind("x_" + String(id).replace(/^x_/, "")).first();
+  if (!row) return bad(404, "No such executor.");
+  return ok({ data: publicExecutor(row) });
+}
+
+/* ---------------------------------------------------------- staff only */
+
+async function handleExecutorCreate(request, env, _params, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const body = await request.json().catch(() => ({}));
+  const parsed = readExecutor(body);
+  if (parsed.error) return bad(400, parsed.error);
+
+  // Executors go through the same description pass creators get, so the
+  // listings read consistently — and the same rule applies: it may not invent
+  // a capability the submitter did not claim.
+  const original = parsed.value.descr;
+  let descr = original;
+  let tags = JSON.parse(parsed.value.tags);
+  if (body.enhance !== false) {
+    const out = await enhanceDescription(env, {
+      descr: original, title: parsed.value.name, game: "Roblox executor",
+    });
+    descr = out.description;
+    if (!tags.length && out.tags.length) tags = out.tags;
+  }
+
+  const id = "x_" + randomHex(8);
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `INSERT INTO executors (id, name, developer, logo, descr, descr_original, platforms,
+                            roblox_versions, status, version, website, discord, tags,
+                            screenshots, removed, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+  ).bind(
+    id, parsed.value.name, parsed.value.developer, parsed.value.logo, descr, original,
+    parsed.value.platforms, parsed.value.roblox_versions, parsed.value.status,
+    parsed.value.version, parsed.value.website, parsed.value.discord,
+    JSON.stringify(tags), parsed.value.screenshots, now, now
+  ).run();
+
+  const row = await env.DB.prepare(`SELECT * FROM executors WHERE id = ?`).bind(id).first();
+
+  const after = Promise.all([
+    announceExecutor(env, row),
+    modLog(env, "Executor published", `**${row.name}** by ${row.developer}`, 0x66bb6a),
+  ]);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: publicExecutor(row) });
+}
+
+async function handleExecutorUpdate(request, env, { id }, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const key = "x_" + String(id).replace(/^x_/, "");
+  const before = await env.DB.prepare(`SELECT * FROM executors WHERE id = ?`).bind(key).first();
+  if (!before) return bad(404, "No such executor.");
+
+  const body = await request.json().catch(() => ({}));
+  const parsed = readExecutor({ ...publicExecutor(before), desc: before.descr, ...body });
+  if (parsed.error) return bad(400, parsed.error);
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(
+    `UPDATE executors SET name = ?, developer = ?, logo = ?, descr = ?, platforms = ?,
+            roblox_versions = ?, status = ?, version = ?, website = ?, discord = ?,
+            tags = ?, screenshots = ?, updated_at = ? WHERE id = ?`
+  ).bind(
+    parsed.value.name, parsed.value.developer, parsed.value.logo, parsed.value.descr,
+    parsed.value.platforms, parsed.value.roblox_versions, parsed.value.status,
+    parsed.value.version, parsed.value.website, parsed.value.discord,
+    parsed.value.tags, parsed.value.screenshots, now, key
+  ).run();
+
+  const row = await env.DB.prepare(`SELECT * FROM executors WHERE id = ?`).bind(key).first();
+
+  // What actually changed, in words — an "updated" ping that does not say what
+  // changed is noise people learn to ignore.
+  const changes = [];
+  if (before.version !== row.version) changes.push(`version ${before.version || "—"} → **${row.version || "—"}**`);
+  if (before.status !== row.status) changes.push(`status ${STATUS_LABEL[before.status] || before.status} → **${STATUS_LABEL[row.status] || row.status}**`);
+  if (before.descr !== row.descr) changes.push("description updated");
+  if (before.logo !== row.logo) changes.push("image updated");
+
+  const after = Promise.all([
+    syncExecutorPosts(env, row),
+    changes.length
+      ? executorUpdateNote(env, row, changes)
+      : Promise.resolve(),
+    modLog(env, "Executor updated", `**${row.name}** — ${changes.join(", ") || "no visible change"}`, 0x42a5f5),
+  ]);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: publicExecutor(row) });
+}
+
+async function handleExecutorDelete(request, env, { id }, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const key = "x_" + String(id).replace(/^x_/, "");
+  const row = await env.DB.prepare(`SELECT * FROM executors WHERE id = ?`).bind(key).first();
+  if (!row) return bad(404, "No such executor.");
+
+  await env.DB.prepare(`UPDATE executors SET removed = 1 WHERE id = ?`).bind(key).run();
+
+  const after = Promise.all([
+    retireExecutorPosts(env, row),
+    modLog(env, "Executor removed", `**${row.name}** by ${row.developer}`, 0xef5350),
+  ]);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: { id: key } });
+}
+
+/* ------------------------------------------------------ executor embeds */
+
+function executorEmbed(env, row, { state = "live" } = {}) {
+  const site = env.SITE_URL || "https://lucritscripts.site";
+  const link = `${site}/executors/${encodeURIComponent(String(row.id).replace(/^x_/, ""))}`;
+  const gone = state !== "live";
+
+  const list = (v) => { try { const p = JSON.parse(v || "[]"); return Array.isArray(p) ? p : []; } catch { return []; } };
+  const platforms = list(row.platforms);
+  const hashes = [...list(row.tags), "Executor", "Roblox"]
+    .map((t) => "#" + String(t).replace(/[^A-Za-z0-9]/g, ""))
+    .filter((t) => t.length > 1).slice(0, 6).join(" ");
+
+  const art = /^https:\/\//i.test(String(row.logo || "")) ? row.logo : null;
+
+  return {
+    title: gone ? `~~⚙️ ${clip(row.name, 230)}~~` : `⚙️ ${clip(row.name, 240)}`,
+    url: gone ? undefined : link,
+    description: gone
+      ? "**This executor is no longer listed on Lucrit Scripts.**"
+      : clip(row.descr, 400),
+    color: gone ? 0x4a5568
+      : row.status === "working" ? 0x66bb6a
+      : row.status === "updating" ? 0xf6c343 : 0xef5350,
+    fields: [
+      { name: "👤 Developer", value: clip(row.developer, 100), inline: true },
+      ...(row.version ? [{ name: "📦 Version", value: clip(row.version, 40), inline: true }] : []),
+      ...(platforms.length ? [{ name: "💻 Platform", value: clip(platforms.join(", "), 100), inline: true }] : []),
+      { name: "Status", value: STATUS_LABEL[row.status] || row.status, inline: true },
+      ...(row.roblox_versions ? [{ name: "🎮 Roblox", value: clip(row.roblox_versions, 60), inline: true }] : []),
+      ...(hashes && !gone ? [{ name: "​", value: hashes }] : []),
+      ...(gone ? [] : [{ name: "​", value: `**[🔗 View Executor](${link})**` }]),
+    ],
+    ...(art && !gone ? { thumbnail: { url: art } } : {}),
+    footer: { text: "Lucrit Scripts · lucritscripts.site" },
+    timestamp: new Date(row.updated_at || Date.now()).toISOString(),
+  };
+}
+
+async function announceExecutor(env, row) {
+  if (!botOn(env)) return;
+  try {
+    const embed = executorEmbed(env, row);
+    for (const name of ["executors", "latest-executors"]) {
+      const channel = await namedChannel(env, name);
+      if (!channel) continue;
+      const sent = await bot(env, `/channels/${channel}/messages`, {
+        method: "POST", body: { embeds: [embed], allowed_mentions: { parse: [] } },
+      });
+      if (!sent?.id) continue;
+      await env.DB.prepare(
+        `INSERT INTO script_posts (script_id, channel_id, message_id, kind, at)
+         VALUES (?, ?, ?, 'executor', ?)
+         ON CONFLICT(script_id, channel_id) DO UPDATE SET message_id = excluded.message_id`
+      ).bind(row.id, channel, sent.id, nowSec()).run().catch(() => {});
+    }
+  } catch (err) {
+    console.warn("executor announce failed", err?.message);
+  }
+}
+
+async function syncExecutorPosts(env, row, { state = "live" } = {}) {
+  if (!botOn(env)) return;
+  const { results } = await env.DB.prepare(
+    `SELECT channel_id, message_id FROM script_posts WHERE script_id = ?`
+  ).bind(row.id).all().catch(() => ({ results: [] }));
+  const embed = executorEmbed(env, row, { state });
+  for (const p of results || []) {
+    await bot(env, `/channels/${p.channel_id}/messages/${p.message_id}`, {
+      method: "PATCH", body: { embeds: [embed], allowed_mentions: { parse: [] } },
+    });
+  }
+}
+
+async function retireExecutorPosts(env, row) {
+  if (!botOn(env)) return;
+  if (/^(1|true|yes|on)$/i.test(String(env.DISCORD_DELETE_REMOVED || ""))) {
+    const { results } = await env.DB.prepare(
+      `SELECT channel_id, message_id FROM script_posts WHERE script_id = ?`
+    ).bind(row.id).all().catch(() => ({ results: [] }));
+    for (const p of results || []) {
+      await bot(env, `/channels/${p.channel_id}/messages/${p.message_id}`, { method: "DELETE" });
+    }
+    await env.DB.prepare(`DELETE FROM script_posts WHERE script_id = ?`).bind(row.id).run().catch(() => {});
+    return;
+  }
+  await syncExecutorPosts(env, row, { state: "removed" });
+}
+
+/** A short "what changed" note in #executor-updates, separate from the listing. */
+async function executorUpdateNote(env, row, changes) {
+  if (!botOn(env)) return;
+  const channel = await namedChannel(env, "executor-updates");
+  if (!channel) return;
+  const site = env.SITE_URL || "https://lucritscripts.site";
+  const link = `${site}/executors/${encodeURIComponent(String(row.id).replace(/^x_/, ""))}`;
+  await bot(env, `/channels/${channel}/messages`, {
+    method: "POST",
+    body: {
+      embeds: [{
+        title: `⚙️ ${clip(row.name, 240)} updated`,
+        url: link,
+        description: changes.map((c) => "• " + c).join("\n").slice(0, 1000),
+        color: 0x42a5f5,
+        footer: { text: "Lucrit Scripts" },
+        timestamp: new Date().toISOString(),
+      }],
+      allowed_mentions: { parse: [] },
+    },
+  });
+}
+
 /* ═══════════════════════════════════════════════════════════════════ router ══ */
 
 /**
@@ -3236,6 +3891,9 @@ const PATTERNS = [
   // Usernames allow spaces and dots, so this segment is anything but a slash
   // and the handler decodes it. Length is capped here rather than trusted.
   ["GET", /^\/api\/creators\/([^/]{1,80})$/, handleCreator],
+  ["GET", /^\/api\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorGet],
+  ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
+  ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
   ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
@@ -3252,6 +3910,10 @@ const ROUTES = {
   "GET  /api/auth/discord/start": handleDiscordStart,
   "GET  /api/auth/discord/callback": handleDiscordCallback,
   "GET  /api/discord": handleDiscordStats,
+  "GET  /api/executors": handleExecutorList,
+  "POST /api/admin/discord/setup": handleAdminDiscordSetup,
+  "POST /api/admin/discord/leaderboards": handleAdminLeaderboards,
+  "POST /api/admin/executors": handleExecutorCreate,
   "GET  /api/leaderboard": handleLeaderboard,
   "GET  /api/admin/state": handleAdminState,
   "POST /api/admin/unlock": handleAdminUnlock,
@@ -3315,6 +3977,7 @@ const APP_ROUTES = [
   /^\/creators\/[^/]+\/?$/,
   /^\/creations\/[^/]+\/[^/]+\/?$/,
   /^\/dashboard(\/[^/]+)?\/?$/,
+  /^\/executors(\/[^/]+)?\/?$/,
 ];
 
 /** Headers GitHub Pages could never send us. */
