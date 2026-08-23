@@ -472,6 +472,12 @@ a.btn:hover { text-decoration: none; }
 .star.is-full, .star.is-half { color: #ffc857; }
 .rating-num { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 520; }
 .by { color: var(--ink-2); }
+
+/* The author's name is a link now — to /creators/<name>. It sits inside a
+   card that is itself clickable, so it has to read as its own target rather
+   than as part of the meta line, without shouting over the title. */
+a.by { text-decoration: none; border-bottom: 1px solid transparent; transition: color .15s, border-color .15s; }
+a.by:hover, a.by:focus-visible { color: var(--ink); border-bottom-color: currentColor; }
 .dot { width: 3px; height: 3px; border-radius: 50%; background: var(--ink-3); display: inline-block; }
 
 .card__stats {
