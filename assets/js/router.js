@@ -117,6 +117,9 @@ export function createRouter(handlers = {}) {
     get route() { return parse(); },
     get showing() { return showing; },
 
+    /** What a path resolves to, without going there. */
+    nameFor: (path) => parse(path).name,
+
     /** Resolve whatever URL the page was opened at. */
     start() { resolve(parse()); },
 

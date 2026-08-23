@@ -19,6 +19,7 @@ import { account } from "./account.js";
 import { runBotCheck } from "./gate.js";
 import { capturePendingUnlock, takePendingUnlock, deleteScript } from "./library-api.js";
 import { createCreatorPage } from "./creator.js";
+import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
 } from "./router.js";
@@ -465,10 +466,31 @@ requestAnimationFrame(frame);
 
 document.documentElement.classList.add("is-ready");
 
+/* -------------------------------------------------------------- discord */
+
+// The Discord sign-in callback is a redirect, so the only way it can tell the
+// page anything is the URL. Read it before the router touches the address bar,
+// for the same reason the sponsor return is read early: a refresh must not
+// replay it.
+const discordSaid = readDiscordReturn();
+
+// Counts on the Join buttons, and the invite the server is configured with.
+// Repainted on every session change and whenever the chapters are rebuilt,
+// because those buttons are drawn in more than one place.
+paintDiscord();
+watchDiscord();
+onLibraryChange(() => paintDiscord());
+
 // The gate goes up before anything else is usable. The 3D world keeps
 // loading behind it so the site is ready the moment it clears.
 runBotCheck().then((how) => {
   if (how !== "skipped") choreography.measure();
+  // After the gate, not before: a toast raised behind the bot check is a toast
+  // nobody reads.
+  if (discordSaid) {
+    toast(discordSaid[0], discordSaid[1]);
+    if (discordSaid[1] === "ok") dashboard.refresh();
+  }
 });
 
 // A sponsor step sends people back with ?unlocked=..&click=.. on the URL.

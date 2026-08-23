@@ -379,8 +379,18 @@ export function createAuth({ onDone }) {
             <path fill="#EA4335" d="M24 10.2c4.2 0 7 1.8 8.6 3.3l6-5.9C34.8 4.2 29.9 2 24 2 15.4 2 7.9 7 4.3 14.2l7 5.4C13.1 14.1 18.1 10.2 24 10.2z"/>
           </svg>
           Continue with Google
-        </button>
-        <p class="sheet__or"><span>or ${signup ? "sign up" : "sign in"} with email</span></p>` : ""}
+        </button>` : ""}
+
+      ${mode !== "reset" && account.discord.signIn ? `
+        <a class="btn btn--discordauth btn--full" href="/api/auth/discord/start" data-discord>
+          <svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18" fill="currentColor">
+            <path d="M19.3 5.3A16.7 16.7 0 0 0 15.2 4l-.2.4c1.4.4 2.6 1 3.7 1.7a13.9 13.9 0 0 0-11.5 0c1.1-.7 2.3-1.3 3.7-1.7L10.8 4a16.7 16.7 0 0 0-4.1 1.3C4 9.3 3.2 13.2 3.6 17a16.8 16.8 0 0 0 5.1 2.6l.9-1.5c-.8-.3-1.5-.7-2.2-1.1l.5-.4a12 12 0 0 0 10.2 0l.5.4c-.7.4-1.4.8-2.2 1.1l.9 1.5a16.8 16.8 0 0 0 5.1-2.6c.5-4.4-.7-8.3-3.1-11.7ZM9.3 14.7c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.9.9 1.8 2c0 1.1-.8 2-1.8 2Zm5.4 0c-1 0-1.8-.9-1.8-2s.8-2 1.8-2 1.9.9 1.8 2c0 1.1-.8 2-1.8 2Z"/>
+          </svg>
+          Continue with Discord
+        </a>` : ""}
+
+      ${mode !== "reset" && (account.canUseGoogle || account.discord.signIn)
+        ? `<p class="sheet__or"><span>or ${signup ? "sign up" : "sign in"} with email</span></p>` : ""}
 
       <form class="form" novalidate>
         ${signup ? `<label>Username<input name="username" autocomplete="nickname" autocapitalize="none"
@@ -1030,10 +1040,31 @@ export function createScriptPage({ onRequireAuth }) {
   let current = null;
   let code = null;         // fetched separately, and only once we're allowed it
   let busy = false;
+  // Set when the server refuses an unlock because of the Discord gate. Held
+  // rather than toasted: the reason belongs where the button was, and it has
+  // to survive a re-render so the "check again" button has somewhere to live.
+  let blockedByDiscord = null;
 
   // The countdown itself lives in unlockclock.js so the cards and this sheet
   // read the same number. All that is needed here is to react when the one
   // currently on screen runs out.
+  // The gate's wording is decided by server configuration that arrives a
+  // moment after the page does — which sponsors are live, whether Discord
+  // membership is required.
+  //
+  // On a deep link to /creations/... the sheet is drawn BEFORE that answer
+  // exists, and nothing used to redraw it. A visitor arriving straight at a
+  // script therefore saw "the sponsor step isn't switched on yet, so this one
+  // is on the house" on a site where it very much was switched on, and a
+  // members-only library showed no mention of Discord at all. The buttons
+  // still went to the right place — the server decides that — but the page
+  // was telling people something untrue about what was about to happen.
+  //
+  // Both of these redraw the sheet only when it is actually open, so this
+  // costs nothing on the home page.
+  account.ready.then(() => { if (sheet.isOpen) render(); });
+  account.onChange(() => { if (sheet.isOpen) render(); });
+
   onExpire((id) => {
     if (!current || current.id !== id) return;
     // The server would refuse the code from here anyway. Re-rendering as
@@ -1120,6 +1151,34 @@ export function createScriptPage({ onRequireAuth }) {
           ${(() => {
             const live = account.unlockProviders;
             const LABEL = { lootlabs: "Lootlabs", linkvertise: "Linkvertise" };
+
+            // The Discord condition comes FIRST, before any mention of a
+            // sponsor step. Somebody who cannot unlock at all should not be
+            // offered a set of offers to complete — the server would refuse
+            // them at the end of it, which is the worst possible order to find
+            // out in.
+            const d = account.discord;
+            if (d.requireMember && !account.discordLinked) {
+              return `
+                <p>This library is for members of the Discord server.</p>
+                <div class="gate__actions">
+                  ${d.invite ? `<a class="btn btn--discordauth" href="${esc(safeHref(d.invite))}"
+                       target="_blank" rel="noopener">Join the Discord</a>` : ""}
+                  <a class="btn btn--primary" href="/api/auth/discord/start">Sign in with Discord</a>
+                </div>
+                <p class="gate__note">Join the server, then sign in with Discord — after that it's
+                   one short sponsor step per script, same as everyone else.</p>`;
+            }
+            if (blockedByDiscord) {
+              return `
+                <p>${esc(blockedByDiscord.error || "You need to be in the Discord server.")}</p>
+                <div class="gate__actions">
+                  ${blockedByDiscord.invite ? `<a class="btn btn--primary"
+                       href="${esc(safeHref(blockedByDiscord.invite))}" target="_blank"
+                       rel="noopener">Join the Discord</a>` : ""}
+                  <button class="btn btn--ghost" data-act="recheck">I've joined — check again</button>
+                </div>`;
+            }
 
             // No provider configured. Offering a sponsor button here would be
             // a lie — there is no ad to show and no author to pay.
@@ -1220,11 +1279,28 @@ export function createScriptPage({ onRequireAuth }) {
       toast("Report sent — thanks for flagging it", "warn");
     }
 
+    // "I've joined — check again". Clearing the refusal and re-rendering puts
+    // the unlock buttons back; the server re-checks on the next attempt, and
+    // its membership cache is short enough that joining a moment ago counts.
+    if (act === "recheck") {
+      blockedByDiscord = null;
+      render();
+      toast("Try the unlock again");
+      return;
+    }
+
     if (act === "free" || account.unlockProviders.includes(act)) {
       if (busy) return;
       busy = true; render();
       try {
         const res = await startUnlock(current.id, act);
+
+        // The Discord gate refuses with a shape the page can act on, so the
+        // answer is a way in rather than a dead end.
+        if (!res.ok && res.discord) {
+          blockedByDiscord = { error: res.error, ...res.discord };
+          return;                       // the finally block re-renders
+        }
         if (!res.ok) return toast(res.error || "Couldn't start the unlock.", "warn");
 
         if (res.data.url) {

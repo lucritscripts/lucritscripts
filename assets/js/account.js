@@ -346,6 +346,27 @@ export const account = {
   get unlockMinutes() { return backend.config?.unlockMinutes || 5; },
 
   /**
+   * What Discord is wired up to do, as the server sees it.
+   *
+   *   signIn        — the OAuth application exists, so offer the button
+   *   requireMember — unlocking needs membership of the server
+   *   invite        — where to send someone who needs to join
+   *   stats         — a guild id is set, so /api/discord has something to say
+   *
+   * All four default to off. Nothing here is a permission: the gate is
+   * enforced at /api/unlock/start and at the code endpoint, so turning
+   * `requireMember` off in the console changes what the page says and nothing
+   * about what the server hands over.
+   */
+  get discord() {
+    return backend.config?.discord
+      || { signIn: false, requireMember: false, invite: "", stats: false };
+  },
+
+  /** Whether THIS account is linked to a Discord account. */
+  get discordLinked() { return Boolean(session?.discord); },
+
+  /**
    * Whether this session runs the site.
    *
    * Comes from the server with the session, never from anything the browser

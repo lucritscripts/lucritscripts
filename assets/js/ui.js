@@ -485,7 +485,7 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
           </button>
           <a class="btn btn--discord" href="${DISCORD_INVITE}" target="_blank" rel="noopener">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.3 5.3A16 16 0 0 0 15.4 4l-.2.4a12 12 0 0 1 3.3 1.6 11 11 0 0 0-9-1.1 11.4 11.4 0 0 0-2 1.1A12 12 0 0 1 10.8 4L10.6 4a16 16 0 0 0-3.9 1.3C4.2 9 3.5 12.6 3.9 16.2a16 16 0 0 0 4.8 2.4l.6-1a10.6 10.6 0 0 1-1.7-.8l.4-.3a11.4 11.4 0 0 0 9.8 0l.4.3a10.6 10.6 0 0 1-1.7.8l.6 1a16 16 0 0 0 4.8-2.4c.5-4.2-.6-7.8-2.6-10.9ZM9.7 14.1c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Zm4.6 0c-.9 0-1.7-.9-1.7-2s.8-2 1.7-2 1.7.9 1.7 2-.7 2-1.7 2Z"/></svg>
-            Join Discord for daily updates
+            Join Discord for daily updates<span data-discord-stats hidden></span>
           </a>
           <button class="btn btn--gold" data-info="paid">Start Getting Paid for Scripting</button>
           <button class="btn btn--ghost" data-auth="account">View Account</button>
@@ -554,7 +554,8 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
         <div class="finale__cta">
           <button class="btn btn--primary" data-jump="search">Explore the library</button>
           <button class="btn btn--gold" data-info="paid">Get paid for scripting</button>
-          <a class="btn btn--discord" href="${DISCORD_INVITE}" target="_blank" rel="noopener">Join Discord</a>
+          <a class="btn btn--discord" href="${DISCORD_INVITE}" target="_blank"
+             rel="noopener">Join Discord<span data-discord-stats hidden></span></a>
         </div>
       </div>`),
   ].join("");
