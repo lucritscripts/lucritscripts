@@ -2197,20 +2197,32 @@ async function announceScript(env, script, authorName) {
   // rather than an embed with no image.
   const art = /^https:\/\//i.test(String(script.thumbnail || "")) ? script.thumbnail : null;
 
+  // The description is trimmed at a word boundary rather than mid-syllable.
+  // Publishing demands a hundred words, so every one of these WILL be cut, and
+  // "...a really useful scr" reads like the post itself is broken.
+  const full = String(script.descr || "").trim();
+  const blurb = full.length > 300
+    ? full.slice(0, 300).replace(/\s+\S*$/, "") + "…"
+    : full;
+
   const body = {
     // No content, so the message is the embed alone and nothing is @-pinged.
     embeds: [{
       title: String(script.title || "New script").slice(0, 256),
       url: link,
-      description: String(script.descr || "").slice(0, 300),
+      description: blurb,
       color: 0x7cc4ff,
       author: { name: `@${authorName}`, url: `${site}/creators/${encodeURIComponent(authorName)}` },
       fields: [
         { name: "Game", value: String(script.game || "Roblox").slice(0, 100), inline: true },
         { name: "Keyless", value: script.keyless ? "Yes" : "Key required", inline: true },
+        // The title is already a link, but a hyperlinked heading does not read
+        // as a button — people scroll past it. This is the call to action, on
+        // its own line, saying what happens when you press it.
+        { name: "\u200b", value: `**[Get the script →](${link})**` },
       ],
       ...(art ? { thumbnail: { url: art } } : {}),
-      footer: { text: "Lucrit Script" },
+      footer: { text: "Lucrit Script · lucritscripts.site" },
       timestamp: new Date().toISOString(),
     }],
     // Belt and braces: even if a title or description ever carried an @everyone,
