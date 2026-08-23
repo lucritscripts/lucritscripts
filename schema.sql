@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS users (
   -- Google's stable subject id. Set when an account is linked to Google.
   google_sub          TEXT UNIQUE,
 
+  -- Discord's stable user id (a snowflake). Set when an account signs in with
+  -- Discord, and the only thing the members-only gate has to check against.
+  -- UNIQUE so one Discord account cannot quietly become two site accounts.
+  discord_id          TEXT UNIQUE,
+
   username            TEXT NOT NULL,
   username_lower      TEXT NOT NULL UNIQUE,   -- the whole claim system, in one word
   username_changed_at TEXT,
@@ -77,6 +82,20 @@ CREATE TABLE IF NOT EXISTS resets (
   expires_at  INTEGER NOT NULL,
   used        INTEGER NOT NULL DEFAULT 0
 );
+
+-- A small key/value cache with expiry.
+--
+-- Exists because Discord rate-limits per bot rather than per visitor: a member
+-- check on every code fetch would start refusing everybody at once during a
+-- busy hour. The values here are all cheap to recompute and stale-tolerant —
+-- a member count, whether somebody is in the server — so a miss costs one
+-- outbound request and nothing else.
+CREATE TABLE IF NOT EXISTS cache (
+  k        TEXT PRIMARY KEY,
+  v        TEXT NOT NULL,
+  expires  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cache_expiry ON cache(expires);
 
 -- Fixed-window rate limiting. Cloudflare's own binding is better, but this
 -- works everywhere and needs no extra configuration.

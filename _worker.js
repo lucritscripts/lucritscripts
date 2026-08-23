@@ -48,6 +48,7 @@
  *   MAIL_FROM          plain var — the From: address for reset email
  *   LOOTLABS_TOKEN     secret — sponsor unlocks (optional; see the unlock section)
  *   ADMIN_USER_ID      plain var — the one account that can remove any script
+ *   DISCORD_*          see the discord section (all optional, all off by default)
  */
 
 /* ══════════════════════════════════════════════════════════ small helpers ══ */
@@ -254,6 +255,9 @@ function publicSession(row, env) {
     tiktok: row.tiktok || "",
     createdAt: row.created_at,
     usernameChangedAt: row.username_changed_at || null,
+    // Whether this account is linked to Discord — not which account, which is
+    // nobody else's business and not needed by anything on the page.
+    discord: Boolean(row.discord_id),
     publishes: [],
     remote: true,
   };
@@ -1130,7 +1134,7 @@ async function handleCreator(request, env, { id }) {
   });
 }
 
-async function handleScriptPublish(request, env) {
+async function handleScriptPublish(request, env, _params, ctx) {
   const user = await currentUser(request, env);
   if (!user) return bad(401, "Sign in to publish a script.");
 
@@ -1190,6 +1194,14 @@ async function handleScriptPublish(request, env) {
        FROM scripts s JOIN users u ON u.id = s.author_id WHERE s.id = ?`
   ).bind(id).first();
 
+  // Tell Discord, but never at the publisher's expense. waitUntil keeps the
+  // request from waiting on it, and announceScript swallows its own failures,
+  // so a dead webhook is a missing message rather than a publish that appears
+  // to have gone wrong.
+  const announce = announceScript(
+    env, { id, title, game, descr, thumbnail, keyless: body.keyless !== false }, user.username);
+  if (ctx?.waitUntil) ctx.waitUntil(announce); else announce.catch(() => {});
+
   return ok({ data: publicScript(row, { unlocked: true, mine: true, liked: false }) });
 }
 
@@ -1215,6 +1227,12 @@ async function handleScriptCode(request, env, { id }) {
   ).bind(subject, id, nowSec()).first();
 
   if (!grantOpens(env, grant)) return bad(403, "Unlock the script first.");
+
+  // Checked again here because this is the door the code actually comes
+  // through. A grant minted while the gate was off, or while somebody was
+  // still in the server, must not keep opening it after they left.
+  const blocked = await discordBlock(env, user);
+  if (blocked) return bad(403, blocked.error, { discord: blocked.discord });
 
   // Counting here rather than at claim time means the number reflects code
   // actually collected, not sponsor steps abandoned at the last moment.
@@ -1457,6 +1475,12 @@ async function handleUnlockStart(request, env) {
   if (!script) return bad(404, "That script doesn't exist.");
 
   const user = await currentUser(request, env);
+
+  // Before the sponsor step, not after it. Somebody who is not in the server
+  // must not be sent through a set of offers only to be refused at the end.
+  const blocked = await discordBlock(env, user);
+  if (blocked) return bad(403, blocked.error, { discord: blocked.discord });
+
   const subject = await grantSubject(request, env, user);
   const clickId = randomHex(16);
   const now = nowSec();
@@ -2076,6 +2100,477 @@ async function handleLeaderboard(request, env) {
   });
 }
 
+/* ═══════════════════════════════════════════════════════════════ discord ══ */
+
+/**
+ * Discord, in four parts that share almost nothing:
+ *
+ *   1. Announcements — a webhook post when somebody publishes.
+ *   2. Sign-in       — OAuth2, so an account can be a Discord account.
+ *   3. The gate      — optionally, an unlock requires being in the server.
+ *   4. Stats         — member and online counts, shown on the site.
+ *
+ * Each is independently switch-off-able, and each is OFF until its variables
+ * exist. That is not politeness; it is the only way a half-configured Discord
+ * cannot take the site down with it. A missing webhook must not fail a
+ * publish, and a Discord outage must not stop people getting scripts.
+ *
+ * Variables:
+ *   DISCORD_WEBHOOK_URL     secret — announcements
+ *   DISCORD_CLIENT_ID       text   — OAuth application id (public by design)
+ *   DISCORD_CLIENT_SECRET   secret — OAuth
+ *   DISCORD_BOT_TOKEN       secret — membership checks and exact counts
+ *   DISCORD_GUILD_ID        text   — which server
+ *   DISCORD_REQUIRE_MEMBER  text   — "1" turns the members-only gate ON
+ *   DISCORD_INVITE          text   — the invite shown when somebody is refused
+ */
+
+const DISCORD_API = "https://discord.com/api/v10";
+
+const discordSignIn = (env) => Boolean(env.DISCORD_CLIENT_ID && env.DISCORD_CLIENT_SECRET);
+
+/**
+ * Whether the members-only gate is on.
+ *
+ * Three things have to be true, and the flag is the least of them: without a
+ * bot token and a guild id there is nothing to check membership against, and a
+ * gate that cannot check is a gate that refuses everyone. Sign-in has to work
+ * too — otherwise nobody has a Discord identity to check in the first place.
+ */
+function discordGateOn(env) {
+  return Boolean(
+    /^(1|true|yes|on)$/i.test(String(env.DISCORD_REQUIRE_MEMBER || "")) &&
+    env.DISCORD_BOT_TOKEN && env.DISCORD_GUILD_ID && discordSignIn(env)
+  );
+}
+
+const discordInvite = (env) => String(env.DISCORD_INVITE || "").trim();
+
+/* ------------------------------------------------------------------ cache */
+
+/**
+ * A tiny key/value cache in D1.
+ *
+ * Discord rate-limits per route and per bot, and the answers here move slowly:
+ * a member count is interesting to a visitor and uninteresting one second
+ * later. Reading a row beats an outbound request on both latency and the 10ms
+ * CPU budget, and it means a Discord outage degrades to a stale number rather
+ * than a spinner.
+ */
+async function cacheGet(env, key) {
+  try {
+    const row = await env.DB.prepare(`SELECT v FROM cache WHERE k = ? AND expires > ?`)
+      .bind(key, nowSec()).first();
+    return row ? JSON.parse(row.v) : null;
+  } catch { return null; }
+}
+
+async function cachePut(env, key, value, ttlSec) {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO cache (k, v, expires) VALUES (?, ?, ?)
+       ON CONFLICT(k) DO UPDATE SET v = excluded.v, expires = excluded.expires`
+    ).bind(key, JSON.stringify(value), nowSec() + ttlSec).run();
+  } catch { /* the cache is an optimisation, never a requirement */ }
+}
+
+/* ----------------------------------------------------------- announcements */
+
+/**
+ * Posts a new script to the channel behind DISCORD_WEBHOOK_URL.
+ *
+ * Called through ctx.waitUntil, so the publisher's request returns the moment
+ * the row is written and does not wait on Discord. It cannot throw into the
+ * caller and it cannot fail a publish: every path here ends in a swallowed
+ * error. A dead webhook is a missing message, not a broken site.
+ */
+async function announceScript(env, script, authorName) {
+  const hook = String(env.DISCORD_WEBHOOK_URL || "").trim();
+  if (!/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//i.test(hook)) return;
+
+  const site = env.SITE_URL || "https://lucritscripts.site";
+  const link = `${site}/creations/${encodeURIComponent(authorName)}/${encodeURIComponent(
+    String(script.id).replace(/^s_/, ""))}`;
+
+  // Only an https thumbnail. Uploaded artwork is stored as a data: URL, which
+  // Discord cannot fetch — sending one produces an embed with a broken image
+  // rather than an embed with no image.
+  const art = /^https:\/\//i.test(String(script.thumbnail || "")) ? script.thumbnail : null;
+
+  const body = {
+    // No content, so the message is the embed alone and nothing is @-pinged.
+    embeds: [{
+      title: String(script.title || "New script").slice(0, 256),
+      url: link,
+      description: String(script.descr || "").slice(0, 300),
+      color: 0x7cc4ff,
+      author: { name: `@${authorName}`, url: `${site}/creators/${encodeURIComponent(authorName)}` },
+      fields: [
+        { name: "Game", value: String(script.game || "Roblox").slice(0, 100), inline: true },
+        { name: "Keyless", value: script.keyless ? "Yes" : "Key required", inline: true },
+      ],
+      ...(art ? { thumbnail: { url: art } } : {}),
+      footer: { text: "Lucrit Script" },
+      timestamp: new Date().toISOString(),
+    }],
+    // Belt and braces: even if a title or description ever carried an @everyone,
+    // this tells Discord to render it as text rather than ping the server.
+    allowed_mentions: { parse: [] },
+  };
+
+  try {
+    await fetch(hook, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(6000),
+    });
+  } catch (err) {
+    console.warn("discord announce failed", err?.message);
+  }
+}
+
+/* ------------------------------------------------------------------ OAuth */
+
+const DISCORD_STATE_COOKIE = "__Host-lucrit-oauth";
+const DISCORD_SCOPES = "identify email guilds";
+
+const discordRedirect = (env, request) =>
+  `${env.SITE_URL || new URL(request.url).origin}/api/auth/discord/callback`;
+
+/**
+ * Step one: send them to Discord.
+ *
+ * The `state` is the CSRF defence and it is not decoration. Without it,
+ * anybody can hand a victim a crafted callback URL carrying the ATTACKER's
+ * authorization code, and the victim's browser quietly signs itself into the
+ * attacker's account — after which everything the victim publishes belongs to
+ * someone else. The value is random, lives in an httpOnly cookie, and the
+ * callback refuses anything that does not match it.
+ */
+async function handleDiscordStart(request, env) {
+  if (!discordSignIn(env)) return bad(503, "Discord sign-in isn't configured yet.");
+
+  const state = randomHex(16);
+  const url = new URL("https://discord.com/oauth2/authorize");
+  url.searchParams.set("client_id", env.DISCORD_CLIENT_ID);
+  url.searchParams.set("redirect_uri", discordRedirect(env, request));
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("scope", DISCORD_SCOPES);
+  url.searchParams.set("state", state);
+  // Always show the consent screen rather than silently reusing a grant, so
+  // "sign in as someone else" is actually reachable.
+  url.searchParams.set("prompt", "consent");
+
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: url.toString(),
+      "Cache-Control": "no-store",
+      "Set-Cookie": cookieHeader(state, 600, DISCORD_STATE_COOKIE),
+    },
+  });
+}
+
+/** Sends the browser back to the site with a message the page can read. */
+function discordBounce(env, request, params) {
+  const site = env.SITE_URL || new URL(request.url).origin;
+  const url = new URL(site + "/");
+  for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
+  return new Response(null, {
+    status: 302,
+    headers: {
+      Location: url.toString(),
+      "Cache-Control": "no-store",
+      // The state is single-use; clear it whichever way this went.
+      "Set-Cookie": cookieHeader("", 0, DISCORD_STATE_COOKIE),
+    },
+  });
+}
+
+async function handleDiscordCallback(request, env) {
+  if (!discordSignIn(env)) return bad(503, "Discord sign-in isn't configured yet.");
+
+  const url = new URL(request.url);
+  const code = url.searchParams.get("code");
+  const state = url.searchParams.get("state");
+  const expect = readCookie(request, DISCORD_STATE_COOKIE);
+
+  // Someone declining on Discord's own screen is not an error worth a page.
+  if (url.searchParams.get("error")) return discordBounce(env, request, { discord: "cancelled" });
+  if (!code) return discordBounce(env, request, { discord: "failed" });
+  if (!expect || !state || !sameSecret(state, expect))
+    return discordBounce(env, request, { discord: "state" });
+
+  if (!(await underLimit(env, `dsignin:${clientIp(request)}`, 10, 600)))
+    return discordBounce(env, request, { discord: "slowdown" });
+
+  let profile;
+  try {
+    const token = await fetch(DISCORD_API + "/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: env.DISCORD_CLIENT_ID,
+        client_secret: env.DISCORD_CLIENT_SECRET,
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: discordRedirect(env, request),
+      }),
+      signal: AbortSignal.timeout(8000),
+    }).then((r) => r.json());
+
+    if (!token?.access_token) throw new Error("no access token");
+
+    profile = await fetch(DISCORD_API + "/users/@me", {
+      headers: { Authorization: "Bearer " + token.access_token },
+      signal: AbortSignal.timeout(8000),
+    }).then((r) => r.json());
+  } catch (err) {
+    console.warn("discord oauth failed", err?.message);
+    return discordBounce(env, request, { discord: "failed" });
+  }
+
+  if (!profile?.id) return discordBounce(env, request, { discord: "failed" });
+
+  const row = await upsertDiscordUser(env, profile);
+  if (row.error) return discordBounce(env, request, { discord: row.error });
+
+  const session = await startSession(env, row.user.id);
+  const site = env.SITE_URL || new URL(request.url).origin;
+  const back = new URL(site + "/");
+  back.searchParams.set("discord", "ok");
+
+  return new Response(null, {
+    status: 302,
+    headers: [
+      ["Location", back.toString()],
+      ["Cache-Control", "no-store"],
+      ["Set-Cookie", cookieHeader(session, SESSION_DAYS * 86400)],
+      ["Set-Cookie", cookieHeader("", 0, DISCORD_STATE_COOKIE)],
+    ],
+  });
+}
+
+/**
+ * Finds or creates the account behind a Discord profile.
+ *
+ * Matching order matters, and the second step is where account takeover would
+ * live if it were done carelessly:
+ *
+ *   1. `discord_id` — they have signed in this way before. Unambiguous.
+ *   2. a VERIFIED email — someone who signed up with a password and is now
+ *      using Discord should land on their existing account, not a second one.
+ *   3. a new account.
+ *
+ * Step 2 is gated on `profile.verified` because Discord will happily report an
+ * address nobody proved they own. Linking on an unverified one would mean
+ * anybody could register a Discord account claiming somebody else's email and
+ * walk straight into their scripts. Unverified addresses therefore get a fresh
+ * account, and a collision is refused rather than merged.
+ */
+async function upsertDiscordUser(env, profile) {
+  const discordId = String(profile.id);
+  const mail = String(profile.email || "").trim();
+  const lower = mail.toLowerCase();
+  const verified = Boolean(profile.verified) && RULES.email.test(mail);
+
+  let row = await env.DB.prepare(`SELECT * FROM users WHERE discord_id = ?`)
+    .bind(discordId).first();
+
+  if (!row && verified) {
+    row = await env.DB.prepare(`SELECT * FROM users WHERE email_lower = ?`).bind(lower).first();
+    if (row) {
+      await env.DB.prepare(`UPDATE users SET discord_id = ? WHERE id = ?`)
+        .bind(discordId, row.id).run();
+    }
+  }
+
+  if (!row) {
+    if (lower) {
+      const taken = await env.DB.prepare(`SELECT 1 FROM users WHERE email_lower = ?`)
+        .bind(lower).first();
+      // Only reachable with an unverified address, since a verified one linked
+      // above. Refusing is the whole point.
+      if (taken) return { error: "emailtaken" };
+    }
+
+    // Discord's modern usernames are lowercase and unique over there, but they
+    // may still collide with a name chosen here, and they may contain
+    // characters this site's own rule rejects.
+    const seed = String(profile.global_name || profile.username || "discord")
+      .replace(/[^\p{L}\p{N} _.-]/gu, "").trim().slice(0, 28) || "discord";
+    const name = await freeUsername(env, seed);
+
+    const id = newId();
+    const avatar = profile.avatar
+      ? `https://cdn.discordapp.com/avatars/${discordId}/${profile.avatar}.png?size=128`
+      : null;
+
+    try {
+      await env.DB.prepare(
+        `INSERT INTO users (id, email, email_lower, discord_id, username, username_lower,
+                            bio, avatar, youtube, tiktok, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, '', ?, '', '', ?)`
+      ).bind(
+        id,
+        // An account needs an address. Discord accounts without a shared email
+        // get a routable-looking placeholder rather than an empty column, and
+        // password reset simply has nothing to send to — which is correct:
+        // there is no password on this account to reset.
+        mail || `discord-${discordId}@users.noreply.lucritscripts.site`,
+        lower || `discord-${discordId}@users.noreply.lucritscripts.site`,
+        discordId, name, name.toLowerCase(), avatar, new Date().toISOString()
+      ).run();
+    } catch (err) {
+      console.error("discord signup failed", err?.message);
+      return { error: "failed" };
+    }
+    row = await env.DB.prepare(`SELECT * FROM users WHERE id = ?`).bind(id).first();
+  }
+
+  // Discord proves who they are, not that they are welcome.
+  if (row.banned) return { error: "banned" };
+  return { user: row };
+}
+
+/* ------------------------------------------------------------ the gate */
+
+/**
+ * Is this Discord account in the server?
+ *
+ * `GET /guilds/:guild/members/:user` with a bot token answers 200 or 404. The
+ * answer is cached for a few minutes: without that, every code fetch is an
+ * outbound request, and Discord rate-limits per bot rather than per visitor —
+ * so a busy hour would start refusing everybody at once.
+ *
+ * Returns null for "could not find out", which the caller treats as a PASS.
+ * Deliberately the opposite of the Linkvertise check: there, failing open
+ * gives away the thing being sold, so it fails closed. Here, failing closed
+ * locks paying visitors out of the whole site because Discord had a bad
+ * minute. The sponsor step still stands either way — this gate only ever adds
+ * a second condition, so failing open costs nothing that was being charged for.
+ */
+async function discordMember(env, discordId) {
+  if (!discordId || !env.DISCORD_BOT_TOKEN || !env.DISCORD_GUILD_ID) return null;
+
+  const key = `dmember:${env.DISCORD_GUILD_ID}:${discordId}`;
+  const hit = await cacheGet(env, key);
+  if (hit !== null) return hit.in;
+
+  try {
+    const res = await fetch(
+      `${DISCORD_API}/guilds/${encodeURIComponent(env.DISCORD_GUILD_ID)}/members/${encodeURIComponent(discordId)}`,
+      {
+        headers: { Authorization: "Bot " + env.DISCORD_BOT_TOKEN },
+        signal: AbortSignal.timeout(6000),
+      });
+
+    if (res.status === 200) { await cachePut(env, key, { in: true }, 600); return true; }
+    if (res.status === 404) { await cachePut(env, key, { in: false }, 120); return false; }
+
+    // 401/403 means the bot is not in the server or the token is wrong — a
+    // configuration problem, not an answer about this person. Do not cache it,
+    // and do not punish the visitor for it.
+    console.warn("discord member check", res.status);
+    return null;
+  } catch (err) {
+    console.warn("discord member check failed", err?.message);
+    return null;
+  }
+}
+
+/**
+ * Why this person may not unlock yet, or null if they may.
+ *
+ * Runs before the sponsor step as well as at the code endpoint, so somebody
+ * who is not in the server is told BEFORE completing a set of offers rather
+ * than after — being made to watch ads and then refused is the single worst
+ * version of this feature.
+ */
+async function discordBlock(env, user) {
+  if (!discordGateOn(env)) return null;
+
+  if (!user || !user.discord_id) {
+    return {
+      error: "Join the Discord server to unlock scripts, then sign in with Discord.",
+      discord: { need: "signin", invite: discordInvite(env) },
+    };
+  }
+
+  const inGuild = await discordMember(env, user.discord_id);
+  if (inGuild === false) {
+    return {
+      error: "You need to be in the Discord server to unlock scripts.",
+      discord: { need: "join", invite: discordInvite(env) },
+    };
+  }
+  return null;   // true, or null-meaning-unknown: both pass
+}
+
+/* ------------------------------------------------------------------ stats */
+
+/**
+ * Member and online counts.
+ *
+ * Two sources, in order of how much they know. A bot token gets exact-ish
+ * counts from the guild itself; without one, the public widget gives an online
+ * count only, and needs "Enable Server Widget" switched on in the server's
+ * settings. Neither being available is not an error — the site just shows the
+ * Join button on its own, the way it did before any of this.
+ */
+async function handleDiscordStats(request, env) {
+  const guild = String(env.DISCORD_GUILD_ID || "").trim();
+  const invite = discordInvite(env);
+  if (!guild) return ok({ data: { configured: false, invite } });
+
+  const key = `dstats:${guild}`;
+  const hit = await cacheGet(env, key);
+  if (hit) return ok({ data: { ...hit, invite } });
+
+  let stats = null;
+
+  if (env.DISCORD_BOT_TOKEN) {
+    try {
+      const res = await fetch(
+        `${DISCORD_API}/guilds/${encodeURIComponent(guild)}?with_counts=true`,
+        { headers: { Authorization: "Bot " + env.DISCORD_BOT_TOKEN }, signal: AbortSignal.timeout(6000) });
+      if (res.ok) {
+        const g = await res.json();
+        stats = {
+          configured: true,
+          name: String(g.name || ""),
+          members: Number(g.approximate_member_count) || 0,
+          online: Number(g.approximate_presence_count) || 0,
+        };
+      }
+    } catch (err) { console.warn("discord stats (bot)", err?.message); }
+  }
+
+  if (!stats) {
+    try {
+      const res = await fetch(`https://discord.com/api/guilds/${encodeURIComponent(guild)}/widget.json`,
+        { signal: AbortSignal.timeout(6000) });
+      if (res.ok) {
+        const w = await res.json();
+        stats = {
+          configured: true,
+          name: String(w.name || ""),
+          members: 0,                                  // the widget does not know
+          online: Number(w.presence_count) || 0,
+        };
+      }
+    } catch (err) { console.warn("discord stats (widget)", err?.message); }
+  }
+
+  if (!stats) return ok({ data: { configured: false, invite } });
+
+  // Five minutes. Long enough that a busy site is one request per period,
+  // short enough that the number is not visibly wrong.
+  await cachePut(env, key, stats, 300);
+  return ok({ data: { ...stats, invite } });
+}
+
 /* ═══════════════════════════════════════════════════════════════════ router ══ */
 
 /**
@@ -2100,6 +2595,9 @@ const PATTERNS = [
 
 const ROUTES = {
   "GET  /api/scripts": handleScriptList,
+  "GET  /api/auth/discord/start": handleDiscordStart,
+  "GET  /api/auth/discord/callback": handleDiscordCallback,
+  "GET  /api/discord": handleDiscordStats,
   "GET  /api/leaderboard": handleLeaderboard,
   "GET  /api/admin/state": handleAdminState,
   "POST /api/admin/unlock": handleAdminUnlock,
@@ -2136,6 +2634,12 @@ const ROUTES = {
       unlockLive: unlockConfigured(env),
       unlockProviders: unlockProviders(env),
       unlockMinutes: grantMinutes(env),
+      discord: {
+        signIn: discordSignIn(env),
+        requireMember: discordGateOn(env),
+        invite: discordInvite(env),
+        stats: Boolean(env.DISCORD_GUILD_ID),
+      },
     },
   }),
 };
@@ -2196,7 +2700,9 @@ function cacheFor(pathname) {
 }
 
 export default {
-  async fetch(request, env) {
+  // `ctx` is here for waitUntil: the Discord announcement must not make a
+  // publisher wait on Discord, and must not fail their publish if it fails.
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (!url.pathname.startsWith("/api/")) {
@@ -2239,7 +2745,7 @@ export default {
     }
 
     try {
-      return await handler(request, env, params);
+      return await handler(request, env, params, ctx);
     } catch (err) {
       console.error("unhandled", url.pathname, err?.stack || err?.message);
       return bad(500, "Something went wrong. Try again.");
