@@ -124,6 +124,17 @@ export function createGameLibrary({ getLibrary, onOpenGame, onPublish }) {
   return {
     open() { query = ""; overlay.open(); render(); setHash("library"); },
     close: () => { overlay.close(); setHash(""); },
+    /**
+     * Close the overlay but leave the address bar alone.
+     *
+     * `close` clears the hash, which is right when a person dismisses the
+     * page — and wrong when they are LEAVING it for a script. The script push
+     * needs the previous history entry to still say `#game=...`, so that Back
+     * can land on the game again rather than at the top of the site. Clearing
+     * first overwrote that entry and made Back a dead end.
+     */
+    hide: () => overlay.close(),
+
     refresh() { if (overlay.isOpen) render(); },
     get isOpen() { return overlay.isOpen; },
   };
@@ -222,6 +233,16 @@ export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup
       setHash(`game=${current}`);
     },
     close: () => { overlay.close(); setHash(""); },
+    /**
+     * Close the overlay but leave the address bar alone.
+     *
+     * `close` clears the hash, which is right when a person dismisses the
+     * page — and wrong when they are LEAVING it for a script. The script push
+     * needs the previous history entry to still say `#game=...`, so that Back
+     * can land on the game again rather than at the top of the site. Clearing
+     * first overwrote that entry and made Back a dead end.
+     */
+    hide: () => overlay.close(),
     refresh() { if (overlay.isOpen) render(); },
     get isOpen() { return overlay.isOpen; },
     get game() { return current; },

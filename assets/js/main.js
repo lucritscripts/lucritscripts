@@ -150,24 +150,53 @@ const adminPage = createAdminPage({
 });
 
 /**
- * Shuts the URL-owning overlays, optionally sparing one.
+ * Shuts every full-screen overlay, optionally sparing one.
  *
  * Only one of these can be the address at a time, so only one may be on
  * screen. Without this, "Your public page" on the dashboard stacked the
  * profile on top of the dashboard, and closing it left the dashboard sitting
  * there with the home page's URL.
+ *
+ * The game overlays are in this list even though they are hash-based rather
+ * than routed, and that is not tidiness — it is a bug fix. Every overlay is a
+ * `.sheet` appended to <body> at the same z-index, so the one created LAST
+ * wins the stacking order, and the game page is created after the script
+ * sheet. Opening a script from a game page therefore drew the sheet
+ * underneath the game page: the URL changed to /creations/… and the screen
+ * did not, which looks exactly like a page that failed to load.
+ *
+ * ORDERING: `gamePage`, `gameLibrary` and `mine` are `const`s declared further
+ * down this file. Optional chaining would NOT make that safe — `?.` guards
+ * against null, not against a temporal dead zone — so this function must never
+ * be called while the module is still initialising. It isn't: every caller is
+ * a click handler, a route handler, or `router.start()`, and all of those run
+ * after the last declaration.
  */
 function closeRoutedPages(keep = null) {
   if (keep !== "creation") scriptPage.close();
   if (keep !== "dashboard") dashboard.close();
   if (keep !== "creator") creatorPage.close();
   if (keep !== "admin") adminPage.close();
+  // `hide`, not `close`: closing clears their `#game=` hash, and the history
+  // entry we are about to push away from needs to keep it so that Back can
+  // land on the game again instead of at the top of the site.
+  gamePage.hide();
+  gameLibrary.hide();
+  mine.close();
 }
 
 const router = createRouter({
   home() {
     closeRoutedPages();
     setTitle("");
+
+    // The game pages predate real URLs and still live on the hash, so "/" can
+    // legitimately mean "#game=grow-a-garden". Backing out of a script opened
+    // from a game page should land on that game again rather than dumping the
+    // visitor at the top of the site.
+    const game = /#game=([\w-]+)/.exec(location.hash);
+    if (game) gamePage.open(game[1]);
+    else if (location.hash === "#library") gameLibrary.open();
   },
 
   admin() {
