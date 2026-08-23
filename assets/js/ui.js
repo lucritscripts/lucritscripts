@@ -15,6 +15,7 @@ import {
 } from "./games.js";
 import { libraryOnline, fetchScripts, publishScript, fetchBoard } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
+import { pathForCreator } from "./router.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
@@ -132,7 +133,8 @@ export function cardMarkup(script, { large = false } = {}) {
         ${script.game ? `<p class="card__game">${esc(script.game)}</p>` : ""}
         <p class="card__desc">${esc(String(script.desc || "").slice(0, 140))}${String(script.desc || "").length > 140 ? "…" : ""}</p>
         <div class="card__meta">
-          <span class="by">@${esc(script.author)}</span>
+          <a class="by" href="${esc(pathForCreator(script.author))}"
+             title="See everything by @${esc(script.author)}">@${esc(script.author)}</a>
           <span class="dot" aria-hidden="true"></span>
           <span>${fmt(views)} views</span>
           <span class="dot" aria-hidden="true"></span>

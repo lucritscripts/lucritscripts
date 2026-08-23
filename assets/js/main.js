@@ -18,6 +18,10 @@ import { toggleSaved, getDraft, onVaultChange } from "./vault.js";
 import { account } from "./account.js";
 import { runBotCheck } from "./gate.js";
 import { capturePendingUnlock, takePendingUnlock, deleteScript } from "./library-api.js";
+import { createCreatorPage } from "./creator.js";
+import {
+  createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
+} from "./router.js";
 
 /* ------------------------------------------------------- capabilities */
 
@@ -81,7 +85,7 @@ const scriptPage = createScriptPage({
 const dashboard = createDashboard({
   onRequireAuth: () => auth.open("signup"),
   getPublishes: (user) => library.filter((s) => s.authorId === user.id),
-  onOpenScript: (s) => scriptPage.open(s),
+  onOpenScript: (s) => openScript(s),
   onDeleteScript: async (s) => {
     // Remove it where it actually lives, then from the cached list. Doing only
     // the second is what "deleted" used to mean, and it came back on refresh.
@@ -94,6 +98,159 @@ const dashboard = createDashboard({
   onGenerate: () => generator.open(),
   onUnheart: (id) => toggleSaved(account.session?.id, id),
 });
+
+/* --------------------------------------------------------------- routing */
+
+// Every page on this site now has an address.
+//
+// The pattern below is the same for all three: a wrapper that opens the
+// overlay AND names the URL after it, a close listener that hands the address
+// bar back, and a route handler for arriving at that URL cold. Opening from
+// inside the app uses `setPath` rather than `go` — the page is already being
+// drawn, and resolving the route would draw it a second time on top of itself.
+
+const creatorPage = createCreatorPage({
+  onOpenScript: (s) => openScript(s),
+  onOpenDashboard: () => openDashboard(),
+  onCorrectName: (name) => router.correct(pathForCreator(name)),
+});
+
+/** Opens a script and gives it its URL: /creations/<creator>/<slug>. */
+function openScript(script) {
+  if (!script) return;
+  closeRoutedPages("creation");
+  router.setPath(pathForScript(script));
+  setTitle(script.title);
+  scriptPage.open(script);
+}
+
+/** Opens your own dashboard at /dashboard/<you>. */
+function openDashboard(tab = "stats") {
+  if (!account.isSignedIn) { auth.open("signup"); return; }
+  closeRoutedPages("dashboard");
+  router.setPath(pathForDashboard(account.session.username));
+  setTitle("Dashboard");
+  dashboard.open(tab);
+}
+
+/** Opens somebody's public page at /creators/<name>. */
+function openCreator(name) {
+  if (!name) return;
+  closeRoutedPages("creator");
+  router.setPath(pathForCreator(name));
+  creatorPage.open(name);
+}
+
+const adminPage = createAdminPage({
+  // An admin action can take a script down, put one back, or delete an account
+  // along with everything it published. The cached library knows none of that,
+  // so it is refetched rather than patched.
+  onChanged: () => { refreshLibrary(); },
+});
+
+/**
+ * Shuts the URL-owning overlays, optionally sparing one.
+ *
+ * Only one of these can be the address at a time, so only one may be on
+ * screen. Without this, "Your public page" on the dashboard stacked the
+ * profile on top of the dashboard, and closing it left the dashboard sitting
+ * there with the home page's URL.
+ */
+function closeRoutedPages(keep = null) {
+  if (keep !== "creation") scriptPage.close();
+  if (keep !== "dashboard") dashboard.close();
+  if (keep !== "creator") creatorPage.close();
+  if (keep !== "admin") adminPage.close();
+}
+
+const router = createRouter({
+  home() {
+    closeRoutedPages();
+    setTitle("");
+  },
+
+  admin() {
+    closeRoutedPages("admin");
+    adminPage.open();
+    setTitle("Admin");
+  },
+
+  creator({ creator }) {
+    closeRoutedPages("creator");
+    creatorPage.open(creator);
+  },
+
+  /**
+   * A script, from a URL and nothing else.
+   *
+   * The cached library is tried first so an in-app back button is instant, and
+   * the server is asked otherwise — a shared link must work on a cold tab,
+   * before any listing has loaded.
+   *
+   * The creator's name in the URL is not used to find the script; the slug is
+   * unique on its own. It is checked afterwards, and a mismatch corrects the
+   * address bar rather than 404ing, so a link keeps working after a rename.
+   */
+  async creation({ creator, slug }) {
+    closeRoutedPages("creation");
+    const id = "s_" + String(slug).replace(/^s_/, "");
+    const known = library.find((x) => x.id === id);
+
+    setTitle(known ? known.title : "Script");
+    const script = known ? (scriptPage.open(known), known) : await scriptPage.openById(id);
+
+    if (!script) {
+      router.correct("/");
+      closeRoutedPages();
+      toast("That script isn't on the site any more", "warn");
+      return;
+    }
+
+    setTitle(script.title);
+    if (script.author && script.author !== creator) router.correct(pathForScript(script));
+  },
+
+  /**
+   * The dashboard is yours and only yours.
+   *
+   * Somebody else's name at this path is not an error and not a 403 — it is a
+   * person who followed a link to the wrong half of the pair. They get sent to
+   * the public page, which is the one they actually wanted.
+   */
+  dashboard({ creator }) {
+    if (!account.isSignedIn) {
+      router.correct("/");
+      closeRoutedPages();
+      auth.open("signin");
+      return;
+    }
+
+    const me = account.session.username;
+    if (creator && creator.toLowerCase() !== me.toLowerCase()) {
+      router.go(pathForCreator(creator), { replace: true });
+      return;
+    }
+
+    closeRoutedPages("dashboard");
+    router.correct(pathForDashboard(me));
+    setTitle("Dashboard");
+    dashboard.open();
+  },
+
+  // A path the app does not own reached the shell somehow. Draw the home page
+  // rather than an empty screen.
+  unknown() { closeRoutedPages(); setTitle(""); router.correct("/"); },
+});
+
+router.listen();
+
+// Overlays that own a URL hand the address bar back when they close — but only
+// if it still points at them. Closing the script sheet after the router has
+// already moved on must not drag the URL back to "/".
+document.addEventListener("lucrit:script-closed", () => router.leave("creation"));
+document.addEventListener("lucrit:dashboard-closed", () => router.leave("dashboard"));
+document.addEventListener("lucrit:creator-closed", () => router.leave("creator"));
+document.addEventListener("lucrit:admin-closed", () => router.leave("admin"));
 
 /* ------------------------------------------------------------ generator */
 
@@ -118,7 +275,7 @@ function sendToPublishForm(draft) {
 
 const generator = createGenerator({
   onRequireAuth: () => auth.open("signup"),
-  onOpenDashboard: (tab) => dashboard.open(tab),
+  onOpenDashboard: (tab) => openDashboard(tab),
   onOpenMine: () => mine.open("drafts"),
   onPublish: (draft) => sendToPublishForm(draft),
 });
@@ -134,7 +291,7 @@ const mine = createMyScripts({
   },
   onOpenScript: (id) => {
     const s = library.find((x) => x.id === id);
-    if (s) scriptPage.open(s);
+    if (s) openScript(s);
   },
   onGenerate: () => generator.open(),
   onRequireAuth: () => auth.open("signup"),
@@ -144,7 +301,7 @@ const mine = createMyScripts({
 
 const gamePage = createGamePage({
   getLibrary: () => library,
-  onOpenScript: (s) => scriptPage.open(s),
+  onOpenScript: (s) => openScript(s),
   onPublish: () => jumpTo("submit"),
   cardMarkup,
 });
@@ -162,7 +319,7 @@ document.addEventListener("lucrit:library", () => gameLibrary.open());
 
 const libraryPanel = createLibraryPanel({
   id: "library-main",
-  onOpen: (script) => scriptPage.open(script),
+  onOpen: (script) => openScript(script),
   onPublish: () => jumpTo("submit"),
   onOpenGame: (id) => gamePage.open(id),
   onOpenLibrary: () => gameLibrary.open(),
@@ -172,17 +329,17 @@ const scroller = new SmoothScroll({ reducedMotion: caps.reducedMotion });
 
 const chapters = buildChapters({
   libraryPanel,
-  onOpenScript: (s) => scriptPage.open(s),
+  onOpenScript: (s) => openScript(s),
   onJump: jumpTo,
   onPublish: () => { dashboard.refresh(); },
-  onAuth: () => (account.isSignedIn ? dashboard.open() : auth.open("signup")),
+  onAuth: () => (account.isSignedIn ? openDashboard() : auth.open("signup")),
   onInfo: () => info.open(),
 });
 
 const chrome = buildChrome({
   onJump: jumpTo,
   onSearch: () => { jumpTo("search"); setTimeout(() => libraryPanel.focus(), 420); },
-  onDashboard: () => dashboard.open(),
+  onDashboard: () => openDashboard(),
   onAuth: () => auth.open("signup"),
   onLibrary: () => gameLibrary.open(),
   onMine: () => mine.open("drafts"),
@@ -197,7 +354,7 @@ scroller.setSnap((p, dir) => choreography.snapTarget(p, dir));
 createAssistant({
   getLibrary: () => library,
   onJump: jumpTo,
-  onOpenScript: (s) => scriptPage.open(s),
+  onOpenScript: (s) => openScript(s),
   onInfo: () => info.open(),
   onAuth: () => auth.open("signup"),
   onPublish: () => jumpTo("submit"),
@@ -236,6 +393,7 @@ function repaintShelf() {
   gamePage.refresh();
   gameLibrary.refresh();
   mine.refresh();
+  creatorPage.refresh();
 }
 account.onChange(repaintShelf);
 onVaultChange(repaintShelf);
@@ -318,21 +476,37 @@ runBotCheck().then((how) => {
 // replay it and the parameters do not linger where they'd be shared around.
 capturePendingUnlock();
 
-// The library lives on the server now, so fetch it before deep links go
+// Resolve the address bar before the library loads.
+//
+// A deep link to one script asks the server for that one script, so it does
+// not wait behind a listing of two hundred it will not show. Only the
+// #script= fallback below needs the library, because an old link carries an
+// id and nothing else.
+router.start();
+
+// The library lives on the server now, so fetch it before old hash links go
 // looking for a script by id.
 refreshLibrary()
   .then(async () => {
     const pending = takePendingUnlock();
     if (pending) {
       const done = await scriptPage.resume(pending.scriptId, pending.clickId, pending.hash);
+      // The sponsor step returns people to "/" with the script named in the
+      // query, not to the script's own address. Put them on it now that we
+      // know which one it was, so the tab they end up on is shareable and a
+      // refresh does not drop them back at the home page.
+      const landed = scriptPage.current;
+      if (landed) { router.setPath(pathForScript(landed), { replace: true }); setTitle(landed.title); }
       if (done) toast("Unlocked — here's the script");
       return;
     }
 
+    // Old #script=<id> links still work; they are simply rewritten to the
+    // real URL on arrival, so anything already shared keeps landing right.
     const deep = /#script=([\w-]+)/.exec(location.hash);
     if (deep) {
       const s = library.find((x) => x.id === deep[1]);
-      if (s) scriptPage.open(s);
+      if (s) openScript(s);
     }
   })
   .catch(() => { /* offline or static hosting — the site still works */ });
@@ -340,49 +514,13 @@ refreshLibrary()
 // Deleting from the script page has to reach the cached list too.
 document.addEventListener("lucrit:script-removed", (e) => removeScript(e.detail.id));
 
-/* ----------------------------------------------------------------- /admin */
-
-// A real URL, not a hash. The Worker serves the app shell for /admin so a
-// direct visit or a refresh lands here rather than on a 404, and closing the
-// page puts the address bar back rather than leaving /admin pointing at the
-// library.
-const adminPage = createAdminPage({
-  // An admin action can take a script down, put one back, or delete an account
-  // along with everything it published. The cached library knows none of that,
-  // so it is refetched rather than patched.
-  onChanged: () => { refreshLibrary(); },
-});
-
-function openAdmin(push = true) {
-  if (push && location.pathname !== "/admin") history.pushState(null, "", "/admin");
-  adminPage.open();
-}
-
-document.addEventListener("click", (e) => {
-  const link = e.target.closest('a[href="/admin"], [data-open-admin]');
-  if (!link) return;
-  e.preventDefault();
-  openAdmin();
-});
-
-// Back out of /admin the way the browser expects.
-addEventListener("popstate", () => {
-  if (/^\/admin\/?$/.test(location.pathname)) openAdmin(false);
-  else adminPage.close();
-});
-
-document.addEventListener("lucrit:admin-closed", () => {
-  if (/^\/admin\/?$/.test(location.pathname)) history.replaceState(null, "", "/");
-});
-
-if (/^\/admin\/?$/.test(location.pathname)) openAdmin(false);
-
 const deepGame = /#game=([\w-]+)/.exec(location.hash);
 if (deepGame) gamePage.open(deepGame[1]);
 else if (location.hash === "#library") gameLibrary.open();
 
 window.__lucrit = {
-  adminPage, openAdmin,
+  adminPage, router, creatorPage, openScript, openDashboard, openCreator,
+  openAdmin: () => router.go("/admin"),
   world, scroller, library, account,
   auth, dashboard, info, scriptPage, libraryPanel, gamePage, gameLibrary,
   ui: chapters, jumpTo, chapters: CHAPTERS, caps, toast, choreography, generator, mine,

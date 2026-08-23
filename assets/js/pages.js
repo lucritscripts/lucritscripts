@@ -23,6 +23,7 @@ import {
 import {
   noteWindow as noteUnlockWindow, clockChip, onExpire,
 } from "./unlockclock.js";
+import { pathForCreator } from "./router.js";
 
 export const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -623,6 +624,7 @@ export function createDashboard({ onRequireAuth, getPublishes, onOpenScript, onD
           <div class="dash__links">
             <span class="dash__meta">Joined ${since.toLocaleDateString(undefined, { month: "short", year: "numeric" })}</span>
             <span class="dash__meta">${publishes.length} publish${publishes.length === 1 ? "" : "es"}</span>
+            <a class="sociallink" href="${esc(pathForCreator(u.username))}">Your public page</a>
             ${u.youtube ? `<a href="${esc(safeHref(u.youtube))}" target="_blank" rel="noopener" class="sociallink">YouTube</a>` : ""}
             ${u.tiktok ? `<a href="${esc(safeHref(u.tiktok))}" target="_blank" rel="noopener" class="sociallink">TikTok</a>` : ""}
           </div>
@@ -1081,7 +1083,7 @@ export function createScriptPage({ onRequireAuth }) {
         <h2>${esc(s.title)}</h2>
         <p class="script__game">${esc(s.game || "Roblox")}</p>
         <div class="sheet__meta">
-          <span>@${esc(s.author)}</span><span class="dot"></span>
+          <a class="by" href="${esc(pathForCreator(s.author))}">@${esc(s.author)}</a><span class="dot"></span>
           <span>${fmt(s.views ?? stats.totals(s.id).views)} views</span><span class="dot"></span>
           <span>${fmt(s.copies ?? stats.totals(s.id).copies)} copies</span><span class="dot"></span>
           <span>${esc(s.added)}</span>
@@ -1267,6 +1269,29 @@ export function createScriptPage({ onRequireAuth }) {
       }
       if (canSee(current)) await loadCode();
     },
+
+    /**
+     * Opens from an id alone — which is all a URL carries.
+     *
+     * `open` needs a script in hand because it is called from a card that
+     * already has one. A deep link to /creations/<creator>/<slug> has nothing
+     * but the slug, and waiting for the whole library to load before drawing
+     * one script would make every shared link slow. So this asks for the one
+     * script and nothing else.
+     */
+    async openById(id) {
+      const fresh = await fetchScript(id);
+      if (!fresh) return null;
+      current = fresh;
+      code = null;
+      busy = false;
+      noteUnlockWindow(fresh.id, fresh.unlockedFor);
+      render();
+      sheet.open();
+      if (canSee(current)) await loadCode();
+      return fresh;
+    },
+
     /** Called when the visitor lands back from a sponsor step. */
     async resume(scriptId, clickId, hash) {
       const script = await fetchScript(scriptId);
@@ -1279,6 +1304,9 @@ export function createScriptPage({ onRequireAuth }) {
       return finishUnlock(clickId, hash);
     },
     close: () => sheet.close(),
+    get isOpen() { return sheet.isOpen; },
+    /** Whatever is on screen, so the router can name the URL after it. */
+    get current() { return current; },
   };
 }
 

@@ -59,6 +59,18 @@ export async function fetchScript(id) {
 }
 
 /**
+ * One creator, by name — profile plus everything they have published.
+ *
+ * Returns null for "no such creator" and for "we could not ask", which the
+ * page shows the same way: there is nothing useful to say to a visitor about
+ * the difference, and pretending an empty profile exists is worse.
+ */
+export async function fetchCreator(name) {
+  const res = await call(`/api/creators/${encodeURIComponent(name)}`);
+  return res.ok ? res.data : null;
+}
+
+/**
  * One leaderboard.
  *
  * Returns null rather than [] when the request fails, so the caller can tell
