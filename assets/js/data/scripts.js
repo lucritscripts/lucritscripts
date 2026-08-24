@@ -73,3 +73,47 @@ export const CONTRIBUTORS = [];
 export function categoryOf(id) {
   return CATEGORIES.find((c) => c.id === id) || CATEGORIES[CATEGORIES.length - 1];
 }
+
+
+/* ─────────────────────────────────────────────── status badges ── */
+
+const escAttr = (v) => String(v ?? "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
+/**
+ * The two status badges, rendered as two badges — never merged.
+ *
+ * `verified` is the site's own review verdict, set only by an admin route.
+ * `lua` is the server's reading of the submitted code at publish time. A
+ * script can be one, both, or neither, and each has to survive being read on
+ * its own by somebody about to run the thing.
+ *
+ * The wording is not decoration. "Lua Detected" beside a green tick would be
+ * read as approval by most people, so it gets a different colour, a different
+ * word, and a tooltip that says what it does not mean. If these two ever end
+ * up sharing a class, the site has started vouching for code nobody read.
+ *
+ * Lives in this module because it is used by BOTH `ui.js` (cards) and
+ * `pages.js` (the script sheet), and ui.js already imports pages.js — putting
+ * it in either one would be a cycle. Nothing here imports anything.
+ */
+export function statusBadges(script, { showUnverified = false } = {}) {
+  const out = [];
+  if (script?.verified) {
+    out.push(`<span class="badge badge--verified" title="${escAttr(
+      "A person on the Lucrit Scripts team reviewed this script."
+    )}">\u2713 Verified</span>`);
+  } else if (showUnverified) {
+    out.push(`<span class="badge badge--unverified" title="${escAttr(
+      "Nobody has reviewed this script yet."
+    )}">Not reviewed</span>`);
+  }
+  if (script?.lua) {
+    out.push(`<span class="badge badge--lua" title="${escAttr(
+      "The submitted code contains Luau syntax. This is an automatic check of the text — "
+      + "it does not mean the script is safe, working, or reviewed."
+    )}">Lua Detected</span>`);
+  }
+  return out.length ? `<span class="badges">${out.join("")}</span>` : "";
+}
