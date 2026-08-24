@@ -141,6 +141,20 @@ CREATE TABLE IF NOT EXISTS scripts (
   -- drifts from what somebody meant has to be recoverable.
   descr_original TEXT NOT NULL DEFAULT '',
 
+  -- Where a visitor gets the script when the publisher hosts it themselves.
+  -- Gated exactly like `code`: a public link beside a paywalled code field
+  -- would be a hole straight through the paywall.
+  link        TEXT    NOT NULL DEFAULT '',
+
+  -- The site's own review verdict. Never derived from submitted content — the
+  -- moment it can be, a publisher can arrange to satisfy it. Admin sets it.
+  verified    INTEGER NOT NULL DEFAULT 0,
+
+  -- Whether the server detected Luau syntax in the submitted code at publish
+  -- time. A DIFFERENT claim from `verified`, and the UI must never merge them:
+  -- this one says "this looks like code", not "we checked it".
+  lua         INTEGER NOT NULL DEFAULT 0,
+
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS scripts_status ON scripts(status);

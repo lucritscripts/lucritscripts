@@ -886,9 +886,42 @@ async function handleAI(request, env) {
  */
 const SCRIPT_COLUMNS = `s.id, s.author_id, s.title, s.game, s.category, s.descr,
   s.tags, s.keyless, s.thumbnail, s.views, s.copies, s.removed, s.created_at,
+  s.verified, s.lua, s.link <> '' AS has_link,
   u.username AS author`;
 
-const SCRIPT_LIMITS = { title: 70, game: 90, descr: 6000, code: 200000, tag: 24 };
+/**
+ * `s.link` is NOT in that list, and that omission is the point.
+ *
+ * The link is where a self-hosting publisher's script actually lives, which
+ * makes it worth exactly as much as the code — so it comes out of the same
+ * door, handleScriptCode, and only for somebody holding a grant. What the
+ * listing carries is `has_link`, a boolean: enough for a card to say "Get
+ * Script" and nothing that lets anyone skip the sponsor step.
+ *
+ * If you ever find yourself adding `s.link` here, the paywall has just become
+ * decoration again — which is the exact bug `code` was moved out for.
+ */
+
+const SCRIPT_LIMITS = { title: 70, game: 90, descr: 6000, code: 200000, tag: 24, link: 400 };
+
+/**
+ * Where a publisher may point a script link.
+ *
+ * Pinned for the same reason every other outbound URL on this site is pinned,
+ * only more so: this one sits behind a "Get Script" button that the visitor has
+ * just PAID for with a sponsor step, so they arrive at it already trusting it.
+ * An open redirect field here is the most valuable place on the site to park
+ * something hostile.
+ *
+ * Paste and code hosts only. Notably absent: URL shorteners of every kind —
+ * the whole point of a shortener is that the destination is not the host, so
+ * allow-listing one allow-lists the entire web.
+ */
+const LINK_HOSTS = [
+  "pastebin.com", "github.com", "githubusercontent.com", "gist.github.com",
+  "gitlab.com", "rentry.co", "rentry.org", "paste.ee", "hastebin.com",
+  "sourceb.in", "pastefy.app", "controlc.com", "codeshare.io",
+];
 const MIN_DESC_WORDS = 100;
 /**
  * How long an unlock lasts before the sponsor step has to be repeated.
@@ -925,6 +958,19 @@ function publicScript(row, extra = {}) {
     tags: Array.isArray(tags) ? tags : [],
     keyless: Boolean(row.keyless),
     thumbnail: row.thumbnail || "",
+
+    // Two separate claims, kept separate all the way to the badge.
+    //
+    // `verified` is the site saying a human looked. `lua` is the server saying
+    // the submission contained something that parses like Luau. Collapsing
+    // them into one "verified" flag would be the site vouching for code nobody
+    // read, which is the single most misleading thing this page could do.
+    verified: Boolean(row.verified),
+    lua: Boolean(row.lua),
+
+    // Whether there is a link behind the unlock — never the link itself.
+    hasLink: Boolean(row.has_link),
+
     author: row.author || "",
     authorId: row.author_id,
     views: row.views || 0,
@@ -1173,13 +1219,26 @@ async function handleScriptPublish(request, env, _params, ctx) {
     return bad(400, `The description needs at least ${MIN_DESC_WORDS} words.`);
   if (descr.length > SCRIPT_LIMITS.descr) return bad(400, "That description is too long.");
 
-  if (!code.trim()) return bad(400, "Paste the Luau code.");
   if (code.length > SCRIPT_LIMITS.code) return bad(400, "That script is too large to publish.");
+
+  // The link is required, and it is checked against a fixed host list rather
+  // than merely being parsed. A visitor reaches it having just completed a
+  // sponsor step, so they arrive already trusting it.
+  const linkRaw = String(body.link || "").trim();
+  if (!linkRaw) return bad(400, "Add the link where people get the script.");
+  if (linkRaw.length > SCRIPT_LIMITS.link) return bad(400, "That link is too long.");
+  const link = safeSocial(linkRaw, LINK_HOSTS);
+  if (!link)
+    return bad(400,
+      "That link isn't on a host we allow. Use Pastebin, GitHub, Gist, GitLab, "
+      + "Rentry, paste.ee, Hastebin or sourceb.in. Shorteners aren't accepted, "
+      + "because the destination isn't the host.");
 
   const tags = (Array.isArray(body.tags) ? body.tags : [])
     .map((t) => String(t || "").trim().slice(0, SCRIPT_LIMITS.tag))
     .filter(Boolean)
     .slice(0, 6);
+  if (!tags.length) return bad(400, "Add at least one tag.");
 
   // A thumbnail is either a data URL the person uploaded or a Roblox CDN link.
   // Anything else would let a publisher point the whole library at a tracker.
@@ -1189,12 +1248,32 @@ async function handleScriptPublish(request, env, _params, ctx) {
       ? thumbRaw
       : safeSocial(thumbRaw, ["roblox.com", "rbxcdn.com"]);
 
+  // Required now. It used to be optional and the card fell back to a blank
+  // tile, which is why the library looked half-finished. The browser fills
+  // this from the game's own Roblox thumbnail when the publisher uploads
+  // nothing, so "required" costs an honest publisher nothing — but a value
+  // that failed the host check above arrives here as "" and must not pass.
+  if (!thumbnail)
+    return bad(400, thumbRaw
+      ? "That thumbnail isn't a supported image or Roblox link."
+      : "A thumbnail is required.");
+
   // The checker runs before anything is written. Three outcomes: publish,
   // hold for a human, or refuse. It is looking for spam and empty
   // submissions — NOT deciding whether the code is safe, which it cannot do
   // and must never claim to.
-  const verdict = checkSubmission({ code, descr, title, game });
+  const verdict = checkSubmission({ code, descr, title, game, link });
   if (verdict.status === "rejected") return bad(400, verdict.note);
+
+  // Lua detection, decided HERE and stored — not in the browser, and not
+  // recomputed at read time from something the publisher controls.
+  //
+  // The badge this drives says "Lua Detected" and means exactly that: the
+  // submission contained something with Luau syntax in it. It is not a safety
+  // claim, it is not a review, and `verified` below is deliberately not
+  // touched by it. A publisher who wants the Lua badge can have it by pasting
+  // Lua, which is fine, because the badge only ever claims they pasted Lua.
+  const lua = code.trim() ? looksLikeCode(code).ok : false;
 
   // The creator may have accepted an AI rewrite in the publish form. Their own
   // words are kept either way, so a rewrite that drifted is recoverable.
@@ -1203,12 +1282,17 @@ async function handleScriptPublish(request, env, _params, ctx) {
   const id = "s_" + randomHex(8);
   await env.DB.prepare(
     `INSERT INTO scripts (id, author_id, title, game, category, descr, code, tags,
-                          keyless, thumbnail, created_at, status, check_note, descr_original)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                          keyless, thumbnail, created_at, status, check_note, descr_original,
+                          link, lua, verified)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
   ).bind(
     id, user.id, title, game, category, descr, code, JSON.stringify(tags),
     body.keyless === false ? 0 : 1, thumbnail, new Date().toISOString(),
-    verdict.status, verdict.note, original
+    verdict.status, verdict.note, original,
+    // `verified` is bound as a literal 0 in the SQL above rather than taken
+    // from `body`. Nothing a publisher sends can reach that column, by
+    // construction — there is no field to forget to sanitise.
+    link, lua ? 1 : 0
   ).run();
 
   const row = await env.DB.prepare(
@@ -1254,12 +1338,18 @@ async function handleScriptPublish(request, env, _params, ctx) {
  */
 async function handleScriptCode(request, env, { id }) {
   const row = await env.DB.prepare(
-    `SELECT id, author_id, code FROM scripts WHERE id = ? AND removed = 0`
+    `SELECT id, author_id, code, link FROM scripts WHERE id = ? AND removed = 0`
   ).bind(id).first();
   if (!row) return bad(404, "That script doesn't exist.");
 
+  // The link rides out through this door beside the code, and that is the
+  // whole design. Two payloads, one gate: if the link were served by any
+  // endpoint that did not ask for a grant, the sponsor step would be optional
+  // for every script that has one — which is most of them now.
+  const payload = { code: row.code || "", link: row.link || "" };
+
   const user = await currentUser(request, env);
-  if (user && user.id === row.author_id) return ok({ data: { code: row.code } });
+  if (user && user.id === row.author_id) return ok({ data: payload });
 
   const subject = await grantSubject(request, env, user);
   const grant = await env.DB.prepare(
@@ -1293,7 +1383,45 @@ async function handleScriptCode(request, env, { id }) {
       await env.DB.prepare(`UPDATE scripts SET views = views + 1 WHERE id = ?`).bind(id).run();
     }
   }
-  return ok({ data: { code: row.code } });
+  return ok({ data: payload });
+}
+
+/**
+ * Verification, which only the site can grant.
+ *
+ * This is the route the spec's "do not let publishers fake Verified" reduces
+ * to. There is no publisher-facing path to this column: the publish handler
+ * binds a literal 0, no update endpoint accepts a `verified` field, and this
+ * one starts with requireAdmin like every other staff route.
+ *
+ * It is kept separate from `status` on purpose. `status` is the spam queue —
+ * approved / review / rejected, mostly decided by a heuristic. `verified` is a
+ * person saying they looked at this script. A script can be approved and
+ * unverified, which is the normal case, and the badges say different things.
+ */
+async function handleScriptVerify(request, env, { id }, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  const row = await env.DB.prepare(
+    `SELECT id, title, verified FROM scripts WHERE id = ?`
+  ).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const body = await request.json().catch(() => ({}));
+  const verified = body.verified !== false;
+  if (Boolean(row.verified) === verified)
+    return ok({ data: { id: row.id, verified } });
+
+  await env.DB.prepare(`UPDATE scripts SET verified = ? WHERE id = ?`)
+    .bind(verified ? 1 : 0, row.id).run();
+
+  const after = modLog(env,
+    verified ? "Script verified" : "Verification removed",
+    `**${row.title}**`, verified ? 0x66bb6a : 0xffa726);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: { id: row.id, verified } });
 }
 
 async function handleScriptDelete(request, env, { id }, ctx) {
@@ -1994,6 +2122,7 @@ async function handleAdminScripts(request, env) {
   // taken down, and putting it back, is most of the point of the panel.
   const { results } = await env.DB.prepare(
     `SELECT s.id, s.title, s.game, s.views, s.copies, s.removed, s.created_at,
+            s.verified, s.lua, s.status,
             u.username AS author, u.id AS author_id,
             (SELECT COUNT(*) FROM reports r WHERE r.script_id = s.id) AS reports
        FROM scripts s JOIN users u ON u.id = s.author_id
@@ -2009,6 +2138,9 @@ async function handleAdminScripts(request, env) {
       game: r.game,
       author: r.author,
       authorId: r.author_id,
+      verified: Boolean(r.verified),
+      lua: Boolean(r.lua),
+      state: r.status,
       views: Number(r.views) || 0,
       copies: Number(r.copies) || 0,
       reports: Number(r.reports) || 0,
@@ -2281,11 +2413,23 @@ function looksLikeProse(text) {
  * failure mode that drives creators off a platform, and it is silent — they
  * are simply told no and never come back.
  */
-function checkSubmission({ code, descr, title, game }) {
+function checkSubmission({ code, descr, title, game, link = "" }) {
   const notes = [];
 
-  const codeCheck = looksLikeCode(code);
-  if (!codeCheck.ok) return { status: "rejected", note: codeCheck.why };
+  // Code used to be mandatory, so "this is not code" was a refusal. Now a
+  // publisher can deliver through a link instead, and refusing those would
+  // refuse the majority of honest submissions.
+  //
+  // The split: code that is PRESENT still has to look like code — pasting
+  // prose into the code box is a mistake worth catching. Code that is ABSENT
+  // is fine as long as there is a link, and the link has already been checked
+  // against a fixed host list by the caller, which is a far stronger spam
+  // filter than anything this function does.
+  const hasCode = Boolean(String(code || "").trim());
+  const codeCheck = hasCode ? looksLikeCode(code) : null;
+  if (hasCode && !codeCheck.ok) return { status: "rejected", note: codeCheck.why };
+  if (!hasCode && !String(link || "").trim())
+    return { status: "rejected", note: "There is no code and no link, so there is nothing to publish." };
 
   const prose = looksLikeProse(descr);
   if (!prose.ok) notes.push(prose.why);
@@ -2299,8 +2443,10 @@ function checkSubmission({ code, descr, title, game }) {
   if (t.length >= 4 && new Set(t).size <= 2)
     notes.push("The title looks like keyboard mash.");
 
-  // Weak-but-not-absent code signal: hold rather than publish.
-  if (codeCheck.hits < 3) notes.push("Only a weak code signal.");
+  // Weak-but-not-absent code signal: hold rather than publish. Only applies
+  // when code was submitted at all — a link-only script has no code signal to
+  // be weak, and holding every one of those would bury the review queue.
+  if (hasCode && codeCheck.hits < 3) notes.push("Only a weak code signal.");
 
   if (!notes.length) return { status: "approved", note: "" };
   return { status: "review", note: notes.join(" ") };
@@ -3999,6 +4145,7 @@ const PATTERNS = [
   // and the handler decodes it. Length is capped here rather than trusted.
   ["GET", /^\/api\/creators\/([^/]{1,80})$/, handleCreator],
   ["GET", /^\/api\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorGet],
+  ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/verify$/, handleScriptVerify],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})\/state$/, handleAdminExecutorState],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
