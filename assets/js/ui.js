@@ -1,19 +1,17 @@
 // All DOM: navigation, chapters, the searchable library, publishing,
 // the leaderboard, and the scroll-linked chapter choreography.
 
-import { SCRIPTS, CATEGORIES, SORTS, BOARDS, categoryOf } from "./data/scripts.js";
+import { SCRIPTS, CATEGORIES, SORTS, BOARDS, categoryOf, statusBadges } from "./data/scripts.js";
 import { BANDS } from "./engine/world.js";
 import { account } from "./account.js";
 import { safeImageSrc } from "./safe.js";
 import { isSaved } from "./vault.js";
-import { esc, fmt, toast, captchaMarkup, captchaPassed, captchaReset, createLeaderboard,
-         mountTurnstile, turnstileToken } from "./pages.js";
+import { esc, fmt, toast, createLeaderboard } from "./pages.js";
 import { totals as scriptTotals, onStatsChange } from "./stats.js";
-import { createGamePicker } from "./gamepicker.js";
 import {
   tileGames, searchGames, searchScripts, gameArt, allGames, gameId, findGame,
 } from "./games.js";
-import { libraryOnline, fetchScripts, publishScript, fetchBoard } from "./library-api.js";
+import { libraryOnline, fetchScripts, fetchBoard } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 import { pathForCreator } from "./router.js";
 
@@ -100,7 +98,6 @@ export function robloxThumb(input) {
   return `https://www.roblox.com/asset-thumbnail/image?assetId=${m[1]}&width=768&height=432&format=png`;
 }
 
-const wordCount = (s) => String(s || "").trim().split(/\s+/).filter(Boolean).length;
 
 /* ---------------------------------------------------------- card markup */
 
@@ -128,10 +125,15 @@ export function cardMarkup(script, { large = false } = {}) {
         <div class="card__top">
           <span class="chip">${cat.label}</span>
           ${script.keyless === false ? `<span class="chip chip--warn">Key</span>` : `<span class="chip chip--ok">Keyless</span>`}
+          ${statusBadges(script)}
         </div>
         <h3 class="card__title">${esc(script.title)}</h3>
         ${script.game ? `<p class="card__game">${esc(script.game)}</p>` : ""}
         <p class="card__desc">${esc(String(script.desc || "").slice(0, 140))}${String(script.desc || "").length > 140 ? "…" : ""}</p>
+        ${Array.isArray(script.tags) && script.tags.length
+          ? `<span class="chips card__tags">${script.tags.slice(0, 3)
+              .map((t) => `<span class="chip chip--soft">${esc(t)}</span>`).join("")}</span>`
+          : ""}
         <div class="card__meta">
           <a class="by" href="${esc(pathForCreator(script.author))}"
              title="See everything by @${esc(script.author)}">@${esc(script.author)}</a>
@@ -449,7 +451,7 @@ const CATEGORY_WORLDS = [
   { id: "utilities", title: "Utilities", blurb: "Signals, cleanup, rate limiting — the unglamorous modules every codebase needs." },
 ];
 
-export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, onAuth, onInfo }) {
+export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump, onPublish, onAuth, onInfo }) {
   const content = el("main", { id: "content" });
 
   // The stage is a 100vh scroll box. Most chapters fit inside it and never
@@ -590,9 +592,12 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
   });
   $("#board-mount", content).appendChild(board.node);
 
-  /* ---- publish ---- */
-  const publish = buildPublishForm({ onAuth, onPublished: onPublish });
-  $("#publish-mount", content).appendChild(publish.node);
+  /* ---- publish ----
+     The form itself lives in publish.js. It is mounted by the caller rather
+     than built here: it imports `addScript` and `robloxThumb` from this
+     module, so building it here would be a cycle. */
+  const publish = publishForm || null;
+  if (publish) $("#publish-mount", content).appendChild(publish.node);
 
   /* ---- grids + stats react to the library ---- */
   function paintGrids() {
@@ -659,209 +664,6 @@ export function buildChapters({ libraryPanel, onOpenScript, onJump, onPublish, o
    Publish form
    ============================================================ */
 
-function buildPublishForm({ onAuth, onPublished }) {
-  const node = el("div", { class: "publish" });
-
-  function render() {
-    const signedIn = account.isSignedIn;
-
-    if (!signedIn) {
-      node.innerHTML = `
-        <header class="panel__head">
-          <h2>Publish a script</h2>
-          <p>Share your work and earn every time someone unlocks it.</p>
-        </header>
-        <div class="empty empty--lg">
-          <strong>You need an account to publish.</strong>
-          <span>It takes about twenty seconds — username, email, password.</span>
-          <button class="btn btn--primary btn--sm" data-act="auth">Create an account</button>
-        </div>`;
-      return;
-    }
-
-    node.innerHTML = `
-      <header class="panel__head">
-        <h2>Publish a script</h2>
-        <p>Publishing as <b>@${esc(account.session.username)}</b>. It goes live in its category straight away.</p>
-      </header>
-
-      <form class="form form--grid publish__form" novalidate>
-        <label>Script name<input name="title" maxlength="70" placeholder="Inventory System" required></label>
-        <label>Roblox game<span data-gamepick></span></label>
-
-        <label>Category
-          <select name="category">
-            ${CATEGORIES.map((c) => `<option value="${c.id}">${c.label}</option>`).join("")}
-          </select>
-        </label>
-
-        <label>Game link or place ID <span class="opt">optional</span>
-          <input name="place" placeholder="roblox.com/games/123456789">
-        </label>
-
-        <label class="wide">Thumbnail <span class="opt">optional — leave blank to use the game's Roblox thumbnail</span>
-          <div class="thumbpick">
-            <span class="thumbpick__preview" data-thumb>No thumbnail</span>
-            <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/webp">
-          </div>
-        </label>
-
-        <label class="wide">Description
-          <textarea name="desc" rows="5" placeholder="What does it do, how do you use it, what makes it different? Minimum 100 words."></textarea>
-          <span class="counter" data-counter>0 / 100 words</span>
-        </label>
-
-        <label class="wide">Luau code
-          <textarea name="code" rows="8" spellcheck="false" placeholder="--!strict&#10;local Module = {}&#10;return Module"></textarea>
-        </label>
-
-        <label>Tags <span class="opt">comma separated</span>
-          <input name="tags" maxlength="80" placeholder="inventory, stacks, server">
-        </label>
-
-        <fieldset class="keyless">
-          <legend>Key requirement</legend>
-          <label class="radio"><input type="radio" name="keyless" value="yes" checked> Keyless</label>
-          <label class="radio"><input type="radio" name="keyless" value="no"> Key required</label>
-        </fieldset>
-
-        <div class="wide">${account.turnstileKey
-          ? `<div class="turnstile" data-turnstile></div>`
-          : captchaMarkup("publish-captcha")}</div>
-
-        <div class="wide publish__actions">
-          <button class="btn btn--primary" type="submit">Publish script</button>
-          <span class="note">By publishing you confirm this is yours to share.</span>
-        </div>
-      </form>`;
-  }
-
-  let picker = null;
-
-  function mountPicker() {
-    const slot = $("[data-gamepick]", node);
-    if (!slot) { picker = null; return; }
-    picker = createGamePicker({ name: "game", placeholder: "Search Roblox games, or type your own" });
-    slot.replaceWith(picker.node);
-    // Turnstile replaces the hand-rolled widget wherever a server can verify it.
-    mountTurnstile(node);
-  }
-
-  node.addEventListener("click", (e) => {
-    if (e.target.closest('[data-act="auth"]')) onAuth?.();
-  });
-
-  node.addEventListener("input", (e) => {
-    if (e.target.name === "desc") {
-      const n = wordCount(e.target.value);
-      const counter = $("[data-counter]", node);
-      counter.textContent = `${n} / 100 words`;
-      counter.classList.toggle("is-ok", n >= 100);
-    }
-    if (e.target.name === "place") {
-      const url = robloxThumb(e.target.value);
-      const prev = $("[data-thumb]", node);
-      if (url && !prev.dataset.value) {
-        prev.innerHTML = `<img src="${url}" alt="">`;
-        prev.dataset.auto = url;
-      }
-    }
-  });
-
-  node.addEventListener("change", (e) => {
-    const input = e.target.closest('input[name="thumbnail"]');
-    if (!input?.files?.[0]) return;
-    const file = input.files[0];
-    if (file.size > 3 * 1024 * 1024) { toast("Thumbnail must be under 3 MB", "warn"); input.value = ""; return; }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const prev = $("[data-thumb]", node);
-      prev.innerHTML = `<img src="${reader.result}" alt="">`;
-      prev.dataset.value = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
-
-  node.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const form = e.target;
-    const d = Object.fromEntries(new FormData(form));
-
-    if (!String(d.title).trim()) return toast("Give the script a name", "warn");
-    if (!String(d.game || "").trim()) return toast("Pick or type the Roblox game", "warn");
-
-    const words = wordCount(d.desc);
-    if (words < 100) return toast(`Description needs ${100 - words} more word${100 - words === 1 ? "" : "s"}`, "warn");
-    if (!String(d.code).trim()) return toast("Paste the Luau code", "warn");
-    const usingTurnstile = Boolean(account.turnstileKey);
-    if (!usingTurnstile && !captchaPassed(node))
-      return toast("Complete the human check", "warn");
-
-    const prev = $("[data-thumb]", node);
-    const draft = {
-      title: String(d.title).trim(),
-      game: String(d.game).trim(),
-      category: d.category,
-      desc: String(d.desc).trim(),
-      code: String(d.code),
-      tags: String(d.tags || "").split(",").map((t) => t.trim()).filter(Boolean).slice(0, 6),
-      keyless: d.keyless !== "no",
-      thumbnail: prev?.dataset.value || prev?.dataset.auto || robloxThumb(d.place) || "",
-      turnstile: turnstileToken(node),
-    };
-
-    const submit = $('[type="submit"]', form);
-    const wasLabel = submit?.textContent;
-    if (submit) { submit.disabled = true; submit.textContent = "Publishing…"; }
-
-    let script;
-    try {
-      if (await libraryOnline()) {
-        // The real path: the script goes to the server, and what comes back is
-        // what everyone else will see.
-        const res = await publishScript(draft);
-        if (!res.ok) {
-          toast(res.error || "Couldn't publish that. Try again.", "warn");
-          return;
-        }
-        script = res.data;
-        addScript(script);
-      } else {
-        // Static hosting, no API. Publish locally and SAY SO — the old code
-        // showed "it's live in the library" here, which was untrue and is how
-        // a published script ended up visible to nobody.
-        script = {
-          ...draft,
-          id: "s_" + Math.random().toString(36).slice(2, 10),
-          author: account.session.username,
-          authorId: account.session.id,
-          views: 0, copies: 0, likes: 0,
-          added: new Date().toISOString().slice(0, 10),
-          localOnly: true,
-        };
-        addScript(script);
-        toast("Saved on this device only — the library isn't reachable", "warn");
-      }
-    } finally {
-      if (submit) { submit.disabled = false; submit.textContent = wasLabel; }
-    }
-
-    await account.addPublish(script.id);
-    form.reset();
-    picker?.reset();
-    captchaReset(node);
-    render();
-    mountPicker();
-    if (!script.localOnly) toast("Published — it's live in the library");
-    onPublished?.(script);
-  });
-
-  account.onChange(() => { render(); mountPicker(); });
-  render();
-  mountPicker();
-
-  return { node, refresh() { render(); mountPicker(); } };
-}
 
 /* ============================================================
    Chrome — nav, top progress bar, floating dashboard button

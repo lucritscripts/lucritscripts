@@ -107,6 +107,22 @@ export async function publishScript(script) {
   return call("/api/scripts", { method: "POST", body: script });
 }
 
+/**
+ * Ask the server for a cleaner version of a description.
+ *
+ * A PREVIEW, always. It returns a suggestion and nothing is saved — the
+ * publish form shows it beside the author's own words and only sends the
+ * rewrite if they accept it. Silently replacing what somebody wrote is how an
+ * "improvement" becomes a claim they never made.
+ *
+ * Null on any failure, so a missing model or a rate limit degrades to "no
+ * suggestion" rather than an error the publisher has to dismiss.
+ */
+export async function describeScript({ desc, title, game }) {
+  const res = await call("/api/scripts/describe", { method: "POST", body: { desc, title, game } });
+  return res.ok ? res.data : null;
+}
+
 export async function deleteScript(id) {
   return call(`/api/scripts/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
@@ -120,9 +136,21 @@ export async function reportScript(id, reason) {
 }
 
 /** The code, which only comes back if this visitor is allowed to have it. */
-export async function fetchCode(id) {
+/**
+ * The gated payload: the code AND the link, from the one door that asks for a
+ * grant.
+ *
+ * Two things ride through here now. The link is where a self-hosting publisher
+ * keeps their script, and it is worth exactly what the code is worth — so it
+ * comes from the same endpoint under the same check rather than sitting in the
+ * listing where anyone could read it without completing the sponsor step.
+ *
+ * Null means "we could not get it", which the caller shows as locked. It never
+ * means "there is nothing there".
+ */
+export async function fetchPayload(id) {
   const res = await call(`/api/scripts/${encodeURIComponent(id)}/code`);
-  return res.ok ? res.data.code : null;
+  return res.ok ? { code: res.data.code || "", link: res.data.link || "" } : null;
 }
 
 /* ------------------------------------------------------------- unlocking */

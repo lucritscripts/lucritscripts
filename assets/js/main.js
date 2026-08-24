@@ -20,6 +20,7 @@ import { runBotCheck } from "./gate.js";
 import { capturePendingUnlock, takePendingUnlock, deleteScript } from "./library-api.js";
 import { createCreatorPage } from "./creator.js";
 import { createExecutorsPage } from "./executors.js";
+import { createPublishForm } from "./publish.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -380,8 +381,16 @@ const libraryPanel = createLibraryPanel({
 
 const scroller = new SmoothScroll({ reducedMotion: caps.reducedMotion });
 
+// Built here rather than inside buildChapters: publish.js imports `addScript`
+// and `robloxThumb` from ui.js, so ui.js constructing it would be a cycle.
+const publishForm = createPublishForm({
+  onAuth: () => auth.open("signup"),
+  onPublished: () => { dashboard.refresh(); refreshLibrary(); },
+});
+
 const chapters = buildChapters({
   libraryPanel,
+  publishForm,
   onOpenScript: (s) => openScript(s),
   onJump: jumpTo,
   onPublish: () => { dashboard.refresh(); },

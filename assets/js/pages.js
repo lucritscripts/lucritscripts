@@ -6,7 +6,7 @@
 
 import { account, STAT_WINDOWS } from "./account.js";
 import * as stats from "./stats.js";
-import { CATEGORIES, BOARDS, categoryOf } from "./data/scripts.js";
+import { CATEGORIES, BOARDS, categoryOf, statusBadges } from "./data/scripts.js";
 import { renderCodeBlock } from "./engine/highlight.js";
 
 /* ------------------------------------------------------------------ util */
@@ -17,7 +17,7 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 import { safeHref, safeImageSrc } from "./safe.js";
 import { drafts as myDrafts, deleteDraft, savedIds } from "./vault.js";
 import {
-  libraryOnline, fetchScript, fetchCode, deleteScript, likeScript, reportScript,
+  libraryOnline, fetchScript, fetchPayload, deleteScript, likeScript, reportScript,
   startUnlock, claimUnlock, rememberStartedUnlock,
 } from "./library-api.js";
 import {
@@ -1039,6 +1039,7 @@ export function createScriptPage({ onRequireAuth }) {
   const sheet = createOverlay({ id: "script", label: "Script", wide: true });
   let current = null;
   let code = null;         // fetched separately, and only once we're allowed it
+  let payloadLink = "";    // ditto — the publisher's own link, same gate
   let busy = false;
   // Set when the server refuses an unlock because of the Discord gate. Held
   // rather than toasted: the reason belongs where the button was, and it has
@@ -1109,6 +1110,7 @@ export function createScriptPage({ onRequireAuth }) {
         <div class="chips">
           <span class="chip" style="--cat:${cat.accent}">${cat.label}</span>
           ${s.keyless ? `<span class="chip chip--ok">Keyless</span>` : `<span class="chip chip--warn">Key required</span>`}
+          ${statusBadges(s, { showUnverified: true })}
           ${(s.tags || []).map((t) => `<span class="chip chip--soft">${esc(t)}</span>`).join("")}
         </div>
         <h2>${esc(s.title)}</h2>
@@ -1137,11 +1139,25 @@ export function createScriptPage({ onRequireAuth }) {
           ${isOwner(s) ? `<button class="btn btn--ghost btn--danger" data-act="delete">Delete</button>` : ""}
           <button class="btn btn--ghost" data-act="report">Report</button>
         </div>
-        <div class="script__code">${
-          code === null
-            ? `<p class="script__loading">Fetching the code…</p>`
-            : renderCodeBlock(code || "-- no code")
-        }</div>
+        ${payloadLink ? `
+          <div class="getlink">
+            <div class="getlink__text">
+              <b>Get the script</b>
+              <span>${esc(payloadLink)}</span>
+            </div>
+            <a class="btn btn--primary" href="${esc(safeHref(payloadLink))}"
+               target="_blank" rel="noopener nofollow">Open link</a>
+          </div>
+          <p class="note">This link goes to the publisher, not to us. We don't host it
+             and can't vouch for what's on the other end.</p>` : ""}
+
+        ${code
+          ? `<div class="script__code">${renderCodeBlock(code)}</div>`
+          : code === null
+            ? `<div class="script__code"><p class="script__loading">Fetching the script…</p></div>`
+            : payloadLink
+              ? ""
+              : `<div class="script__code">${renderCodeBlock("-- no code")}</div>`}
       ` : `
         <div class="gate">
           <div class="gate__lock" aria-hidden="true">
@@ -1209,12 +1225,16 @@ export function createScriptPage({ onRequireAuth }) {
 
   }
 
-  /** The code is never in the listing, so opening an unlocked script fetches it. */
+  /**
+   * Neither the code nor the link is in the listing, so an unlocked script
+   * fetches both together from the gated endpoint.
+   */
   async function loadCode() {
     if (!current || code !== null) return;
     if (!(await libraryOnline())) { code = current.code || ""; render(); return; }
-    const got = await fetchCode(current.id);
-    code = got === null ? "" : got;
+    const got = await fetchPayload(current.id);
+    code = got === null ? "" : got.code;
+    payloadLink = got?.link || "";
     render();
   }
 
@@ -1229,6 +1249,7 @@ export function createScriptPage({ onRequireAuth }) {
     if (!res.data.verified) noteLocalUnlock(current.id);
     noteUnlockWindow(current.id, res.data.unlockedFor);
     code = null;
+    payloadLink = "";
     render();
     await loadCode();
     return true;
