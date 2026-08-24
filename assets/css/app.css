@@ -1992,3 +1992,194 @@ html.is-gated { overflow: hidden; }
 /* The detail header reuses .dash__head, whose avatar slot is round. An
    executor's mark is a product logo, not a face. */
 #executors .dash__head .xcard__logo { width: 68px; height: 68px; border-radius: 16px; }
+
+/* =====================================================================
+   Publishing  —  the structured form
+   ===================================================================== */
+
+.pubform__grid {
+  display: grid; gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  align-items: start;
+}
+.field--wide { grid-column: 1 / -1; }
+
+.field { display: grid; gap: 7px; align-content: start; min-width: 0; }
+.field__label { font-size: 0.8rem; font-weight: 540; color: var(--ink-2); }
+.field__label .req { color: var(--blue); font-weight: 700; }
+.field__hint { font-size: 0.74rem; line-height: 1.5; color: var(--ink-3); }
+
+/* Errors take up no room until they say something, so the form does not
+   shift under the cursor the moment a field goes bad. */
+.field__err { font-size: 0.76rem; color: var(--red); display: none; }
+.field.is-bad .field__err { display: block; }
+.field.is-bad input,
+.field.is-bad select,
+.field.is-bad textarea,
+.field.is-bad .thumbdrop,
+.field.is-bad .choicerow { border-color: var(--red); }
+.field.is-bad .field__label { color: var(--red); }
+
+/* ---- key requirement: two real choices, neither preselected ---- */
+
+.choicerow { display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+.choice {
+  display: block; cursor: pointer; padding: 11px 13px;
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: rgba(6, 10, 19, 0.85);
+  transition: border-color .18s, background .18s;
+}
+.choice:hover { border-color: var(--line-2); }
+.choice input { position: absolute; opacity: 0; pointer-events: none; }
+.choice__body { display: grid; gap: 2px; }
+.choice__body b { font-size: 0.88rem; }
+.choice__body small { font-size: 0.72rem; color: var(--ink-3); }
+.choice:has(input:checked) {
+  border-color: var(--blue);
+  background: rgba(61, 155, 255, 0.12);
+}
+.choice:has(input:focus-visible) { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+/* ---- thumbnail ---- */
+
+.thumbdrop {
+  display: grid; grid-template-columns: 200px 1fr; gap: 16px;
+  padding: 14px; border: 1px dashed var(--line-2); border-radius: var(--r);
+  background: rgba(6, 10, 19, 0.7);
+  transition: border-color .18s, background .18s;
+}
+.thumbdrop.is-over { border-color: var(--blue); background: rgba(61, 155, 255, 0.09); }
+
+.thumbdrop__preview {
+  aspect-ratio: 16 / 9; border-radius: 10px; overflow: hidden;
+  display: grid; place-items: center;
+  border: 1px solid var(--line); background: rgba(12, 18, 30, 0.9);
+}
+.thumbdrop__preview img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.thumbdrop__empty { font-size: 0.76rem; color: var(--ink-3); }
+
+.thumbdrop__side { display: grid; gap: 7px; align-content: start; }
+.thumbdrop__lead { font-size: 0.86rem; }
+.thumbdrop__spec { font-size: 0.73rem; color: var(--ink-3); }
+.thumbdrop__acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 3px; }
+.thumbdrop__acts label { cursor: pointer; }
+.thumbdrop__state { font-size: 0.74rem; color: var(--ink-3); }
+.thumbdrop__state.is-ok { color: var(--good); }
+
+@media (max-width: 620px) {
+  .thumbdrop { grid-template-columns: 1fr; }
+  .choicerow { grid-template-columns: 1fr; }
+}
+
+/* ---- description: counter, AI hints, the side-by-side offer ---- */
+
+.descbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.counter.is-ok { color: var(--good); }
+
+.btn--ai {
+  border: 1px solid color-mix(in srgb, var(--blue) 40%, transparent);
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
+  color: var(--ink);
+}
+.btn--ai:hover:not(:disabled) { background: color-mix(in srgb, var(--blue) 20%, transparent); }
+.btn--ai:disabled { opacity: .6; cursor: default; }
+
+.aihints {
+  border: 1px solid var(--line); border-radius: var(--r);
+  background: rgba(6, 10, 19, 0.75); padding: 12px 14px;
+  animation: aifade .22s ease both;
+}
+@keyframes aifade { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.aihints__head {
+  font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: 7px;
+}
+.aihints__list { display: grid; gap: 5px; padding-left: 17px; }
+.aihints__list li { font-size: 0.79rem; color: var(--ink-2); line-height: 1.5; }
+.aihints__ok { font-size: 0.79rem; color: var(--good); }
+
+.aioffer {
+  border: 1px solid color-mix(in srgb, var(--blue) 34%, transparent);
+  border-radius: var(--r); padding: 14px;
+  background: color-mix(in srgb, var(--blue) 7%, rgba(6, 10, 19, 0.9));
+  display: grid; gap: 12px;
+  animation: aifade .24s ease both;
+}
+.aioffer__head { display: grid; gap: 3px; }
+.aioffer__cols { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; }
+@media (max-width: 700px) { .aioffer__cols { grid-template-columns: 1fr; } }
+.aioffer__col {
+  display: grid; gap: 5px; align-content: start;
+  padding: 11px 12px; border-radius: 9px;
+  border: 1px solid var(--line); background: rgba(6, 10, 19, 0.8);
+}
+.aioffer__col--new { border-color: color-mix(in srgb, var(--blue) 30%, transparent); }
+.aioffer__k {
+  font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3);
+}
+.aioffer__col p { font-size: 0.81rem; line-height: 1.55; color: var(--ink-2); }
+.aioffer__acts { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ---- Lua detection ---- */
+
+.luabar { display: grid; gap: 6px; }
+.luabar .chip { justify-self: start; }
+
+/* ---- verification, stated as the site's own claim ---- */
+
+.pubstatus {
+  display: grid; gap: 6px;
+  padding: 13px 15px; border: 1px solid var(--line); border-radius: var(--r);
+  background: rgba(6, 10, 19, 0.75);
+}
+.pubstatus__k {
+  font-size: 0.66rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-3);
+}
+.pubstatus .chip { justify-self: start; }
+
+/* ---- badges shared by cards and the script page ---- */
+
+/* Two different claims, two different colours, never the same badge.
+   `.badge--lua` says the text parses like Luau. `.badge--verified` says a
+   person reviewed it. Nothing may render one using the other's styling. */
+.badges { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.66rem; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase;
+  padding: 3px 8px; border-radius: 999px; white-space: nowrap;
+}
+.badge--verified {
+  color: var(--good);
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--good) 36%, transparent);
+}
+.badge--lua {
+  color: var(--cyan);
+  background: color-mix(in srgb, var(--cyan) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--cyan) 30%, transparent);
+}
+.badge--unverified {
+  color: var(--ink-3);
+  background: rgba(140, 175, 225, 0.07);
+  border: 1px solid var(--line);
+}
+
+/* The publisher's own link, revealed only once the sponsor step is done.
+   Sits above the code block, because for a link-only script it IS the
+   script — the code block below it is empty by design. */
+.getlink {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap;
+  padding: 15px 17px; margin-bottom: 12px;
+  border: 1px solid color-mix(in srgb, var(--good) 30%, transparent);
+  border-radius: var(--r);
+  background: color-mix(in srgb, var(--good) 7%, rgba(6, 10, 19, 0.9));
+}
+.getlink__text { display: grid; gap: 3px; min-width: 0; }
+.getlink__text b { font-size: 0.95rem; }
+.getlink__text span {
+  font-family: var(--mono); font-size: 0.76rem; color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.card__tags { margin-top: 2px; }
