@@ -2183,3 +2183,13 @@ html.is-gated { overflow: hidden; }
 }
 
 .card__tags { margin-top: 2px; }
+
+/* A checker flag on the author's own card. Deliberately not red: the script is
+   live and nothing is wrong with it yet — this is "someone will read this",
+   not "this is a problem". */
+.mine__flag {
+  font-size: 0.76rem; line-height: 1.5; color: var(--ink-2);
+  padding: 9px 11px; border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--gold) 28%, transparent);
+  background: color-mix(in srgb, var(--gold) 8%, transparent);
+}
