@@ -1253,10 +1253,38 @@ async function handleScriptPublish(request, env, _params, ctx) {
       + "Rentry, paste.ee, Hastebin or sourceb.in. Shorteners aren't accepted, "
       + "because the destination isn't the host.");
 
-  const tags = (Array.isArray(body.tags) ? body.tags : [])
+  let tags = (Array.isArray(body.tags) ? body.tags : [])
     .map((t) => String(t || "").trim().slice(0, SCRIPT_LIMITS.tag))
     .filter(Boolean)
     .slice(0, 6);
+
+  // Tags the publisher did not supply are asked for, not invented.
+  //
+  // The model is given the title, game and description and told to draw tags
+  // from what is actually written there — the same prompt that governs the
+  // description rewrite, under the same rule that it may not add a claim the
+  // author did not make. A tag is a claim: "#Undetected" on a script whose
+  // author never said that is exactly the kind of thing this must not do.
+  //
+  // It runs only when the field is empty, so a publisher who typed their own
+  // tags always keeps them.
+  if (!tags.length) {
+    const suggested = await enhanceDescription(env, { descr, title, game })
+      .then((out) => out?.tags || [])
+      .catch(() => []);
+    tags = suggested
+      .map((t) => String(t || "").trim().slice(0, SCRIPT_LIMITS.tag))
+      .filter(Boolean)
+      .slice(0, 6);
+  }
+
+  // Still nothing — no model configured, or it answered unusably. The game
+  // name is a tag that is true by construction, which beats refusing a
+  // publish over a field the site offered to fill in.
+  if (!tags.length) {
+    const fromGame = game.replace(/[^A-Za-z0-9]/g, "").slice(0, SCRIPT_LIMITS.tag);
+    if (fromGame) tags = [fromGame];
+  }
   if (!tags.length) return bad(400, "Add at least one tag.");
 
   // A thumbnail is either a data URL the person uploaded or a Roblox CDN link.
@@ -1450,6 +1478,108 @@ async function handleScriptVerify(request, env, { id }, ctx) {
   if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
 
   return ok({ data: { id: row.id, verified } });
+}
+
+/**
+ * A creator editing their own script.
+ *
+ * There was no edit route at all before this, which meant `syncScriptPosts`
+ * existed and nothing but the admin panel ever called it — a creator who got
+ * their description wrong had exactly one option, delete and republish, which
+ * loses the script's views, its likes, its URL and its Discord post.
+ *
+ * What is editable is deliberately narrow: description, thumbnail, tags, key
+ * requirement and link. NOT the title, game or category — those decide which
+ * Discord channel the script lives in and what its page is called, and letting
+ * them change would mean a script silently migrating between channels. NOT the
+ * code, because the code is what people paid an unlock to see. And obviously
+ * not `verified`, which is the site's word, not the author's.
+ */
+async function handleScriptUpdate(request, env, { id }, ctx) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in first.");
+
+  const row = await env.DB.prepare(
+    `SELECT s.*, u.username AS author FROM scripts s
+       JOIN users u ON u.id = s.author_id WHERE s.id = ? AND s.removed = 0`
+  ).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+  if (row.author_id !== user.id) return bad(403, "That isn't your script.");
+
+  if (!(await underLimit(env, `edit:${user.id}`, 20, 3600)))
+    return bad(429, "That's a lot of edits. Try again shortly.");
+
+  const body = await request.json().catch(() => ({}));
+  const has = (k) => Object.prototype.hasOwnProperty.call(body, k);
+
+  let descr = row.descr;
+  if (has("desc")) {
+    descr = String(body.desc || "").trim();
+    const words = descr.split(/\s+/).filter(Boolean).length;
+    if (words < MIN_DESC_WORDS)
+      return bad(400, `The description needs at least ${MIN_DESC_WORDS} words.`);
+    if (descr.length > SCRIPT_LIMITS.descr) return bad(400, "That description is too long.");
+  }
+
+  let tags = row.tags;
+  if (has("tags")) {
+    const list = (Array.isArray(body.tags) ? body.tags : [])
+      .map((t) => String(t || "").trim().slice(0, SCRIPT_LIMITS.tag))
+      .filter(Boolean).slice(0, 6);
+    if (!list.length) return bad(400, "Add at least one tag.");
+    tags = JSON.stringify(list);
+  }
+
+  let thumbnail = row.thumbnail;
+  if (has("thumbnail")) {
+    const raw = String(body.thumbnail || "").trim();
+    thumbnail =
+      /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(raw) && raw.length < 400000
+        ? raw
+        : safeSocial(raw, ["roblox.com", "rbxcdn.com"]);
+    if (!thumbnail) return bad(400, "That thumbnail isn't a supported image or Roblox link.");
+  }
+
+  let link = row.link;
+  if (has("link")) {
+    const raw = String(body.link || "").trim();
+    if (!raw) return bad(400, "Add the link where people get the script.");
+    link = safeSocial(raw, LINK_HOSTS);
+    if (!link) return bad(400, "That link isn't on a host we allow.");
+  }
+
+  const keyless = has("keyless") ? (body.keyless === false ? 0 : 1) : row.keyless;
+
+  await env.DB.prepare(
+    `UPDATE scripts SET descr = ?, tags = ?, thumbnail = ?, link = ?, keyless = ? WHERE id = ?`
+  ).bind(descr, tags, thumbnail, link, keyless, id).run();
+
+  const now = await env.DB.prepare(
+    `SELECT s.*, u.username AS author FROM scripts s
+       JOIN users u ON u.id = s.author_id WHERE s.id = ?`
+  ).bind(id).first();
+
+  // What actually changed, so the Discord edit is not a silent no-op and the
+  // mod log says something useful.
+  const changed = [];
+  if (row.descr !== now.descr) changed.push("description");
+  if (row.tags !== now.tags) changed.push("tags");
+  if (row.thumbnail !== now.thumbnail) changed.push("thumbnail");
+  if (row.link !== now.link) changed.push("link");
+  if (row.keyless !== now.keyless) changed.push("key requirement");
+
+  if (changed.length) {
+    const after = (async () => {
+      const ok = await syncScriptPosts(env, now, now.author, { state: "live" });
+      if (!ok) await queueDiscord(env, "sync", id, "edit did not reach every post");
+    })();
+    if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+  }
+
+  return ok({
+    data: publicScript(now, { mine: true }),
+    changed,
+  });
 }
 
 async function handleScriptDelete(request, env, { id }, ctx) {
@@ -3111,6 +3241,33 @@ function clip(text, max) {
  * with a different flag rather than a second near-identical template that
  * drifts out of sync with this one.
  */
+/**
+ * The "Get Script" button, as an actual Discord component.
+ *
+ * A link button (style 5) rather than markdown in an embed field. Discord
+ * renders it as a real button under the message, which is both what the spec
+ * asked for and considerably harder to miss than a line of blue text among
+ * five other fields.
+ *
+ * Link buttons carry no custom_id and fire no interaction, so this needs no
+ * gateway connection and no interaction endpoint — it is a hyperlink that
+ * looks like a button. That matters here: a Worker cannot hold a socket open,
+ * so anything requiring a live interaction handler would not work at all.
+ *
+ * Returns [] for a retired post, so striking one through also takes its button
+ * away rather than leaving a live-looking button on a dead script.
+ */
+function getScriptButton(env, script, author, { state = "live" } = {}) {
+  if (state !== "live") return [];
+  const site = env.SITE_URL || "https://lucritscripts.site";
+  const slug = String(script.id).replace(/^s_/, "");
+  const link = `${site}/creations/${encodeURIComponent(author)}/${encodeURIComponent(slug)}`;
+  return [{
+    type: 1,
+    components: [{ type: 2, style: 5, label: "🔗 Get Script", url: link }],
+  }];
+}
+
 function scriptEmbed(env, script, author, { state = "live" } = {}) {
   const site = env.SITE_URL || "https://lucritscripts.site";
   const slug = String(script.id).replace(/^s_/, "");
@@ -3147,13 +3304,175 @@ function scriptEmbed(env, script, author, { state = "live" } = {}) {
       { name: "🎮 Game", value: clip(script.game || "Roblox", 100), inline: true },
       { name: "🔑 Keyless", value: script.keyless ? "Yes" : "Key required", inline: true },
       ...(stats.length ? [{ name: "📊 Stats", value: stats.join("  ·  "), inline: true }] : []),
+      { name: "✅ Verification",
+        // Two claims kept apart here exactly as they are on the site. "Lua
+        // Detected" is a syntax guess about submitted text; "Verified" is a
+        // person saying they read it. A single green tick covering both would
+        // have the server vouching for code nobody reviewed.
+        value: script.verified
+          ? "Verified by Lucrit Scripts"
+          : script.lua ? "Lua detected — not reviewed" : "Not reviewed",
+        inline: true },
+      { name: "📅 Published",
+        value: `<t:${Math.floor(new Date(script.created_at || Date.now()).getTime() / 1000)}:D>`,
+        inline: true },
       ...(hashes && !gone ? [{ name: "​", value: hashes }] : []),
-      ...(gone ? [] : [{ name: "​", value: `**[🔗 Get Script](${link})**  ·  [Creator](${who})` }]),
+      ...(gone ? [] : [{ name: "​", value: `[Creator](${who})` }]),
     ],
     ...(art && !gone ? { thumbnail: { url: art } } : {}),
     footer: { text: "Lucrit Scripts · lucritscripts.site" },
     timestamp: new Date(script.created_at || Date.now()).toISOString(),
   };
+}
+
+/* ═══════════════════════════════════════════════ the retry queue ══ */
+
+/**
+ * Discord failing must never fail a publish.
+ *
+ * The website is the source of truth; the server is a mirror of it. So every
+ * Discord call is wrapped so that a failure is RECORDED rather than raised —
+ * the script is already in the database and already on the site by the time
+ * any of this runs, and throwing here would turn a Discord outage into a
+ * broken publish.
+ *
+ * `kind` + `script_id` is a unique index, so a publish that fails three times
+ * leaves one row, not three. That is also what stops a retry storm from
+ * posting the same script repeatedly.
+ */
+const QUEUE_KINDS = ["publish", "sync", "retire"];
+const QUEUE_MAX_ATTEMPTS = 8;
+
+/** Exponential-ish backoff, capped. 1m, 4m, 9m, 16m … up to an hour. */
+const backoffFor = (attempts) => Math.min(3600, 60 * Math.max(1, attempts) ** 2);
+
+async function queueDiscord(env, kind, scriptId, error = "") {
+  if (!QUEUE_KINDS.includes(kind)) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO discord_queue (kind, script_id, attempts, last_error, next_try, created_at)
+       VALUES (?, ?, 1, ?, ?, ?)
+       ON CONFLICT(kind, script_id) DO UPDATE SET
+         attempts   = discord_queue.attempts + 1,
+         last_error = excluded.last_error,
+         next_try   = ?`
+    ).bind(kind, scriptId, String(error).slice(0, 300),
+           nowSec() + backoffFor(1), nowSec(),
+           nowSec() + backoffFor(2)).run();
+  } catch (err) {
+    // The queue itself failing is not worth taking a request down for.
+    console.warn("could not queue discord retry", err?.message);
+  }
+}
+
+/** Clears a queued job once its work has actually succeeded. */
+async function unqueueDiscord(env, kind, scriptId) {
+  try {
+    await env.DB.prepare(`DELETE FROM discord_queue WHERE kind = ? AND script_id = ?`)
+      .bind(kind, scriptId).run();
+  } catch { /* nothing to do */ }
+}
+
+/**
+ * Runs one Discord job, rebuilding it from CURRENT data.
+ *
+ * Rebuilding rather than replaying a stored payload is the important part: a
+ * retry that lands an hour later should post what the script says now, not a
+ * snapshot from before the author fixed their typo. It also means a script
+ * deleted in the meantime retires instead of being announced.
+ */
+async function runDiscordJob(env, kind, scriptId) {
+  const row = await env.DB.prepare(
+    `SELECT s.*, u.username AS author FROM scripts s
+       JOIN users u ON u.id = s.author_id WHERE s.id = ?`
+  ).bind(scriptId).first();
+  if (!row) return true;                        // gone; nothing to post
+
+  const dead = row.removed === 1;
+  if (kind === "retire" || dead) { await retireScriptPosts(env, row, row.author); return true; }
+  if (kind === "sync") { await syncScriptPosts(env, row, row.author, { state: "live" }); return true; }
+
+  // publish — but only if it has not already been posted, which is the
+  // duplicate guard for the retry path specifically.
+  const already = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM script_posts WHERE script_id = ?`
+  ).bind(scriptId).first();
+  if (Number(already?.n || 0) > 0) {
+    await syncScriptPosts(env, row, row.author, { state: "live" });
+    return true;
+  }
+  await postScriptEverywhere(env, row, row.author);
+  const now = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM script_posts WHERE script_id = ?`
+  ).bind(scriptId).first();
+  return Number(now?.n || 0) > 0;
+}
+
+/**
+ * Drains due jobs. Called from `ctx.waitUntil` on ordinary requests.
+ *
+ * Deliberately small per pass — three jobs — because this runs alongside a
+ * real request on a 10ms CPU budget. A backlog clears over several requests
+ * rather than in one long one, which is the right trade on a site that gets
+ * traffic.
+ */
+async function drainDiscordQueue(env, { limit = 3 } = {}) {
+  if (!botOn(env)) return { ran: 0, ok: 0 };
+
+  let rows = [];
+  try {
+    const out = await env.DB.prepare(
+      `SELECT id, kind, script_id, attempts FROM discord_queue
+        WHERE next_try <= ? ORDER BY next_try ASC LIMIT ?`
+    ).bind(nowSec(), limit).all();
+    rows = out.results || [];
+  } catch { return { ran: 0, ok: 0 }; }
+
+  let ok = 0;
+  for (const job of rows) {
+    let done = false;
+    try { done = await runDiscordJob(env, job.kind, job.script_id); }
+    catch (err) {
+      done = false;
+      await env.DB.prepare(`UPDATE discord_queue SET last_error = ? WHERE id = ?`)
+        .bind(String(err?.message || "failed").slice(0, 300), job.id).run().catch(() => {});
+    }
+
+    if (done) {
+      ok++;
+      await env.DB.prepare(`DELETE FROM discord_queue WHERE id = ?`).bind(job.id).run().catch(() => {});
+      await botLog(env, `Retried \`${job.kind}\` for \`${job.script_id}\` — succeeded on attempt ${job.attempts + 1}.`);
+      continue;
+    }
+
+    const attempts = Number(job.attempts || 0) + 1;
+    if (attempts >= QUEUE_MAX_ATTEMPTS) {
+      // Given up on automatically. The row STAYS so an admin can see it and
+      // retry by hand — deleting it here would hide the failure, which is the
+      // behaviour this whole queue exists to replace.
+      await env.DB.prepare(
+        `UPDATE discord_queue SET attempts = ?, next_try = ? WHERE id = ?`
+      ).bind(attempts, nowSec() + 86400, job.id).run().catch(() => {});
+      await botLog(env,
+        `⚠️ Gave up on \`${job.kind}\` for \`${job.script_id}\` after ${attempts} attempts. `
+        + `It is still queued and can be retried by hand from the admin panel.`);
+    } else {
+      await env.DB.prepare(
+        `UPDATE discord_queue SET attempts = ?, next_try = ? WHERE id = ?`
+      ).bind(attempts, nowSec() + backoffFor(attempts), job.id).run().catch(() => {});
+    }
+  }
+  return { ran: rows.length, ok };
+}
+
+/** Integration errors and bot events, in their own channel. */
+async function botLog(env, message) {
+  const channel = await namedChannel(env, "bot-logs");
+  if (!channel) return;
+  await bot(env, `/channels/${channel}/messages`, {
+    method: "POST",
+    body: { content: clip(String(message), 1900), allowed_mentions: { parse: [] } },
+  });
 }
 
 /* ------------------------------------------------ publish / update */
@@ -3170,12 +3489,18 @@ function scriptEmbed(env, script, author, { state = "live" } = {}) {
 async function announceScriptBot(env, script, author) {
   if (!botOn(env)) return;
   try {
-    await postScriptEverywhere(env, script, author);
+    const landed = await postScriptEverywhere(env, script, author);
+    if (landed) { await unqueueDiscord(env, "publish", script.id); return; }
+    // Reached Discord and got nothing back. The website publish already
+    // succeeded, so this is queued rather than surfaced as a failure.
+    await queueDiscord(env, "publish", script.id, "no channel accepted the post");
+    await botLog(env, `Queued a retry: publishing \`${script.id}\` reached no channel.`);
   } catch (err) {
     // A publish must not fail because a channel lookup threw. `bot()` already
     // swallows network failures; this catches the rest — a malformed embed, a
-    // database hiccup — so the worst case stays "no Discord post".
+    // database hiccup — so the worst case stays "no Discord post, retried later".
     console.warn("discord announce failed", err?.stack || err?.message);
+    await queueDiscord(env, "publish", script.id, err?.message || "threw");
   }
 }
 
@@ -3196,18 +3521,29 @@ async function postScriptEverywhere(env, script, author) {
     `🆕 **${clip(script.title, 80)}** · ${clip(script.game || "Roblox", 40)} · by @${author}\n` +
     `${site}/creations/${encodeURIComponent(author)}/${encodeURIComponent(slug)}`);
 
+  let landed = 0;
   for (const t of targets) {
     const sent = await bot(env, `/channels/${t.id}/messages`, {
       method: "POST",
-      body: { embeds: [embed], allowed_mentions: { parse: [] } },
+      body: {
+        embeds: [embed],
+        components: getScriptButton(env, script, author),
+        allowed_mentions: { parse: [] },
+      },
     });
     if (!sent?.id) continue;
+    landed++;
     await env.DB.prepare(
       `INSERT INTO script_posts (script_id, channel_id, message_id, kind, at)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT(script_id, channel_id) DO UPDATE SET message_id = excluded.message_id`
     ).bind(script.id, t.id, sent.id, t.kind, nowSec()).run().catch(() => {});
   }
+
+  // Whether anything reached Discord at all. The caller queues a retry when
+  // nothing did — a publish that silently reached nobody was the failure mode
+  // this replaces.
+  return landed > 0;
 }
 
 /**
@@ -3224,12 +3560,29 @@ async function syncScriptPosts(env, script, author, { state = "live" } = {}) {
   ).bind(script.id).all().catch(() => ({ results: [] }));
 
   const embed = scriptEmbed(env, script, author, { state });
+  const components = getScriptButton(env, script, author, { state });
+
+  let edited = 0;
   for (const row of results || []) {
-    await bot(env, `/channels/${row.channel_id}/messages/${row.message_id}`, {
+    const out = await bot(env, `/channels/${row.channel_id}/messages/${row.message_id}`, {
       method: "PATCH",
-      body: { embeds: [embed], allowed_mentions: { parse: [] } },
+      // `components` is sent every time, including as [] for a retired post.
+      // Omitting it leaves the previous buttons in place, so a struck-through
+      // script would keep a live-looking "Get Script" button under it.
+      body: { embeds: [embed], components, allowed_mentions: { parse: [] } },
     });
+    if (out) edited++;
   }
+
+  const expected = (results || []).length;
+  if (expected && edited < expected) {
+    await queueDiscord(env, state === "live" ? "sync" : "retire", script.id,
+      `${expected - edited} of ${expected} posts did not update`);
+  } else if (expected) {
+    await unqueueDiscord(env, "sync", script.id);
+    await unqueueDiscord(env, "retire", script.id);
+  }
+  return expected === 0 || edited === expected;
 }
 
 /**
@@ -3904,6 +4257,56 @@ async function handleExecutorGet(request, env, { id }) {
  * could clear the flag. An executor taken down by a misclick was unreachable
  * from every surface the site has, recoverable only by hand in D1.
  */
+/**
+ * What Discord work is stuck, and a button to run it now.
+ *
+ * The queue retries on its own, but "automatic" is not the same as "visible".
+ * An operator needs to be able to see that three publishes never reached the
+ * server, see why, and force them through without waiting out a backoff.
+ */
+async function handleAdminDiscordQueue(request, env, _params, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+
+  if (request.method === "GET") {
+    const { results } = await env.DB.prepare(
+      `SELECT q.id, q.kind, q.script_id, q.attempts, q.last_error, q.next_try, q.created_at,
+              s.title, u.username AS author
+         FROM discord_queue q
+         LEFT JOIN scripts s ON s.id = q.script_id
+         LEFT JOIN users u ON u.id = s.author_id
+        ORDER BY q.next_try ASC LIMIT 100`
+    ).all().catch(() => ({ results: [] }));
+
+    return ok({
+      data: (results || []).map((r) => ({
+        id: r.id,
+        kind: r.kind,
+        scriptId: r.script_id,
+        title: r.title || "(deleted)",
+        author: r.author || "",
+        attempts: Number(r.attempts) || 0,
+        error: r.last_error || "",
+        dueIn: Math.max(0, Number(r.next_try || 0) - nowSec()),
+        gaveUp: Number(r.attempts || 0) >= QUEUE_MAX_ATTEMPTS,
+      })),
+      configured: botOn(env),
+    });
+  }
+
+  // POST — run everything that is queued, now, ignoring backoff.
+  if (!botOn(env)) return bad(503, "The Discord bot isn't configured.");
+
+  await env.DB.prepare(`UPDATE discord_queue SET next_try = 0`).run().catch(() => {});
+  const out = await drainDiscordQueue(env, { limit: 25 });
+
+  const left = await env.DB.prepare(`SELECT COUNT(*) AS n FROM discord_queue`).first();
+  const after = botLog(env, `Manual retry: ran ${out.ran}, ${out.ok} succeeded, ${Number(left?.n || 0)} still queued.`);
+  if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
+
+  return ok({ data: { ran: out.ran, succeeded: out.ok, remaining: Number(left?.n || 0) } });
+}
+
 async function handleAdminExecutorList(request, env) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
@@ -4197,6 +4600,7 @@ const PATTERNS = [
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
+  ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/edit$/, handleScriptUpdate],
   ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/report$/, handleScriptReport],
@@ -4216,6 +4620,8 @@ const ROUTES = {
   "POST /api/admin/discord/setup": handleAdminDiscordSetup,
   "POST /api/admin/discord/games": handleAdminDiscordGames,
   "POST /api/admin/discord/leaderboards": handleAdminLeaderboards,
+  "GET  /api/admin/discord/queue": handleAdminDiscordQueue,
+  "POST /api/admin/discord/queue": handleAdminDiscordQueue,
   "GET  /api/admin/executors": handleAdminExecutorList,
   "POST /api/admin/executors": handleExecutorCreate,
   "GET  /api/leaderboard": handleLeaderboard,
@@ -4321,6 +4727,16 @@ function cacheFor(pathname) {
   return "no-cache, must-revalidate";
 }
 
+/**
+ * Which requests carry a queue drain along with them.
+ *
+ * The listing and config endpoints, because every visitor hits one and neither
+ * does anything expensive. Deliberately NOT the publish, unlock or code
+ * routes — those have their own Discord and database work to get through on a
+ * 10ms budget, and a retry riding along would compete with it.
+ */
+const DRAIN_ON = /^\/api\/(scripts|config|discord)\/?$/;
+
 export default {
   // `ctx` is here for waitUntil: the Discord announcement must not make a
   // publisher wait on Discord, and must not fail their publish if it fails.
@@ -4367,7 +4783,24 @@ export default {
     }
 
     try {
-      return await handler(request, env, params, ctx);
+      const res = await handler(request, env, params, ctx);
+
+      // Drain any Discord work that failed earlier, AFTER the response is
+      // decided and inside waitUntil so it costs the visitor nothing.
+      //
+      // Request-driven rather than scheduled because Cloudflare Pages has no
+      // Cron Triggers — there is no timer to hang a background job on. On a
+      // site with traffic this means "within seconds"; on a quiet one it means
+      // "when somebody next visits", which is the same moment anyone would
+      // have noticed the missing post anyway.
+      //
+      // GET only, and not for the API's own hot paths: a retry riding along
+      // with a publish would compete with that publish's own Discord call for
+      // the same 10ms.
+      if (ctx?.waitUntil && request.method === "GET" && DRAIN_ON.test(url.pathname)) {
+        ctx.waitUntil(drainDiscordQueue(env).catch(() => {}));
+      }
+      return res;
     } catch (err) {
       console.error("unhandled", url.pathname, err?.stack || err?.message);
       return bad(500, "Something went wrong. Try again.");
