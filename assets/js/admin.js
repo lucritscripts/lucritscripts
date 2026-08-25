@@ -236,20 +236,43 @@ export function createAdminPage({ onChanged } = {}) {
   }
 
   function scriptsTable(rows) {
+    const flagged = rows.filter((s) => s.state && s.state !== "approved" && !s.removed).length;
     return `
+      ${flagged ? `
+        <p class="note note--warn">
+          ${flagged} script${flagged === 1 ? " is" : "s are"} flagged by the checker.
+          ${flagged === 1 ? "It is" : "They are"} live and visible like any other —
+          this is a note to look, not a takedown.
+        </p>` : ""}
       <table class="rows">
         <thead><tr><th>Script</th><th>Views</th><th>Copies</th><th>Reports</th><th></th></tr></thead>
         <tbody>
           ${rows.map((s) => `
             <tr data-script="${esc(s.id)}">
               <td>
-                <b>${esc(s.title)}</b>${s.removed ? ` <span class="chip chip--warn">removed</span>` : ""}
+                <b>${esc(s.title)}</b>
+                ${s.removed ? ` <span class="chip chip--warn">removed</span>` : ""}
+                ${s.state && s.state !== "approved" && !s.removed
+                  ? ` <span class="chip chip--warn" title="${esc(s.note || "The checker wasn't confident.")}">flagged</span>`
+                  : ""}
+                ${s.verified ? ` <span class="badge badge--verified">✓ Verified</span>` : ""}
+                ${s.lua ? ` <span class="badge badge--lua">Lua Detected</span>` : ""}
                 <br><span class="muted">@${esc(s.author)} · ${esc(s.game)} · ${esc(s.createdAt)}</span>
+                ${s.state && s.state !== "approved" && s.note
+                  ? `<br><span class="muted">Checker: ${esc(s.note)}</span>`
+                  : ""}
               </td>
               <td>${fmt(s.views)}</td>
               <td>${fmt(s.copies)}</td>
               <td>${s.reports ? `<b>${fmt(s.reports)}</b>` : "0"}</td>
               <td>
+                ${s.state && s.state !== "approved"
+                  ? `<button class="btn btn--ghost btn--xs" data-adminact="clearflag">Clear flag</button>`
+                  : ""}
+                <button class="btn btn--ghost btn--xs" data-adminact="verify"
+                        data-verified="${s.verified ? "1" : "0"}">
+                  ${s.verified ? "Unverify" : "Verify"}
+                </button>
                 <button class="btn btn--ghost btn--xs" data-adminact="state"
                         data-removed="${s.removed ? "1" : "0"}">
                   ${s.removed ? "Restore" : "Take down"}
@@ -259,7 +282,9 @@ export function createAdminPage({ onChanged } = {}) {
               </td>
             </tr>`).join("")}
         </tbody>
-      </table>`;
+      </table>
+      <p class="muted">A script stays on the site until it is taken down here, or its
+         author is suspended. Nothing else hides one.</p>`;
   }
 
   /**
@@ -484,6 +509,14 @@ export function createAdminPage({ onChanged } = {}) {
     } else if (act === "state" || act === "takedown") {
       res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/state`, "POST",
         { removed: act === "takedown" ? true : btn.dataset.removed !== "1" });
+
+    } else if (act === "clearflag") {
+      res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/state`, "POST",
+        { status: "approved" });
+
+    } else if (act === "verify") {
+      res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/verify`, "POST",
+        { verified: btn.dataset.verified !== "1" });
 
     } else if (act === "counters") {
       const views = prompt("Views:", btn.dataset.views ?? "0");

@@ -72,6 +72,11 @@ export function createMyScripts({ getPublished, onContinue, onPublishDraft, onOp
           <h3 class="mine__title">${esc(s.title)}</h3>
           <span class="mine__meta mine__meta--live">Live${s.game ? ` · ${esc(s.game)}` : ""}</span>
         </div>
+        ${s.flagged ? `
+          <p class="mine__flag">
+            Flagged for a look by the checker. It's live and everyone can see it —
+            this only means someone will read it at some point.
+          </p>` : ""}
         <p class="mine__ask">${esc(String(s.description || "").slice(0, 160))}</p>
         <div class="mine__acts">
           <button class="btn btn--primary btn--sm" data-open="${esc(s.id)}">Open it</button>

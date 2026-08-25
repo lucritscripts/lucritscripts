@@ -732,8 +732,12 @@ export function createPublishForm({ onAuth, onPublished }) {
     mountPicker();
     paintThumb();
 
-    toast(script.status === "review"
-      ? "Submitted — it's waiting on a quick review before it appears"
+    // Both cases are live. A flag is a note for staff to read it later, not a
+    // gate — saying "waiting for review" here would be the same lie the old
+    // form told in reverse, and a publisher who thinks their script is queued
+    // will re-publish it.
+    toast(script.flagged
+      ? "Published — it's live. The checker flagged it for someone to read later."
       : "Published — it's live in the library");
     onPublished?.(script);
   });
