@@ -461,19 +461,26 @@ export function createPublishForm({ onAuth, onPublished }) {
     box.hidden = false;
     box.innerHTML = `
       <div class="aioffer__head">
-        <b>Suggested rewrite</b>
+        <b>${aiOffer.tagsOnly ? "Suggested tags" : "Suggested rewrite"}</b>
         <span class="field__hint">Your words are kept until you accept this.</span>
       </div>
-      <div class="aioffer__cols">
-        <div class="aioffer__col">
-          <span class="aioffer__k">Yours</span>
-          <p>${esc(aiOffer.original)}</p>
-        </div>
-        <div class="aioffer__col aioffer__col--new">
-          <span class="aioffer__k">Suggested</span>
-          <p>${esc(aiOffer.improved)}</p>
-        </div>
-      </div>
+      ${aiOffer.tagsOnly ? "" : `
+        <div class="aioffer__cols">
+          <div class="aioffer__col">
+            <span class="aioffer__k">Yours</span>
+            <p>${esc(aiOffer.original)}</p>
+          </div>
+          <div class="aioffer__col aioffer__col--new">
+            <span class="aioffer__k">Suggested</span>
+            <p>${esc(aiOffer.improved)}</p>
+          </div>
+        </div>`}
+      ${aiOffer.tags ? `
+        <div class="aioffer__tags">
+          <span class="aioffer__k">Tags</span>
+          <span class="chips">${aiOffer.tags
+            .map((t) => `<span class="chip chip--soft">${esc(t)}</span>`).join("")}</span>
+        </div>` : ""}
       <div class="aioffer__acts">
         <button class="btn btn--primary btn--sm" type="button" data-act="accept">Use this</button>
         <button class="btn btn--ghost btn--sm" type="button" data-act="reject">Keep mine</button>
@@ -483,7 +490,7 @@ export function createPublishForm({ onAuth, onPublished }) {
   async function enhance() {
     if (aiBusy) return;
     const v = values();
-    if (wordCount(v.desc) < 8) return toast("Write a little more first", "warn");
+    if (wordCount(v.desc) < 8) return toast("Write a little more first — the AI works from what you wrote", "warn");
 
     aiBusy = true;
     const btn = $('[data-act="enhance"]', node);
@@ -495,10 +502,21 @@ export function createPublishForm({ onAuth, onPublished }) {
       // The endpoint answers with the author's own text when the model returns
       // something unusable. Offering that back as a "rewrite" would be a lie
       // dressed as a feature, so it is reported as no change instead.
+      // Tags come back from the same call. They are offered alongside the
+      // rewrite rather than applied, and only when the publisher has not
+      // written their own — someone who typed tags meant them.
+      const tags = (out?.tags || []).map((t) => String(t).trim()).filter(Boolean).slice(0, 6);
+      const wantTags = !v.tags.length && tags.length ? tags : null;
+
       if (!out || !out.description || out.description.trim() === v.desc.trim()) {
-        toast("The description already reads well — nothing to change", "ok");
+        if (wantTags) {
+          aiOffer = { improved: v.desc, original: v.desc, tags: wantTags, tagsOnly: true };
+          paintOffer();
+        } else {
+          toast("The description already reads well — nothing to change", "ok");
+        }
       } else {
-        aiOffer = { improved: out.description.trim(), original: v.desc };
+        aiOffer = { improved: out.description.trim(), original: v.desc, tags: wantTags };
         paintOffer();
       }
     } catch {
@@ -581,12 +599,20 @@ export function createPublishForm({ onAuth, onPublished }) {
 
     if (e.target.closest('[data-act="accept"]')) {
       const box = $('textarea[name="desc"]', node);
-      if (box && aiOffer) { box.value = aiOffer.improved; box.dataset.original = aiOffer.original; }
+      const tagBox = $('input[name="tags"]', node);
+      const took = aiOffer;
+      if (box && took && !took.tagsOnly) {
+        box.value = took.improved;
+        box.dataset.original = took.original;
+      }
+      if (tagBox && took?.tags && !tagBox.value.trim()) tagBox.value = took.tags.join(", ");
       aiOffer = null;
       paintOffer();
-      touched.add("desc");
+      touched.add("desc"); touched.add("tags");
       repaintLive();
-      toast("Description updated — your original is kept underneath");
+      toast(took?.tagsOnly
+        ? "Tags added — edit them however you like"
+        : "Description updated — your original is kept underneath");
       return;
     }
     if (e.target.closest('[data-act="reject"]')) {

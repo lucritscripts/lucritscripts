@@ -147,6 +147,7 @@ export function createAdminPage({ onChanged } = {}) {
       tab === "users" ? await get(`/api/admin/users?limit=100${q}`)
       : tab === "scripts" ? await get(`/api/admin/scripts?limit=100${q}`)
       : tab === "executors" ? await get("/api/admin/executors")
+      : tab === "queue" ? await get("/api/admin/discord/queue")
       : await get("/api/admin/reports");
 
     if (rows.status === 423) return passcodeScreen();
@@ -171,12 +172,13 @@ export function createAdminPage({ onChanged } = {}) {
       </div>
 
       <nav class="tabs" role="tablist">
-        ${[["users", "Accounts"], ["scripts", "Scripts"], ["executors", "Executors"], ["reports", "Reports"]]
+        ${[["users", "Accounts"], ["scripts", "Scripts"], ["executors", "Executors"],
+           ["queue", "Discord queue"], ["reports", "Reports"]]
           .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}"
             data-admintab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
-      ${tab === "reports" || tab === "executors" ? "" : `
+      ${tab === "reports" || tab === "executors" || tab === "queue" ? "" : `
         <div class="library__search" style="margin:14px 0">
           <input class="library__input" type="search" data-adminq
                  placeholder="${tab === "users" ? "Search name or email" : "Search title or author"}"
@@ -188,6 +190,7 @@ export function createAdminPage({ onChanged } = {}) {
         // inside it, so "Nothing here" would be a dead end with no way to add
         // the first one.
         : tab === "executors" ? executorsPanel(rows.data)
+        : tab === "queue" ? queuePanel(rows.data, rows.configured)
         : !rows.data.length ? `<p class="muted">Nothing here.</p>`
         : tab === "users" ? usersTable(rows.data)
         : tab === "scripts" ? scriptsTable(rows.data)
@@ -365,6 +368,59 @@ export function createAdminPage({ onChanged } = {}) {
         : `<p class="muted">No executors listed yet.</p>`}`;
   }
 
+  /**
+   * Discord work that failed and is waiting to be retried.
+   *
+   * This panel exists because "it retries automatically" and "you can see that
+   * it is retrying" are different properties, and only the second one lets
+   * somebody answer "why is my script not in the server". An empty table here
+   * is the good state and says so.
+   */
+  function queuePanel(rows, configured) {
+    const when = (secs) => secs <= 0 ? "due now"
+      : secs < 60 ? `in ${secs}s`
+      : secs < 3600 ? `in ${Math.round(secs / 60)}m`
+      : `in ${Math.round(secs / 3600)}h`;
+
+    if (!configured) {
+      return `<p class="note note--warn">The Discord bot isn't configured, so nothing is
+        being sent and nothing is queued.</p>`;
+    }
+    if (!rows.length) {
+      return `<div class="empty">
+        <p><b>Nothing queued.</b> Every Discord post has gone through.</p>
+      </div>`;
+    }
+
+    return `
+      <p class="note note--warn">
+        ${rows.length} Discord ${rows.length === 1 ? "post" : "posts"} did not go through.
+        The site retries these on its own; this is here so you can see them and push them now.
+      </p>
+      <div class="gate__actions" style="justify-content:flex-start;margin-bottom:14px">
+        <button class="btn btn--primary btn--sm" data-adminact="retryqueue">Retry all now</button>
+      </div>
+      <table class="rows">
+        <thead><tr><th>Script</th><th>What</th><th>Tries</th><th>Next</th><th>Error</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td>
+                <b>${esc(r.title)}</b>${r.gaveUp ? ` <span class="chip chip--warn">gave up</span>` : ""}
+                <br><span class="muted">${r.author ? "@" + esc(r.author) + " · " : ""}${esc(r.scriptId)}</span>
+              </td>
+              <td>${esc(r.kind)}</td>
+              <td>${fmt(r.attempts)}</td>
+              <td class="muted">${esc(when(r.dueIn))}</td>
+              <td class="muted">${esc(r.error || "—")}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+      <p class="muted">A failed Discord post never fails the publish — the script is on the
+         site either way. These retry with a growing delay, and stop retrying on their own
+         after several attempts so a permanently broken one doesn't hammer Discord forever.</p>`;
+  }
+
   function reportsTable(rows) {
     return `
       <table class="rows">
@@ -467,6 +523,19 @@ export function createAdminPage({ onChanged } = {}) {
   });
 
   sheet.body.addEventListener("click", async (e) => {
+    if (e.target.closest('[data-adminact="retryqueue"]')) {
+      const btn = e.target.closest("[data-adminact]");
+      btn.disabled = true;
+      btn.textContent = "Retrying…";
+      const res = await send("/api/admin/discord/queue", "POST");
+      if (res.status === 423) { toast("The passcode timed out", "warn"); return paint(); }
+      toast(res.ok
+        ? `Ran ${res.data.ran}, ${res.data.succeeded} went through, ${res.data.remaining} left`
+        : (res.error || "That didn't work"), res.ok ? "ok" : "warn");
+      panel();
+      return;
+    }
+
     if (e.target.closest('[data-act="lock"]')) {
       await send("/api/admin/lock");
       toast("Locked");
