@@ -886,7 +886,7 @@ async function handleAI(request, env) {
  */
 const SCRIPT_COLUMNS = `s.id, s.author_id, s.title, s.game, s.category, s.descr,
   s.tags, s.keyless, s.thumbnail, s.views, s.copies, s.removed, s.created_at,
-  s.verified, s.lua, s.link <> '' AS has_link,
+  s.verified, s.lua, s.status, s.link <> '' AS has_link,
   u.username AS author`;
 
 /**
@@ -971,6 +971,14 @@ function publicScript(row, extra = {}) {
     // Whether there is a link behind the unlock — never the link itself.
     hasLink: Boolean(row.has_link),
 
+    // The checker's verdict, carried so the author and the admin panel can see
+    // it. `flagged` rather than `status` in the public shape because that is
+    // all it means to a reader: something wants a second look. It does NOT
+    // hide the script and must never be rendered as a warning to visitors —
+    // the checker looks for spam, not for danger, and saying otherwise would
+    // put a scare label on honest uploads it happened to be unsure about.
+    flagged: row.status ? row.status !== "approved" : false,
+
     author: row.author || "",
     authorId: row.author_id,
     views: row.views || 0,
@@ -1019,12 +1027,23 @@ async function handleScriptList(request, env) {
   const author = String(url.searchParams.get("author") || "").slice(0, 40);
   const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 200));
 
-  // A suspended account's scripts come off the site with them. Leaving them up
-  // would make a ban cosmetic — the work stays, and keeps earning.
-  // `status` keeps held submissions out of the library while a human decides.
-  // Rows written before the review queue existed default to 'approved', so
-  // nothing that was already published disappears.
-  const where = ["s.removed = 0", "u.banned = 0", "s.status = 'approved'"];
+  // A published script stays on the site until it is deleted or its author is
+  // suspended. Those are the only two things that take one down.
+  //
+  // `s.status = 'approved'` used to be in this list, and it was a bug in the
+  // shape of a feature. The submission checker's middle verdict is "review" —
+  // not confident, hold for a human — and holding meant HIDING: the script was
+  // saved, the publisher was told it was live, and it appeared on their own
+  // profile page but in nobody's library. There was no queue UI, no count and
+  // no notification, so a held script stayed invisible forever with nobody
+  // able to see that it existed. Reported as "I published from two accounts
+  // and only see one", which is exactly what it looked like from outside.
+  //
+  // So review is now a FLAG on a live script rather than a gate in front of
+  // it. `status` is carried through to the listing so the admin panel can act
+  // on it, and obvious junk is still refused outright at submit time — that
+  // path never wrote a row in the first place.
+  const where = ["s.removed = 0", "u.banned = 0"];
   const binds = [];
   if (category) { where.push("s.category = ?"); binds.push(category); }
   if (author) { where.push("s.author_id = ?"); binds.push(author); }
@@ -1079,12 +1098,12 @@ async function handleScriptGet(request, env, { id }) {
 
   if (!row) return bad(404, "That script doesn't exist.");
 
-  // A held script is reachable by its author and by nobody else — they should
-  // be able to see what they submitted while it waits, without it being live.
-  if (row.status && row.status !== "approved") {
-    const me = await currentUser(request, env);
-    if (!me || me.id !== row.author_id) return bad(404, "That script doesn't exist.");
-  }
+  // No status check here, and that omission is deliberate.
+  //
+  // This used to 404 a flagged script for everyone except its author, which
+  // was the same hiding the library did — and worse, because it made a shared
+  // link dead. Deleted and suspended are the only two things that take a
+  // script off the site; a flag is a note for staff, not a visibility rule.
 
   const user = await currentUser(request, env);
   const subject = await grantSubject(request, env, user);
@@ -1312,13 +1331,22 @@ async function handleScriptPublish(request, env, _params, ctx) {
     tags: JSON.stringify(tags), keyless: body.keyless !== false,
     views: 0, copies: 0, likes: 0,
   };
-  const after = verdict.status === "approved"
-    ? Promise.all([
-        announceScript(env, shaped, user.username),
-        announceScriptBot(env, shaped, user.username),
-      ])
-    : modLog(env, "Held for review",
-        `**${title}** by @${user.username} — ${verdict.note}`, 0xf6c343);
+  // Announced either way, because either way it is live. The old code skipped
+  // the announcement for held submissions, which was right when holding meant
+  // hiding — a post pointing at a script nobody could see would 404. Now that
+  // a flagged script is on the site like any other, not announcing it would
+  // leave the Discord feed disagreeing with the library.
+  //
+  // A flag still reaches the mod log, so a person can go and look.
+  const after = Promise.all([
+    announceScript(env, shaped, user.username),
+    announceScriptBot(env, shaped, user.username),
+    verdict.status === "approved"
+      ? Promise.resolve()
+      : modLog(env, "Flagged for review",
+          `**${title}** by @${user.username} — ${verdict.note}\n`
+          + `It is live; this is a note to look, not a takedown.`, 0xf6c343),
+  ]);
 
   if (ctx?.waitUntil) ctx.waitUntil(after); else after.catch(() => {});
 
@@ -2122,7 +2150,7 @@ async function handleAdminScripts(request, env) {
   // taken down, and putting it back, is most of the point of the panel.
   const { results } = await env.DB.prepare(
     `SELECT s.id, s.title, s.game, s.views, s.copies, s.removed, s.created_at,
-            s.verified, s.lua, s.status,
+            s.verified, s.lua, s.status, s.check_note,
             u.username AS author, u.id AS author_id,
             (SELECT COUNT(*) FROM reports r WHERE r.script_id = s.id) AS reports
        FROM scripts s JOIN users u ON u.id = s.author_id
@@ -2141,6 +2169,9 @@ async function handleAdminScripts(request, env) {
       verified: Boolean(r.verified),
       lua: Boolean(r.lua),
       state: r.status,
+      // Why the checker was unsure. Without this the panel can say a script is
+      // flagged but not what for, which is not enough to decide anything on.
+      note: r.check_note || "",
       views: Number(r.views) || 0,
       copies: Number(r.copies) || 0,
       reports: Number(r.reports) || 0,
@@ -2151,12 +2182,21 @@ async function handleAdminScripts(request, env) {
 }
 
 /**
- * Take a script down, put it back, or resolve a held submission.
+ * Take a script down, put it back, or clear a review flag.
  *
- * `status` is the review queue's half of this: approving one publishes it AND
- * announces it, which is the whole point of holding rather than rejecting —
- * an honest upload the checker was unsure about reaches the server the moment
- * a human says yes, not never.
+ * `status` no longer decides visibility — a flagged script is live like any
+ * other, and only `removed` (or the author being suspended) takes one off the
+ * site. So clearing a flag is a bookkeeping change: it stops the panel asking
+ * somebody to look at it again.
+ *
+ * The announce-on-approve branch below is kept for one case only: a script
+ * that was flagged AND taken down, then restored. That one genuinely has never
+ * been announced, because it was removed before anyone saw it.
+ *
+ * (Historical note, because the old comment here said the opposite: approving
+ * used to be what published a script, back when a flag hid it. Nobody ever
+ * approved anything, because no UI could see the queue — so honest uploads the
+ * checker was unsure about stayed invisible indefinitely.)
  */
 async function handleAdminScriptState(request, env, { id }, ctx) {
   const admin = await requireAdmin(request, env);
@@ -2169,7 +2209,10 @@ async function handleAdminScriptState(request, env, { id }, ctx) {
   if (!row) return bad(404, "That script doesn't exist.");
 
   const body = await request.json().catch(() => ({}));
-  const wasHeld = row.status && row.status !== "approved";
+  // "Never announced" is the real condition, and since a flag no longer hides
+  // anything, the only way to have been flagged AND unannounced is to have
+  // been removed at the same time.
+  const wasHeld = Boolean(row.removed) && row.status && row.status !== "approved";
 
   const status = ["approved", "review", "rejected"].includes(body.status)
     ? body.status : row.status || "approved";
@@ -3466,13 +3509,17 @@ async function postLeaderboards(env) {
     return results || [];
   };
 
+  // Deleted and suspended are the only two things that take a script off these
+  // boards, matching the library exactly. A flagged-but-live script counts —
+  // it is on the site earning views like any other, and excluding it here
+  // would make the numbers disagree with the page they came from.
   const creators = await rows(
     `SELECT u.username AS name,
             COUNT(DISTINCT s.id) AS scripts,
             COALESCE(SUM(s.views), 0) AS views,
             COALESCE(SUM(s.copies), 0) AS copies
        FROM users u JOIN scripts s ON s.author_id = u.id
-      WHERE s.removed = 0 AND s.status = 'approved' AND u.banned = 0
+      WHERE s.removed = 0 AND u.banned = 0
       GROUP BY u.id
       ORDER BY (COALESCE(SUM(s.views),0) + COALESCE(SUM(s.copies),0) * 3) DESC
       LIMIT ?`);
@@ -3481,7 +3528,7 @@ async function postLeaderboards(env) {
     `SELECT s.title AS title, u.username AS author, s.views AS views, s.copies AS copies,
             (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
        FROM scripts s JOIN users u ON u.id = s.author_id
-      WHERE s.removed = 0 AND s.status = 'approved' AND u.banned = 0
+      WHERE s.removed = 0 AND u.banned = 0
       ORDER BY (s.views + s.copies * 3) DESC LIMIT ?`);
 
   // Trending is unlocks in the last 48 hours, not all-time. Without the window
@@ -3492,7 +3539,7 @@ async function postLeaderboards(env) {
        FROM unlock_events e
        JOIN scripts s ON s.id = e.script_id
        JOIN users u ON u.id = s.author_id
-      WHERE e.at > ? AND s.removed = 0 AND s.status = 'approved' AND u.banned = 0
+      WHERE e.at > ? AND s.removed = 0 AND u.banned = 0
       GROUP BY e.script_id ORDER BY recent DESC LIMIT 10`
   ).bind(since).all().catch(() => ({ results: [] }));
 
