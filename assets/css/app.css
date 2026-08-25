@@ -2193,3 +2193,5 @@ html.is-gated { overflow: hidden; }
   border: 1px solid color-mix(in srgb, var(--gold) 28%, transparent);
   background: color-mix(in srgb, var(--gold) 8%, transparent);
 }
+
+.aioffer__tags { display: grid; gap: 6px; }
