@@ -2464,3 +2464,31 @@ img, video { max-width: 100%; }
 
 /* Cards: the thumbnail always fills its frame, whatever its shape. */
 .card__thumb { object-fit: cover; object-position: center; background: #070a12; }
+
+/* ---- even it out ---- */
+
+/* The reading-progress bar used to be a 560px strip centred on the window,
+   so it never lined up with the links above it and looked crooked whenever
+   the nav wasn't centred. It now runs the full width of the bar's bottom
+   edge, and the chapter name only shows when the links are folded away
+   (otherwise the highlighted link already says where you are). */
+.progress {
+  left: 0; right: 0; width: auto; transform: none;
+  height: 2px; border-radius: 0; bottom: -1px;
+}
+.progress__fill { border-radius: 0; }
+.nav:not(.nav--compact) .progress__label { display: none; }
+.nav--compact .progress__label { top: auto; bottom: 6px; }
+
+/* Every box in the publish form is the same height, so a row of fields reads
+   as one even bar instead of a select that sits 6px shorter than its
+   neighbours. */
+.publish__form input:not([type="radio"]):not([type="checkbox"]):not([type="file"]),
+.publish__form select,
+.publish__form .gpick__field {
+  height: 50px; min-height: 50px; box-sizing: border-box;
+}
+.publish__form .gpick__field .gpick__input { height: 100%; min-height: 0; }
+.publish__form select { padding-top: 0; padding-bottom: 0; line-height: 50px; }
+.publish__form .gpick__field input.gpick__input { border: 0; background: transparent; box-shadow: none; padding-top: 0; padding-bottom: 0; }
+.pubform__grid { row-gap: 22px; }
