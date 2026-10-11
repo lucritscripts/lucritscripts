@@ -2195,3 +2195,104 @@ html.is-gated { overflow: hidden; }
 }
 
 .aioffer__tags { display: grid; gap: 6px; }
+
+/* =====================================================================
+   The AI offer that appears when you stop typing
+   ===================================================================== */
+
+/* Deliberately quiet. This arrives uninvited, so it reads as an aside next to
+   the description rather than a dialog in front of it — no backdrop, no shadow
+   pretending to float, and it never takes focus. */
+.aiprompt {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 11px 13px; border-radius: var(--r);
+  border: 1px solid color-mix(in srgb, var(--blue) 32%, transparent);
+  background: color-mix(in srgb, var(--blue) 9%, rgba(6, 10, 19, 0.92));
+  animation: aiprompt-in .2s var(--ease) both;
+}
+@media (prefers-reduced-motion: reduce) { .aiprompt { animation: none; } }
+
+@keyframes aiprompt-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
+}
+
+.aiprompt__spark { color: var(--blue); font-size: 1rem; line-height: 1; }
+.aiprompt__body { display: grid; gap: 2px; flex: 1; min-width: 180px; }
+.aiprompt__body b { font-size: 0.86rem; }
+.aiprompt__body span { font-size: 0.76rem; line-height: 1.45; color: var(--ink-2); }
+.aiprompt__acts { display: flex; gap: 7px; flex-shrink: 0; }
+
+/* =====================================================================
+   Smaller script cards
+   ===================================================================== */
+
+/* The cards were sized for a sparse library and looked enormous once real
+   ones arrived — one row held two, and most of each card was padding and a
+   description nobody reads at that length. These overrides sit at the end of
+   the file so the originals stay readable above rather than being edited in
+   half a dozen places. */
+
+.results__grid { gap: 11px; grid-template-columns: repeat(auto-fill, minmax(208px, 1fr)); }
+.featured__grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.grid { gap: 10px; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+
+.card__body { padding: 12px 13px 12px; gap: 7px; }
+.card__title { font-size: 0.95rem; letter-spacing: -0.02em; }
+.card--lg .card__title { font-size: 1.12rem; }
+.card__game { font-size: 0.76rem; }
+
+/* Two lines, then stop. The full text is on the script's own page, and a card
+   is an index entry — its job is to be scanned, not read.
+
+   `flex: none` is load-bearing. The original rule gives this `flex: 1` so the
+   description eats the leftover space and pins the meta row to the bottom; a
+   -webkit-box that is being stretched by its flex parent renders every line
+   and ignores the clamp entirely. Clamping and stretching are the same axis,
+   so only one of them can win — and `max-height` pins the result so nothing
+   downstream can quietly re-stretch it. */
+.card__desc {
+  font-size: 0.79rem; line-height: 1.45;
+  flex: none;
+  display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+  max-height: calc(0.79rem * 1.45 * 2);
+}
+
+/* The description no longer grows, so something else has to hold the bottom
+   row down or short cards collapse to ragged heights in the same row. */
+.card__body > .card__actions { margin-top: auto; }
+
+/* THE GET SCRIPT BUTTON WAS BEING CLIPPED OFF EVERY CARD WITH A THUMBNAIL.
+ *
+ * `.card__body` was `height: 100%` — the full height of the card. That is
+ * only true when the body is the card's only child. A thumbnail sits ABOVE
+ * the body, so the body ends up thumbnail-height taller than the space left
+ * for it, and `.card { overflow: hidden }` cuts off whatever is at the
+ * bottom: the actions row, i.e. the Get Script button.
+ *
+ * It went unnoticed because the live library's cards had no thumbnails. The
+ * publishing upgrade made thumbnails REQUIRED — so every card published from
+ * then on would have shipped without a way to get the script. Caught by
+ * rendering six thumbnailed cards and looking at them.
+ *
+ * The card is a flex column now and the body takes whatever is left, which is
+ * correct with or without an image above it. */
+.card { display: flex; flex-direction: column; }
+.card__body { height: auto; flex: 1 1 auto; min-height: 0; }
+
+.card__meta { font-size: 0.72rem; gap: 7px; }
+.card__thumb { aspect-ratio: 2 / 1; }
+.card__actions .btn { padding: 6px 12px; font-size: 0.78rem; }
+.card__heart { width: 28px; height: 28px; }
+.card .chip { font-size: 0.6rem; padding: 2px 7px; }
+.card .badge { font-size: 0.59rem; padding: 2px 6px; }
+.card__tags { display: none; }
+
+/* Phones get one column either way, so let them keep a slightly roomier card
+   rather than squeezing an already-narrow one. */
+@media (max-width: 560px) {
+  .results__grid, .grid { grid-template-columns: 1fr; }
+  .card__body { padding: 14px 15px; }
+  .card__desc { -webkit-line-clamp: 3; line-clamp: 3; }
+}
