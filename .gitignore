@@ -8,3 +8,6 @@
 # kept locally for reference (functions/unlocks.js is where the LootLabs flow
 # was first worked out) but have no business in the deployed tree.
 functions/node_modules/
+node_modules/
+package-lock.json
+*.tmp.*
