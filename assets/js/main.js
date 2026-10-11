@@ -40,11 +40,16 @@ function detect() {
   if (cores <= 4 || mem <= 3) quality = quality === "high" ? "medium" : "low";
   if ((coarse || narrow) && (cores <= 4 || mem <= 3)) quality = "low";
 
-  return { reducedMotion, coarse, narrow, quality };
+  // Phones and tablets get the lightweight path: low-res 3D at 30fps and no
+  // backdrop blur (see html[data-mobile] in app.css).
+  const mobile = coarse || narrow;
+
+  return { reducedMotion, coarse, narrow, quality, mobile };
 }
 
 const caps = detect();
 document.documentElement.dataset.quality = caps.quality;
+if (caps.mobile) document.documentElement.dataset.mobile = "";
 if (caps.reducedMotion) document.documentElement.classList.add("reduced-motion");
 
 /* ------------------------------------------------------------- 3D world */
@@ -54,7 +59,9 @@ let world = null;
 
 // The canvas is decorative — everything readable lives in the DOM.
 try {
-  world = new World(canvas, { quality: caps.quality, reducedMotion: caps.reducedMotion });
+  world = new World(canvas, {
+    quality: caps.quality, reducedMotion: caps.reducedMotion, mobile: caps.mobile,
+  });
   if (!world.init()) world = null;
 } catch (err) {
   console.warn("[lucrit] 3D unavailable:", err);
@@ -501,9 +508,55 @@ let hidden = false;
 
 document.addEventListener("visibilitychange", () => { hidden = document.hidden; });
 
+// Phones draw the backdrop on a budget and step it down if the device still
+// can't keep up. Each rung is cheaper than the last; the final rung freezes
+// the world on its current frame so scrolling stays smooth on the weakest
+// phones. Desktop has a single uncapped rung.
+const RUNGS = caps.mobile
+  ? [{ scale: 0.7, fps: 30 }, { scale: 0.5, fps: 24 }, { scale: 0.5, fps: 0 }]
+  : [{ scale: 0, fps: 0 }];
+let rung = 0;
+const root = document.documentElement;
+root.dataset.fx = "0";
+let drawn = false;
+
+// Frame-time watchdog (phones only): how far apart renders actually land.
+const WARMUP_MS = 2500;
+const SAMPLE = 45;
+let gaps = [];
+let lastDraw = 0;
+const startedAt = performance.now();
+
+function stepDown() {
+  if (rung >= RUNGS.length - 1) return;
+  rung += 1;
+  root.dataset.fx = String(rung);
+  // Resizing clears the canvas; redraw at once so the swap never flashes.
+  if (world && RUNGS[rung].scale) { world.setScale(RUNGS[rung].scale); world.render(0); }
+  gaps = [];
+}
+
+function watch(now) {
+  if (!caps.mobile || rung >= RUNGS.length - 1) return;
+  const gap = now - lastDraw;
+  lastDraw = now;
+  // Long gaps are pauses (sheet open, tab hidden, first frame), not slowness.
+  if (gap > 400 || now - startedAt < WARMUP_MS) return;
+  gaps.push(gap);
+  if (gaps.length < SAMPLE) return;
+  const avg = gaps.reduce((x, y) => x + y, 0) / gaps.length;
+  gaps = [];
+  // Overloaded when renders arrive at well under the rung's target rate.
+  if (avg > (1000 / RUNGS[rung].fps) * 1.5) stepDown();
+}
+
 function frame(now) {
   requestAnimationFrame(frame);
   if (hidden) { last = now; return; }
+
+  const { fps } = RUNGS[rung];
+  const frozen = caps.mobile && fps === 0;
+  if (fps && now - last < 1000 / fps - 2) return;
 
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
@@ -512,13 +565,27 @@ function frame(now) {
   const k = caps.reducedMotion ? 1 : 1 - Math.pow(1 - 0.09, dt * 60);
   smoothed += (progress - smoothed) * k;
 
-  if (world) {
-    world.resize();
-    // Remap real scroll position onto the camera path's canonical bands so the
-    // 3D world and the DOM chapters stay locked together at any page height.
-    world.setProgress(choreography.toCameraProgress(smoothed));
-    world.render(dt);
+  if (!world) return;
+
+  // Frozen: keep the last frame, and only redraw if the canvas was resized
+  // (rotation), since resizing clears it.
+  if (frozen) {
+    if (world.resize()) world.render(0);
+    return;
   }
+
+  // A full-screen sheet (script page, dashboard, publish form) covers the
+  // canvas completely, so there is nothing to draw until it closes.
+  // (The first frame always draws, so a sheet opened at startup — the bot
+  // check — still has the world behind its scrim.)
+  if (drawn && root.classList.contains("is-locked")) return;
+  drawn = true;
+  world.resize();
+  // Remap real scroll position onto the camera path's canonical bands so the
+  // 3D world and the DOM chapters stay locked together at any page height.
+  world.setProgress(choreography.toCameraProgress(smoothed));
+  world.render(dt);
+  watch(now);
 }
 
 requestAnimationFrame(frame);

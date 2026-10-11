@@ -751,6 +751,7 @@ export function createChoreography({ chrome, onCategoryIndex }) {
   const worlds = $$(".world");
   const railItems = $$(".worlds__rail span");
   let lastWorld = -1;
+  let worldsShown = true;   // true at start so the first out-of-band update clears them
 
   /**
    * Scroll progress is scrollY / (docHeight - viewportHeight), but a section
@@ -852,13 +853,22 @@ export function createChoreography({ chrome, onCategoryIndex }) {
       const fadeOut = isLast ? 1 : 1 - clamp01((local - 0.78) / 0.22);
       const vis = Math.min(fadeIn, fadeOut);
 
-      s.stage.style.opacity = vis.toFixed(3);
-      s.stage.style.transform =
+      // Only touch the DOM when something changed: this runs on every scroll
+      // event, and on phones redundant style writes and the scrollTop read
+      // below (which forces a layout) added up to dropped frames.
+      const opacity = vis.toFixed(3);
+      const transform =
         `translate3d(0, ${((1 - fadeIn) * 30 - (1 - fadeOut) * 24).toFixed(2)}px, 0)`;
-      s.stage.style.pointerEvents = vis > 0.35 ? "auto" : "none";
-      s.node.classList.toggle("is-live", inView);
-
-      if (!inView && s.stage.scrollTop !== 0) s.stage.scrollTop = 0;
+      if (s._opacity !== opacity) { s._opacity = opacity; s.stage.style.opacity = opacity; }
+      if (s._transform !== transform) { s._transform = transform; s.stage.style.transform = transform; }
+      const pe = vis > 0.35 ? "auto" : "none";
+      if (s._pe !== pe) { s._pe = pe; s.stage.style.pointerEvents = pe; }
+      if (s._live !== inView) {
+        // Leaving view: rewind any inner scroll so it starts at the top next time.
+        if (!inView && s._live !== undefined) s.stage.scrollTop = 0;
+        s._live = inView;
+        s.node.classList.toggle("is-live", inView);
+      }
     });
 
     if (cue) cue.style.opacity = String(clamp01(1 - progress / 0.015));
@@ -875,8 +885,12 @@ export function createChoreography({ chrome, onCategoryIndex }) {
       });
       railItems.forEach((r, i) => r.classList.toggle("is-on", i === idx));
       if (idx !== lastWorld) { lastWorld = idx; onCategoryIndex?.(idx); }
+      worldsShown = true;
     } else {
-      worlds.forEach((w) => { w.style.opacity = "0"; w.classList.remove("is-on"); });
+      if (worldsShown) {
+        worlds.forEach((w) => { w.style.opacity = "0"; w.classList.remove("is-on"); });
+        worldsShown = false;
+      }
     }
 
     chrome.update(progress, active);
