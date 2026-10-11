@@ -1206,7 +1206,13 @@ export class World {
     this.canvas = canvas;
     this.quality = opts.quality || "high";
     this.motion = opts.reducedMotion ? 0 : 1;
-    this.dpr = Math.min(window.devicePixelRatio || 1, this.quality === "high" ? 2 : 1.35);
+    // Phones: the world is a soft, blurred backdrop behind the UI, so it is
+    // rendered well below CSS resolution and upscaled by the compositor. Fill
+    // rate is what kills mobile GPUs; at 0.7x the scene costs ~1/4 of 1.35x.
+    this.mobile = !!opts.mobile;
+    this.dpr = this.mobile
+      ? 0.7
+      : Math.min(window.devicePixelRatio || 1, this.quality === "high" ? 2 : 1.35);
 
     this.progress = 0;
     this.pointer = { x: 0, y: 0 };
@@ -1339,19 +1345,28 @@ export class World {
   }
 
   resize() {
-    if (!this.ok && !this.gl) return;
+    if (!this.ok && !this.gl) return false;
     const gl = this.gl;
     const w = Math.max(2, Math.floor(this.canvas.clientWidth * this.dpr));
     const h = Math.max(2, Math.floor(this.canvas.clientHeight * this.dpr));
-    if (this.canvas.width === w && this.canvas.height === h) return;
+    if (this.canvas.width === w && this.canvas.height === h) return false;
 
     this.canvas.width = w;
     this.canvas.height = h;
 
     resizeTarget(gl, this.sceneRT, w, h);
-    const dw = Math.max(2, w >> 2), dh = Math.max(2, h >> 2);
+    // At mobile's already-small size, a /4 target would be a few dozen pixels.
+    const shift = this.mobile ? 1 : 2;
+    const dw = Math.max(2, w >> shift), dh = Math.max(2, h >> shift);
     resizeTarget(gl, this.halfRT, dw, dh);
     resizeTarget(gl, this.blurRT, dw, dh);
+    return true;
+  }
+
+  /** Internal resolution as a multiple of CSS pixels (used to step phones down). */
+  setScale(scale) {
+    this.dpr = scale;
+    this.resize();
   }
 
   setProgress(p) { this.progress = clamp(p, 0, 1); }
@@ -1467,8 +1482,10 @@ export class World {
 
     blurPass(this.halfRT, this.blurRT, 1, 0);
     blurPass(this.blurRT, this.halfRT, 0, 1);
-    blurPass(this.halfRT, this.blurRT, 2, 0);
-    blurPass(this.blurRT, this.halfRT, 0, 2);
+    if (!this.mobile) {
+      blurPass(this.halfRT, this.blurRT, 2, 0);
+      blurPass(this.blurRT, this.halfRT, 0, 2);
+    }
 
     /* ---------- composite ---------- */
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
