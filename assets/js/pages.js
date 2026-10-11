@@ -1280,7 +1280,16 @@ export function createScriptPage({ onRequireAuth }) {
 
   /** Comes back from the sponsor round-trip and asks the server to confirm it. */
   async function finishUnlock(clickId, hash) {
-    const res = await claimUnlock(current.id, clickId, hash);
+    let res = await claimUnlock(current.id, clickId, hash);
+    // LootLabs' confirmation can trail the visitor back by a few seconds. The
+    // server waits a little itself; past that it answers `pending`, and the
+    // page keeps asking for up to a minute instead of giving up on a
+    // finished, paid unlock.
+    for (let tries = 0; !res.ok && res.pending && tries < 12; tries++) {
+      toast("Confirming your unlock with LootLabs…", "ok");
+      await new Promise((r) => setTimeout(r, 4000));
+      res = await claimUnlock(current.id, clickId, hash);
+    }
     if (!res.ok) { toast(res.error || "That unlock couldn't be verified.", "warn"); return false; }
     current.unlocked = true;
     // Only remember it locally when the server did NOT verify — otherwise the
