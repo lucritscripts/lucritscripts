@@ -1776,10 +1776,16 @@ const clampInt = (value, min, max, fallback) => {
   return Math.min(max, Math.max(min, n));
 };
 
+// Defaults, Oct 2026: LootLabs' own "Maximum Profit" tier (4), the most tasks
+// it allows per session (5 — LootLabs reports each completed task, so every
+// extra one is extra revenue even from visitors who stop early), and the
+// Classic theme (1). LootLabs has no Roblox theme — Classic is the plain one;
+// the old default was 3, the Minecraft skin. Override any of these with the
+// LOOT_TIER / LOOT_TASKS / LOOT_THEME variables in Cloudflare.
 const lootSettings = (env) => ({
   tier: clampInt(env.LOOT_TIER, 1, 4, 4),
-  tasks: clampInt(env.LOOT_TASKS, 1, 5, 3),
-  theme: clampInt(env.LOOT_THEME, 1, 5, 3),
+  tasks: clampInt(env.LOOT_TASKS, 1, 5, 5),
+  theme: clampInt(env.LOOT_THEME, 1, 5, 1),
 });
 
 /**
@@ -1996,8 +2002,19 @@ async function handleUnlockPostback(request, env) {
   const clickId = String(url.searchParams.get("click_id") || url.searchParams.get("click") || "");
   if (!clickId) return bad(400, "missing click_id");
 
+  // LootLabs calls this once PER COMPLETED TASK, each with its own
+  // unique_id. `done` counts them (a retried postback with the same
+  // unique_id is ignored), so the dashboard can see how far people get.
+  const uniq = String(url.searchParams.get("unique_id") || "").slice(0, 120);
+  if (uniq) {
+    const key = "lootpb:" + uniq;
+    const seen = await env.DB.prepare(`SELECT 1 FROM cache WHERE k = ?`).bind(key).first().catch(() => null);
+    if (seen) return new Response("ok", { status: 200, headers: { "Cache-Control": "no-store" } });
+    await env.DB.prepare(`INSERT OR IGNORE INTO cache (k, v, expires) VALUES (?, ?, ?)`)
+      .bind(key, clickId.slice(0, 64), nowSec() + 86400 * 3).run().catch(() => {});
+  }
   await env.DB.prepare(
-    `UPDATE unlock_clicks SET done = 1 WHERE click_id = ? AND expires > ?`
+    `UPDATE unlock_clicks SET done = done + 1 WHERE click_id = ? AND expires > ?`
   ).bind(clickId, nowSec()).run();
 
   // Providers expect a bare 200, not our JSON envelope.
@@ -2043,18 +2060,33 @@ async function handleUnlockClaim(request, env) {
   // ── LootLabs ───────────────────────────────────────────────────────────
   // Proof is a click id their postback already marked done.
   } else if (unlockConfigured(env)) {
-    const click = await env.DB.prepare(
+    const readClick = () => env.DB.prepare(
       `SELECT script_id, subject, provider, done FROM unlock_clicks
         WHERE click_id = ? AND expires > ?`
     ).bind(String(clickId || ""), now).first();
+    let click = await readClick();
 
-    // Every one of these has to hold. A click id for someone else's session, or
-    // for a different script, or one the provider never confirmed, is not proof
-    // of anything.
-    if (!click) return bad(400, "That unlock couldn't be verified.");
-    if (!click.done) return bad(400, "The sponsor step wasn't completed.");
+    // THE BUG THAT LOST REAL UNLOCKS: LootLabs sends the visitor back the
+    // moment the last task finishes, and its postback (the proof) often lands
+    // a few seconds AFTER that. The claim ran first, found the click not yet
+    // confirmed, and refused — then the postback arrived and marked it done
+    // with nobody left to claim it. (That exact row was in the database: a
+    // finished, paid unlock that never opened.) So wait a few seconds here,
+    // and if it still hasn't arrived, tell the page to keep asking.
+    for (let i = 0; click && !click.done && i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      click = await readClick();
+    }
+
+    // A click id for a different script, or one the provider never confirmed,
+    // is not proof of anything. (It is NOT tied to the exact connection any
+    // more: signed-out visitors were keyed by IP, and phones and IPv6 change
+    // address mid-trip — which refused honest unlocks. The click id is a
+    // 128-bit secret and single-use, which is what actually stops sharing.)
+    if (!click) return bad(400, "That unlock couldn't be verified. Start it again from the script page.");
     if (click.script_id !== script.id) return bad(400, "That unlock was for a different script.");
-    if (!sameSecret(click.subject, subject)) return bad(400, "That unlock belongs to someone else.");
+    if (!click.done)
+      return bad(409, "Waiting for LootLabs to confirm the tasks…", { pending: true });
 
     // Single use, so a completed click id cannot be replayed or shared around.
     await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(String(clickId)).run();
@@ -5161,6 +5193,7 @@ const ROUTES = {
       unlockLive: unlockConfigured(env),
       unlockProviders: unlockProviders(env),
       unlockMinutes: grantMinutes(env),
+      lootlabs: env.LOOTLABS_TOKEN ? lootSettings(env) : null,
       discord: {
         signIn: discordSignIn(env),
         requireMember: discordGateOn(env),
