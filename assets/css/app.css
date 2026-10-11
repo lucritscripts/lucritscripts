@@ -2296,3 +2296,26 @@ html.is-gated { overflow: hidden; }
   .card__body { padding: 14px 15px; }
   .card__desc { -webkit-line-clamp: 3; line-clamp: 3; }
 }
+
+/* =====================================================================
+   Phones & tablets — performance path
+   html[data-mobile] is set by main.js for touch or narrow screens.
+   backdrop-filter re-blurs everything behind an element on every frame the
+   3D backdrop repaints; on phones that alone costs most of the frame budget.
+   Swap the frosted glass for near-opaque fills that read the same.
+   ===================================================================== */
+html[data-mobile] *,
+html[data-mobile] *::before,
+html[data-mobile] *::after {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+html[data-mobile] .nav.is-scrolled { background: rgba(5, 6, 10, 0.94); }
+html[data-mobile] .person { background: rgba(12, 18, 32, 0.92); }
+html[data-mobile] .community__cols > div { background: rgba(8, 12, 22, 0.92); }
+html[data-mobile] .sheet__scrim { background: rgba(2, 4, 8, 0.94); animation: none; }
+html[data-mobile] .card__heart:not(.is-on) { background: rgba(6, 9, 16, 0.9); }
+/* The address bar sliding away on scroll changes the viewport height; with
+   inset:0 the canvas resized — reallocating every render target — mid-flick.
+   Size it to the large viewport once so it never changes while scrolling. */
+html[data-mobile] #scene { bottom: auto; height: 100vh; height: 100lvh; }
