@@ -885,7 +885,11 @@ async function handleAI(request, env) {
  * so adding a listing endpoint later cannot leak the code by accident.
  */
 const SCRIPT_COLUMNS = `s.id, s.author_id, s.title, s.game, s.category, s.descr,
-  s.tags, s.keyless, s.thumbnail, s.views, s.copies, s.removed, s.created_at,
+  s.tags, s.keyless,
+  CASE WHEN s.thumbnail LIKE 'data:%'
+       THEN 'thumb:' || length(s.thumbnail) || ':' || substr(s.thumbnail, -40)
+       ELSE s.thumbnail END AS thumbnail,
+  s.views, s.copies, s.removed, s.created_at,
   s.verified, s.lua, s.status, s.link <> '' AS has_link,
   u.username AS author`;
 
@@ -937,6 +941,80 @@ const GRANT_MINUTES_DEFAULT = 5;
 const grantMinutes = (env) => clampInt(env.UNLOCK_MINUTES, 1, 10080, GRANT_MINUTES_DEFAULT);
 
 /** The row shape the site's cards and script page already expect. */
+/* ─────────────────────────────────────────────────────────── thumbnails ── */
+
+/**
+ * Uploaded thumbnails are stored as data: URLs, and they used to ride along in
+ * every listing — a library of twenty scripts was twenty images of base64 in
+ * one JSON response, re-downloaded on every visit and never cached. The
+ * listing now carries a short URL instead (`/api/thumbs/<id>?v=…`), and the
+ * image itself comes from handleThumb as a real, cacheable image file.
+ *
+ * SCRIPT_COLUMNS asks the database for a tiny marker rather than the image:
+ * `thumb:<length>:<last 40 chars>`. That is enough to build a cache-busting
+ * version without hauling 300 KB per row into the Worker.
+ */
+const THUMB_DATA_RE = /^data:image\/(png|jpe?g|webp|gif|avif);base64,[A-Za-z0-9+/=]+$/;
+const THUMB_MAX_CHARS = 420000;   // ≈ 310 KB of image; the form compresses to fit
+
+function cleanThumbnail(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (THUMB_DATA_RE.test(s)) return s.length < THUMB_MAX_CHARS ? s : "";
+  return safeSocial(s, ["roblox.com", "rbxcdn.com"]);
+}
+
+function thumbVersion(marker) {
+  let h = 2166136261;
+  for (let i = 0; i < marker.length; i++) { h ^= marker.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
+/** What a page should put in <img src>. Relative for our own pages. */
+function thumbPublic(row) {
+  const t = String(row?.thumbnail || "");
+  if (t.startsWith("thumb:") || t.startsWith("data:")) {
+    const marker = t.startsWith("data:") ? `thumb:${t.length}:${t.slice(-40)}` : t;
+    return `/api/thumbs/${encodeURIComponent(row.id)}?v=${thumbVersion(marker)}`;
+  }
+  return t;
+}
+
+/** An absolute https image for third parties (Discord, LootLabs), or null. */
+function thumbAbsolute(env, script) {
+  const t = String(script?.thumbnail || "");
+  if (/^https:\/\//i.test(t)) return t.length <= 500 ? t : null;
+  if (t.startsWith("data:") || t.startsWith("thumb:")) {
+    const site = env.SITE_URL || "https://lucritscripts.site";
+    return `${site}${thumbPublic(script)}`;
+  }
+  return null;
+}
+
+/** GET /api/thumbs/:id — the uploaded image as an image, cacheable for a year. */
+async function handleThumb(request, env, { id }) {
+  const row = await env.DB.prepare(
+    `SELECT thumbnail FROM scripts WHERE id = ? AND removed = 0`).bind(id).first();
+  const t = String(row?.thumbnail || "");
+  if (/^https:\/\//i.test(t)) return Response.redirect(t, 302);
+  const m = t.match(/^data:(image\/[a-z+]+);base64,(.+)$/i);
+  if (!m) return new Response("not found", { status: 404, headers: { "Cache-Control": "no-store" } });
+  const bin = atob(m[2]);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const versioned = new URL(request.url).searchParams.has("v");
+  return new Response(bytes, {
+    headers: {
+      "Content-Type": m[1].toLowerCase(),
+      // The URL carries a version derived from the image, so a changed
+      // thumbnail is a different URL — safe to cache "forever".
+      "Cache-Control": versioned ? "public, max-age=31536000, immutable" : "public, max-age=300",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+    },
+  });
+}
+
 function publicScript(row, extra = {}) {
   if (!row) return null;
   let tags = [];
@@ -957,7 +1035,7 @@ function publicScript(row, extra = {}) {
     desc: row.descr,
     tags: Array.isArray(tags) ? tags : [],
     keyless: Boolean(row.keyless),
-    thumbnail: row.thumbnail || "",
+    thumbnail: thumbPublic(row),
 
     // Two separate claims, kept separate all the way to the badge.
     //
@@ -1240,14 +1318,21 @@ async function handleScriptPublish(request, env, _params, ctx) {
 
   if (code.length > SCRIPT_LIMITS.code) return bad(400, "That script is too large to publish.");
 
-  // The link is required, and it is checked against a fixed host list rather
-  // than merely being parsed. A visitor reaches it having just completed a
-  // sponsor step, so they arrive already trusting it.
+  // The Lua code is REQUIRED, and it has to pass the same checker the publish
+  // form shows live: Lua-shaped, blocks closed, brackets matched. The code is
+  // what visitors unlock — a listing with nothing behind the sponsor step is
+  // not a script.
+  if (!code.trim()) return bad(400, "Paste the script's Lua code.");
+  const luaCheck = checkLua(code);
+  if (!luaCheck.ok) return bad(400, luaCheck.why || "That doesn't look like Lua.", { lua: luaCheck });
+
+  // The link is OPTIONAL — extra, for publishers who also host the script
+  // somewhere (Pastebin, GitHub…). When present it is still checked against a
+  // fixed host list, and it sits behind the same sponsor step as the code.
   const linkRaw = String(body.link || "").trim();
-  if (!linkRaw) return bad(400, "Add the link where people get the script.");
   if (linkRaw.length > SCRIPT_LIMITS.link) return bad(400, "That link is too long.");
-  const link = safeSocial(linkRaw, LINK_HOSTS);
-  if (!link)
+  const link = linkRaw ? safeSocial(linkRaw, LINK_HOSTS) : "";
+  if (linkRaw && !link)
     return bad(400,
       "That link isn't on a host we allow. Use Pastebin, GitHub, Gist, GitLab, "
       + "Rentry, paste.ee, Hastebin or sourceb.in. Shorteners aren't accepted, "
@@ -1290,10 +1375,7 @@ async function handleScriptPublish(request, env, _params, ctx) {
   // A thumbnail is either a data URL the person uploaded or a Roblox CDN link.
   // Anything else would let a publisher point the whole library at a tracker.
   const thumbRaw = String(body.thumbnail || "").trim();
-  const thumbnail =
-    /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(thumbRaw) && thumbRaw.length < 400000
-      ? thumbRaw
-      : safeSocial(thumbRaw, ["roblox.com", "rbxcdn.com"]);
+  const thumbnail = cleanThumbnail(thumbRaw);
 
   // Required now. It used to be optional and the card fell back to a blank
   // tile, which is why the library looked half-finished. The browser fills
@@ -1301,9 +1383,10 @@ async function handleScriptPublish(request, env, _params, ctx) {
   // nothing, so "required" costs an honest publisher nothing — but a value
   // that failed the host check above arrives here as "" and must not pass.
   if (!thumbnail)
-    return bad(400, thumbRaw
-      ? "That thumbnail isn't a supported image or Roblox link."
-      : "A thumbnail is required.");
+    return bad(400, !thumbRaw ? "A thumbnail is required."
+      : thumbRaw.startsWith("data:") && thumbRaw.length >= THUMB_MAX_CHARS
+        ? "That thumbnail is too large. Choose it again and the page will shrink it to fit."
+        : "That thumbnail isn't a supported image or Roblox link.");
 
   // The checker runs before anything is written. Three outcomes: publish,
   // hold for a human, or refuse. It is looking for spam and empty
@@ -1320,7 +1403,7 @@ async function handleScriptPublish(request, env, _params, ctx) {
   // claim, it is not a review, and `verified` below is deliberately not
   // touched by it. A publisher who wants the Lua badge can have it by pasting
   // Lua, which is fine, because the badge only ever claims they pasted Lua.
-  const lua = code.trim() ? looksLikeCode(code).ok : false;
+  const lua = luaCheck.lua;
 
   // The creator may have accepted an AI rewrite in the publish form. Their own
   // words are kept either way, so a rewrite that drifted is recoverable.
@@ -1533,19 +1616,16 @@ async function handleScriptUpdate(request, env, { id }, ctx) {
   let thumbnail = row.thumbnail;
   if (has("thumbnail")) {
     const raw = String(body.thumbnail || "").trim();
-    thumbnail =
-      /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(raw) && raw.length < 400000
-        ? raw
-        : safeSocial(raw, ["roblox.com", "rbxcdn.com"]);
+    // The page shows our own /api/thumbs URL; sending that back means "unchanged".
+    thumbnail = raw.startsWith(`/api/thumbs/${id}`) ? row.thumbnail : cleanThumbnail(raw);
     if (!thumbnail) return bad(400, "That thumbnail isn't a supported image or Roblox link.");
   }
 
   let link = row.link;
   if (has("link")) {
     const raw = String(body.link || "").trim();
-    if (!raw) return bad(400, "Add the link where people get the script.");
-    link = safeSocial(raw, LINK_HOSTS);
-    if (!link) return bad(400, "That link isn't on a host we allow.");
+    link = raw ? safeSocial(raw, LINK_HOSTS) : "";
+    if (raw && !link) return bad(400, "That link isn't on a host we allow.");
   }
 
   const keyless = has("keyless") ? (body.keyless === false ? 0 : 1) : row.keyless;
@@ -1710,11 +1790,10 @@ const lootSettings = (env) => ({
  * megabyte of base64 in an API call that then fails validation. Only real
  * http(s) links go out.
  */
-function lootThumbnail(script) {
-  const raw = String(script?.thumbnail || "").trim();
-  if (!/^https?:\/\//i.test(raw)) return null;
-  if (raw.length > 500) return null;
-  return raw;
+function lootThumbnail(env, script) {
+  // Uploaded art is served from /api/thumbs as a real https image, so LootLabs
+  // can show it too — it used to be skipped as an unfetchable data: URL.
+  return thumbAbsolute(env, script);
 }
 
 /**
@@ -1850,7 +1929,7 @@ async function handleUnlockStart(request, env) {
   }
 
   const loot = lootSettings(env);
-  const thumb = lootThumbnail(script);
+  const thumb = lootThumbnail(env, script);
   try {
     // Kept well under the edge's own patience. A 15s wait here meant the
     // platform gave up first and returned its own HTML 502, which no amount of
@@ -2534,6 +2613,197 @@ async function handleLeaderboard(request, env) {
 /* ═════════════════════════════════════════════════ submission checks ══ */
 
 /**
+ * The Lua checker. A byte-for-byte copy of assets/js/luacheck.js — the publish
+ * form runs the same function, so the page and the server can never disagree
+ * about whether something is Lua. tests/luacheck.spec.mjs fails if the copies
+ * drift. Edit the module, then re-copy the block between the markers.
+ */
+/* LUACHECK:BEGIN */
+function checkLua(code) {
+  const src = String(code == null ? "" : code).replace(/\r\n?/g, "\n");
+  const trimmed = src.trim();
+  const out = { ok: false, lua: false, score: 0, errors: [], why: "", lines: 0 };
+  if (!trimmed) { out.why = "Paste the script's Lua code."; return out; }
+  out.lines = src.split("\n").length;
+  if (trimmed.length < 10) { out.why = "That's too short to be a script."; return out; }
+
+  /* ---- 1. lex ---- */
+  const toks = [];          // { v, line } — identifiers/keywords and punctuation
+  const errors = [];
+  let i = 0, line = 1, strings = 0, comments = 0;
+  const n = src.length;
+  const isId = (c) => /[A-Za-z0-9_]/.test(c);
+  const longOpen = (at) => {           // "[", "=" * k, "[" → k, else -1
+    if (src[at] !== "[") return -1;
+    let k = 0, j = at + 1;
+    while (src[j] === "=") { k++; j++; }
+    return src[j] === "[" ? k : -1;
+  };
+  const skipLong = (at, k, what) => {  // returns index after the close, or n
+    const close = "]" + "=".repeat(k) + "]";
+    const startLine = line;
+    const end = src.indexOf(close, at);
+    const stop = end === -1 ? n : end + close.length;
+    for (let j = at; j < stop; j++) if (src[j] === "\n") line++;
+    if (end === -1) errors.push({ line: startLine, msg: `This ${what} is never closed (missing ${close}).` });
+    return stop;
+  };
+
+  while (i < n) {
+    const c = src[i];
+    if (c === "\n") { line++; i++; continue; }
+    if (c === " " || c === "\t" || c === "\f" || c === "\v") { i++; continue; }
+
+    // comments
+    if (c === "-" && src[i + 1] === "-") {
+      comments++;
+      const k = longOpen(i + 2);
+      if (k >= 0) { i = skipLong(i + 2 + k + 2, k, "long comment"); continue; }
+      while (i < n && src[i] !== "\n") i++;
+      continue;
+    }
+    // long strings
+    if (c === "[") {
+      const k = longOpen(i);
+      if (k >= 0) { strings++; i = skipLong(i + k + 2, k, "long string"); toks.push({ v: "\"", line }); continue; }
+    }
+    // quoted strings (and Luau backtick strings)
+    if (c === "\"" || c === "'" || c === "`") {
+      const startLine = line;
+      let j = i + 1, closed = false;
+      while (j < n) {
+        const d = src[j];
+        if (d === "\\") { if (src[j + 1] === "\n") line++; j += 2; continue; }
+        if (d === c) { closed = true; j++; break; }
+        if (d === "\n") {
+          if (c === "`") { line++; j++; continue; }
+          break;
+        }
+        j++;
+      }
+      if (!closed) errors.push({ line: startLine, msg: `A string opened with ${c} is never closed.` });
+      strings++;
+      toks.push({ v: "\"", line: startLine });
+      i = j;
+      continue;
+    }
+    // identifiers / keywords / numbers
+    if (isId(c)) {
+      let j = i;
+      while (j < n && isId(src[j])) j++;
+      toks.push({ v: src.slice(i, j), line });
+      i = j;
+      continue;
+    }
+    // multi-char operators that matter for context
+    const two = src.slice(i, i + 2);
+    if (["==", "~=", "<=", ">=", "..", "::", "->", "=>", "+=", "-=", "*=", "/="].includes(two)) {
+      toks.push({ v: two, line }); i += 2; continue;
+    }
+    toks.push({ v: c, line });
+    i++;
+  }
+
+  /* ---- 2. structure ---- */
+  // `if` after one of these is a Luau if-EXPRESSION (`local x = if a then b
+  // else c`), which has no `end`. Counting it as a block would report a
+  // missing `end` on perfectly valid Luau.
+  const EXPR_BEFORE = new Set(["=", "(", ",", "{", "[", "return", "and", "or", "not",
+    "..", "+", "-", "*", "/", "%", "^", "==", "~=", "<", ">", "<=", ">=", "#", "+=", "-=", "*=", "/=", "then", "else"]);
+  const OPENERS = { "(": ")", "{": "}", "[": "]" };
+  const CLOSERS = { ")": "(", "}": "{", "]": "[" };
+  const blocks = [];
+  const brackets = [];
+  for (let t = 0; t < toks.length; t++) {
+    const { v, line: ln } = toks[t];
+    const prev = t ? toks[t - 1].v : "";
+    if (v === "function" || v === "do" || v === "repeat") blocks.push({ v, line: ln });
+    else if (v === "if") {
+      // "then"/"else" before `if` is only an expression when we are already
+      // inside an if-expression; at statement level it starts a new block.
+      const exprCtx = EXPR_BEFORE.has(prev) && prev !== "then" && prev !== "else";
+      if (!exprCtx) blocks.push({ v, line: ln });
+    } else if (v === "end") {
+      const top = blocks.pop();
+      if (!top) errors.push({ line: ln, msg: "There's an `end` here with no block for it to close." });
+      else if (top.v === "repeat")
+        errors.push({ line: ln, msg: `\`repeat\` from line ${top.line} must be closed with \`until\`, not \`end\`.` });
+    } else if (v === "until") {
+      const top = blocks.pop();
+      if (!top || top.v !== "repeat")
+        errors.push({ line: ln, msg: "There's an `until` here with no `repeat` before it." });
+    } else if (OPENERS[v]) brackets.push({ v, line: ln });
+    else if (CLOSERS[v]) {
+      const top = brackets.pop();
+      if (!top) errors.push({ line: ln, msg: `There's a \`${v}\` here with nothing to close.` });
+      else if (top.v !== CLOSERS[v])
+        errors.push({ line: ln, msg: `\`${v}\` here doesn't match the \`${top.v}\` opened on line ${top.line}.` });
+    }
+    if (errors.length > 6) break;
+  }
+  for (const b of blocks.slice(-3))
+    errors.push({ line: b.line, msg: b.v === "repeat"
+      ? `\`repeat\` on line ${b.line} is never closed with \`until\`.`
+      : `\`${b.v}\` on line ${b.line} is never closed with \`end\`.` });
+  for (const b of brackets.slice(-3))
+    errors.push({ line: b.line, msg: `\`${b.v}\` on line ${b.line} is never closed.` });
+
+  /* ---- 3. signals ---- */
+  const words = new Set(toks.map((t) => t.v));
+  const has = (re) => re.test(src);
+  let score = 0;
+  // Strong: things that are only ever Roblox Lua.
+  if (has(/\bgame\s*:\s*GetService\s*\(/)) score += 2;
+  if (has(/\bloadstring\s*\(/) && has(/:\s*HttpGet(Async)?\s*\(/)) score += 3;
+  else if (has(/\bloadstring\s*\(/)) score += 2;
+  if (has(/\blocal\s+function\b/)) score += 2;
+  if (has(/:\s*(Connect|Once|Wait|FindFirstChild|WaitForChild|GetChildren|GetDescendants|Destroy|Clone|Fire|Invoke)\s*\(/)) score += 2;
+  if (has(/\bInstance\s*\.\s*new\s*\(/)) score += 2;
+  if (words.has("function") && words.has("end")) score += 2;
+  // Ordinary Lua.
+  if (has(/\blocal\s+[A-Za-z_]/)) score += 1;
+  if (words.has("then") || words.has("elseif")) score += 1;
+  if (words.has("nil") || words.has("~=")) score += 1;
+  if (words.has("..")) score += 1;
+  if (has(/\b(pairs|ipairs|tostring|tonumber|pcall|xpcall|typeof|setmetatable|require|print|warn|spawn|wait)\s*\(/)) score += 1;
+  if (has(/\btask\s*\.\s*(wait|spawn|delay|defer)\b/)) score += 1;
+  if (has(/\b(game|workspace|script|Enum|Vector3|CFrame|UDim2|Color3|Players|LocalPlayer|Humanoid|HumanoidRootPart|ReplicatedStorage|RunService|UserInputService|TweenService)\b/)) score += 1;
+  if (has(/\b(getgenv|getrenv|hookfunction|hookmetamethod|getrawmetatable|setclipboard|fireclickdetector|firetouchinterest|syn|fluxus|Drawing)\b/)) score += 1;
+  if (comments) score += 1;
+  out.score = score;
+
+  /* ---- 4. not Lua at all? ---- */
+  let foreign = "";
+  const js = [/\b(const|let|var)\s+[A-Za-z_$]/, /=>/, /\bconsole\s*\.\s*log\b/, /===|!==/, /\bfunction\s*[A-Za-z_$]*\s*\([^)]*\)\s*\{/, /;\s*$/m]
+    .filter((re) => re.test(src)).length;
+  const py = [/^\s*def\s+\w+\s*\(.*\)\s*:/m, /^\s*(import|from)\s+\w+/m, /\belif\b/, /^\s*(if|for|while)\b[^\n]*:\s*$/m, /\bself\./, /\bTrue\b|\bFalse\b|\bNone\b/]
+    .filter((re) => re.test(src)).length;
+  const html = /<\s*(html|head|body|div|span|script|style|p|a)\b[^>]*>/i.test(src);
+  if (html && score < 4) foreign = "That looks like HTML, not Lua.";
+  else if (js >= 2 && js > py && score < 5) foreign = "That looks like JavaScript, not Lua.";
+  else if (py >= 2 && score < 5) foreign = "That looks like Python, not Lua.";
+
+  const collapsed = trimmed.replace(/\s+/g, "");
+  const mash = collapsed.length > 60 && new Set(collapsed).size <= 6;
+  const prose = !foreign && score < 3 && /^[A-Za-z ,.'"!?\n-]{40,}$/.test(trimmed);
+
+  out.errors = errors.slice(0, 4);
+  out.lua = !foreign && !mash && score >= 3;
+
+  if (foreign) out.why = foreign;
+  else if (mash) out.why = "That looks like repeated characters rather than code.";
+  else if (prose) out.why = "That looks like plain text rather than a Lua script.";
+  else if (!out.lua && errors.length && score >= 2) out.why = `Line ${errors[0].line}: ${errors[0].msg}`;
+  else if (!out.lua) out.why = "That doesn't look like Lua yet. Paste the script itself — for example local, function … end, game:GetService(…) or a loadstring(…) line.";
+  else if (out.errors.length) out.why = `Line ${out.errors[0].line}: ${out.errors[0].msg}`;
+
+  out.ok = out.lua && out.errors.length === 0;
+  return out;
+}
+/* LUACHECK:END */
+
+
+/**
  * Does this submission look like a script at all?
  *
  * IMPORTANT, and the reason this function is named `looksLikeCode` rather than
@@ -2632,11 +2902,15 @@ function checkSubmission({ code, descr, title, game, link = "" }) {
   // is fine as long as there is a link, and the link has already been checked
   // against a fixed host list by the caller, which is a far stronger spam
   // filter than anything this function does.
+  //
+  // Since the October rework the code is required again (the link is the
+  // optional extra), and it must pass checkLua — the same function the form
+  // runs live, so a publisher never sees "looks good" on the page and a
+  // refusal from the server.
   const hasCode = Boolean(String(code || "").trim());
-  const codeCheck = hasCode ? looksLikeCode(code) : null;
-  if (hasCode && !codeCheck.ok) return { status: "rejected", note: codeCheck.why };
-  if (!hasCode && !String(link || "").trim())
-    return { status: "rejected", note: "There is no code and no link, so there is nothing to publish." };
+  if (!hasCode) return { status: "rejected", note: "Paste the script's Lua code." };
+  const codeCheck = checkLua(code);
+  if (!codeCheck.ok) return { status: "rejected", note: codeCheck.why };
 
   const prose = looksLikeProse(descr);
   if (!prose.ok) notes.push(prose.why);
@@ -2653,7 +2927,7 @@ function checkSubmission({ code, descr, title, game, link = "" }) {
   // Weak-but-not-absent code signal: hold rather than publish. Only applies
   // when code was submitted at all — a link-only script has no code signal to
   // be weak, and holding every one of those would bury the review queue.
-  if (hasCode && codeCheck.hits < 3) notes.push("Only a weak code signal.");
+  if (codeCheck.score < 4) notes.push("Only a weak code signal.");
 
   if (!notes.length) return { status: "approved", note: "" };
   return { status: "review", note: notes.join(" ") };
@@ -2661,27 +2935,96 @@ function checkSubmission({ code, descr, title, game, link = "" }) {
 
 /* ══════════════════════════════════════════════════ AI descriptions ══ */
 
-const DESCRIBE_PROMPT = `You rewrite short descriptions of Roblox scripts for a
-public script library.
+const DESCRIBE_PROMPT = `You write the description for a Roblox script on a
+public script library, working from the author's own notes (and, when given,
+the script's code).
 
 Rules, in order of importance:
-1. NEVER add a feature, claim, or guarantee the author did not write. If they
-   did not say it is undetectable, safe, or updated, you must not say so.
-2. Keep their meaning exactly. You are fixing the writing, not the facts.
-3. Fix spelling, grammar and capitalisation. Expand shorthand ("af" ->
-   "auto farm") only when the meaning is unambiguous.
-4. Explain the features they DID mention a little more clearly.
-5. Remove repetition. No marketing language, no hype, no emoji.
-6. 2-4 sentences, plain and professional.
+1. NEVER invent a claim the author did not make and the code does not show.
+   Do not say it is undetectable, safe, updated, or works on every executor
+   unless the author said so.
+2. Keep the author's meaning. Fix spelling, grammar and capitalisation, expand
+   obvious shorthand ("af" -> "auto farm", "esp" -> "ESP").
+3. You MAY describe features that are plainly visible in the code (for example
+   a toggle named AutoFarm, a teleport function, a GUI), in plain words.
+4. Write between 110 and 170 words, in this shape:
+   - one or two sentences saying what the script is and which game it is for;
+   - "Features:" followed by 3-6 short lines starting with "- ";
+   - "How to use:" followed by 2-3 short numbered steps (copy the script, paste
+     it into your executor, run it while in the game, plus anything the author
+     said about keys or settings);
+   - optionally "Notes:" with anything the author said about devices, keys or
+     requirements.
+5. No hype, no emoji, no marketing words like "ultimate" or "best".
 
-Reply with ONLY minified JSON, no code fence:
+Reply with ONLY minified JSON and nothing else:
 {"description":"...","tags":["...","..."]}
+Use \n for line breaks inside the description string.
 
-tags: 3-6 short PascalCase topic tags with no "#", drawn from the game name
-and the features the author actually described.`;
+tags: 3-6 short PascalCase topic tags, no "#", drawn from the game name and the
+features actually described.`;
+
+/** Models for the description helper — the chat models, then a small fast one. */
+const DESCRIBE_MODELS = [...CF_MODELS, "@cf/meta/llama-3.1-8b-instruct"];
 
 /**
- * Tidies a creator's description without inventing anything.
+ * Pulls the model's text out of whatever shape Workers AI answered with.
+ *
+ * This is where the helper was broken. Workers AI does not always hand back a
+ * string: when a model's whole reply is valid JSON it can arrive already
+ * PARSED, as an object in `response` — and `String(object)` is
+ * "[object Object]", which has no "{" in it, so every reply was discarded and
+ * the author's own text came back as if the AI had nothing to add. Newer
+ * models can also answer in the OpenAI shape (`choices[0].message.content`).
+ */
+function aiReplyText(out) {
+  if (out == null) return "";
+  if (typeof out === "string") return out;
+  const r = out.response ?? out.result?.response ?? out.choices?.[0]?.message?.content
+    ?? out.output_text ?? out.result ?? "";
+  if (r && typeof r === "object") return JSON.stringify(r);
+  return String(r);
+}
+
+/** {description, tags} from a model reply, tolerating the usual near-misses. */
+function parseDescribeReply(text) {
+  const raw = String(text || "").trim()
+    .replace(/^```(?:json)?/i, "").replace(/```\s*$/, "").trim();
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start !== -1 && end > start) {
+    const body = raw.slice(start, end + 1);
+    const attempts = [
+      body,
+      // Real newlines inside the JSON string are the most common slip.
+      body.replace(/\r?\n/g, "\\n"),
+    ];
+    for (const a of attempts) {
+      try {
+        const j = JSON.parse(a);
+        if (j && typeof j.description === "string" && j.description.trim())
+          return { description: j.description, tags: Array.isArray(j.tags) ? j.tags : [] };
+      } catch { /* next attempt */ }
+    }
+    // Last resort: lift the description field out by pattern.
+    const m = body.match(/"description"\s*:\s*"((?:[^"\\]|\\.)*)"/s);
+    if (m) {
+      let d = m[1];
+      try { d = JSON.parse(`"${m[1].replace(/\r?\n/g, "\\n")}"`); } catch { /* keep raw */ }
+      const tm = body.match(/"tags"\s*:\s*\[([^\]]*)\]/);
+      const tags = tm ? [...tm[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : [];
+      return { description: d, tags };
+    }
+    return null;
+  }
+  // No JSON at all — a model that ignored the format but wrote a decent
+  // description is still useful.
+  if (raw.split(/\s+/).length >= 40 && !/[{}]/.test(raw)) return { description: raw, tags: [] };
+  return null;
+}
+
+/**
+ * Writes a fuller description from a creator's notes without inventing claims.
  *
  * The failure mode worth naming: a model asked to "make this sound
  * professional" will happily promise the script is undetectable, regularly
@@ -2689,49 +3032,86 @@ and the features the author actually described.`;
  * which the site would then be publishing as fact. Hence rule 1, a low
  * temperature, and a caller that falls back to the original text rather than
  * shipping something it could not parse.
+ *
+ * Returns `why` when it could not help, so the page can say so honestly
+ * instead of pretending the description was already perfect.
  */
-async function enhanceDescription(env, { descr, title, game }) {
+async function enhanceDescription(env, { descr, title, game, code = "", keyless = null }) {
   const original = String(descr || "").trim();
-  if (!original || !env.AI) return { description: original, tags: [], ai: false };
+  if (!original) return { description: original, tags: [], ai: false, why: "empty" };
+  if (!env.AI) return { description: original, tags: [], ai: false, why: "no-model" };
 
+  const snippet = String(code || "").trim().slice(0, 2500);
   const ask = `Game: ${String(game || "Roblox").slice(0, 60)}
 Script name: ${String(title || "").slice(0, 80)}
-Author's description: ${original.slice(0, 1200)}`;
+Needs a key: ${keyless === true ? "no (keyless)" : keyless === false ? "yes" : "not stated"}
+Author's description: ${original.slice(0, 1500)}${snippet ? `
 
-  const models = env.AI_MODEL ? [env.AI_MODEL] : CF_MODELS;
-  for (const model of models) {
+Script code (for reference only — describe what it visibly does, do not quote it):
+${snippet}` : ""}`;
+
+  const models = env.AI_MODEL ? [env.AI_MODEL, ...DESCRIBE_MODELS] : DESCRIBE_MODELS;
+  let why = "unparseable";
+  for (const model of [...new Set(models)]) {
     try {
       const out = await env.AI.run(model, {
         messages: [
           { role: "system", content: DESCRIBE_PROMPT },
           { role: "user", content: ask },
         ],
-        max_tokens: 500,
-        temperature: 0.2,
+        max_tokens: 800,
+        temperature: 0.25,
       });
+      const parsed = parseDescribeReply(aiReplyText(out));
+      if (!parsed) { why = "unparseable"; continue; }
 
-      const text = String(out?.response ?? out?.result?.response ?? "").trim();
-      const json = text.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
-      const start = json.indexOf("{");
-      const end = json.lastIndexOf("}");
-      if (start === -1 || end === -1) continue;
+      let description = String(parsed.description || "")
+        .replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").trim()
+        .slice(0, SCRIPT_LIMITS.descr);
+      if (!description) { why = "empty-reply"; continue; }
 
-      const parsed = JSON.parse(json.slice(start, end + 1));
-      const description = String(parsed.description || "").trim();
-      if (!description) continue;
+      // Models undershoot word counts. A rewrite shorter than the site's
+      // minimum would be offered and then refused at publish, so ask once
+      // more, from the draft, for the longer version.
+      const count = (t) => t.split(/\s+/).filter(Boolean).length;
+      if (count(description) < MIN_DESC_WORDS) {
+        try {
+          const again = await env.AI.run(model, {
+            messages: [
+              { role: "system", content: DESCRIBE_PROMPT },
+              { role: "user", content: ask },
+              { role: "assistant", content: JSON.stringify({ description, tags: parsed.tags || [] }) },
+              { role: "user", content: `That is ${count(description)} words; the library needs at least ${MIN_DESC_WORDS + 15}. `
+                + "Rewrite it to 120-160 words. Open with a short overview paragraph (2-3 sentences) of what the script does "
+                + "and who it is for, then turn each feature into a full sentence explaining what it does for the player, "
+                + "then the how-to-use steps and notes. Same rules: add no new claims. Reply with the same JSON shape only." },
+            ],
+            max_tokens: 900,
+            temperature: 0.3,
+          });
+          const longer = parseDescribeReply(aiReplyText(again));
+          const text = String(longer?.description || "").replace(/\r\n?/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+          if (count(text) > count(description)) {
+            description = text.slice(0, SCRIPT_LIMITS.descr);
+            if (Array.isArray(longer.tags) && longer.tags.length) parsed.tags = longer.tags;
+          }
+        } catch { /* keep the shorter draft */ }
+      }
 
       const tags = (Array.isArray(parsed.tags) ? parsed.tags : [])
         .map((t) => String(t).replace(/[^A-Za-z0-9]/g, "").slice(0, 24))
         .filter(Boolean)
         .slice(0, 6);
 
-      return { description, tags, ai: true };
+      return { description, tags, ai: true, model };
     } catch (err) {
-      console.warn("describe model failed", model, err?.message);
+      const msg = String(err?.message || err || "");
+      why = /neuron|quota|limit|capacity|429/i.test(msg) ? "limit" : "model-error";
+      console.warn("describe model failed", model, msg);
     }
   }
   // Every model refused or answered unusably. The author's own words ship.
-  return { description: original, tags: [], ai: false };
+  return { description: original, tags: [], ai: false, why };
 }
 
 /**
@@ -2754,6 +3134,8 @@ async function handleDescribe(request, env) {
 
   const out = await enhanceDescription(env, {
     descr, title: body.title, game: body.game,
+    code: String(body.code || "").slice(0, SCRIPT_LIMITS.code),
+    keyless: body.keyless === true ? true : body.keyless === false ? false : null,
   });
   return ok({ data: { ...out, original: descr } });
 }
@@ -2853,7 +3235,7 @@ async function announceScript(env, script, authorName) {
   // Only an https thumbnail. Uploaded artwork is stored as a data: URL, which
   // Discord cannot fetch — sending one produces an embed with a broken image
   // rather than an embed with no image.
-  const art = /^https:\/\//i.test(String(script.thumbnail || "")) ? script.thumbnail : null;
+  const art = thumbAbsolute(env, script);
 
   // The description is trimmed at a word boundary rather than mid-syllable.
   // Publishing demands a hundred words, so every one of these WILL be cut, and
@@ -3319,7 +3701,7 @@ function scriptEmbed(env, script, author, { state = "live" } = {}) {
 
   // Uploaded artwork is a data: URL, which Discord cannot fetch. Sending one
   // produces a broken image rather than no image.
-  const art = /^https:\/\//i.test(String(script.thumbnail || "")) ? script.thumbnail : null;
+  const art = thumbAbsolute(env, script);
 
   const stats = [];
   if (script.views) stats.push(`👁️ ${script.views}`);
@@ -4717,6 +5099,7 @@ const PATTERNS = [
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
+  ["GET", /^\/api\/thumbs\/([A-Za-z0-9_-]{1,40})$/, handleThumb],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/edit$/, handleScriptUpdate],
   ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
