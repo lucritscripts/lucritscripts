@@ -29,14 +29,16 @@ import { account } from "./account.js";
 import { createGamePicker } from "./gamepicker.js";
 import { robloxThumb, addScript } from "./ui.js";
 import { libraryOnline, publishScript, describeScript } from "./library-api.js";
+import { checkLua } from "./luacheck.js";
+import { fitImage } from "./imagefit.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
 export const MIN_WORDS = 100;
-const MAX_THUMB_BYTES = 3 * 1024 * 1024;
+const MAX_THUMB_BYTES = 25 * 1024 * 1024;   // before shrinking — it's resized in the browser
 const MIN_THUMB_PX = 160;
-const THUMB_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const THUMB_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/avif", "image/bmp"];
 
 /**
  * Hosts a script link may point at. Mirrors LINK_HOSTS in `_worker.js`.
@@ -80,25 +82,10 @@ function linkOk(value) {
  * because the badge never claimed anything about quality in the first place.
  */
 export function detectLua(code) {
-  const text = String(code || "");
-  if (text.trim().length < 12) return { lua: false, hits: 0 };
-
-  const signals = [
-    /\blocal\s+[A-Za-z_]/,                       // local x
-    /\bfunction\b[\s\S]{0,80}\bend\b/,           // function … end
-    /\bgame:GetService\s*\(/i,                   // Roblox service
-    /\b(workspace|Players|ReplicatedStorage|LocalPlayer|Instance)\b/,
-    /\b(then|elseif)\b[\s\S]{0,120}\bend\b/,     // if … then … end
-    /\bfor\b[\s\S]{0,60}\b(do)\b/,               // for … do
-    /\bwhile\b[\s\S]{0,60}\bdo\b/,
-    /--\[\[|^\s*--(?!\[)/m,                      // Lua comments
-    /\b(pairs|ipairs|tostring|tonumber|pcall|task\.wait|wait)\s*\(/,
-    /\b(loadstring|require)\s*\(/,
-    /:\s*Connect\s*\(|\.\s*(Touched|Changed|Heartbeat)\b/,
-    /\bend\s*\)?\s*$/m,
-  ];
-  const hits = signals.reduce((n, re) => n + (re.test(text) ? 1 : 0), 0);
-  return { lua: hits >= 3, hits };
+  // Kept for older callers. The real checker is luacheck.js, shared with the
+  // server so the page and the site can never disagree.
+  const r = checkLua(code);
+  return { lua: r.lua, hits: r.score };
 }
 
 /* ═════════════════════════════════════════ description gap analysis ══ */
@@ -144,7 +131,7 @@ export function describeGaps(text, { keyless } = {}) {
 
 /* ══════════════════════════════════════════════════════ the form ══ */
 
-const FIELDS = ["title", "game", "category", "thumbnail", "keyless", "link", "desc", "tags"];
+const FIELDS = ["title", "game", "category", "thumbnail", "keyless", "link", "desc", "code", "tags"];
 
 export function createPublishForm({ onAuth, onPublished }) {
   const node = document.createElement("div");
@@ -244,11 +231,11 @@ export function createPublishForm({ onAuth, onPublished }) {
               </div>
               <div class="thumbdrop__side">
                 <p class="thumbdrop__lead">Drop an image here, or choose a file.</p>
-                <p class="thumbdrop__spec">PNG, JPEG or WebP · under 3 MB · at least ${MIN_THUMB_PX}×${MIN_THUMB_PX}</p>
+                <p class="thumbdrop__spec">Your own picture — PNG, JPEG, WebP or GIF · any size, it's resized for you · at least ${MIN_THUMB_PX}×${MIN_THUMB_PX}</p>
                 <div class="thumbdrop__acts">
                   <label class="btn btn--ghost btn--sm">
                     Choose image
-                    <input type="file" name="thumbnail" accept="image/png,image/jpeg,image/webp" hidden>
+                    <input type="file" name="thumbnail" accept="image/*" hidden>
                   </label>
                   <button class="btn btn--ghost btn--sm" type="button" data-act="thumbclear" hidden>Remove</button>
                 </div>
@@ -258,7 +245,7 @@ export function createPublishForm({ onAuth, onPublished }) {
             <span class="field__err" data-err="thumbnail"></span>
           </div>
 
-          <div class="field" data-for="keyless">
+          <div class="field field--wide" data-for="keyless">
             <span class="field__label">Does it need a key? <b class="req">*</b></span>
             <div class="choicerow">
               <label class="choice">
@@ -272,16 +259,6 @@ export function createPublishForm({ onAuth, onPublished }) {
             </div>
             <span class="field__err" data-err="keyless"></span>
           </div>
-
-          <label class="field" data-for="link">
-            <span class="field__label">Script link <b class="req">*</b></span>
-            <input name="link" placeholder="https://pastebin.com/raw/…" autocomplete="off" inputmode="url">
-            <span class="field__hint">
-              Where people get the script. Hidden until someone completes the sponsor
-              step — the same gate the code sits behind, so it still earns.
-            </span>
-            <span class="field__err" data-err="link"></span>
-          </label>
 
           <div class="field field--wide" data-for="desc">
             <span class="field__label">Description <b class="req">*</b></span>
@@ -300,17 +277,29 @@ export function createPublishForm({ onAuth, onPublished }) {
           </div>
 
           <div class="field field--wide" data-for="code">
-            <span class="field__label">Luau code <span class="opt">optional</span></span>
-            <textarea name="code" rows="8" spellcheck="false"
-              placeholder="--!strict&#10;local Module = {}&#10;return Module"></textarea>
+            <span class="field__label">Lua code <b class="req">*</b></span>
+            <textarea name="code" rows="9" spellcheck="false" autocapitalize="off" autocomplete="off"
+              placeholder="loadstring(game:HttpGet(&quot;https://…&quot;))()&#10;&#10;— or paste the whole script —"></textarea>
             <div class="luabar" data-luabar>
-              <span class="chip chip--soft" data-luachip>No code pasted</span>
+              <span class="chip chip--soft" data-luachip>No code yet</span>
               <span class="field__hint" data-luanote>
-                Optional. Pasting the code adds a “Lua Detected” badge — that only means
-                the text looks like Luau, not that anyone has checked it.
+                Required. This is what people unlock. The checker looks for Lua and for
+                unclosed blocks or brackets — it doesn't run the script or check it's safe.
               </span>
+              <ul class="luabar__errors" data-luaerrors hidden></ul>
             </div>
+            <span class="field__err" data-err="code"></span>
           </div>
+
+          <label class="field field--wide" data-for="link">
+            <span class="field__label">Script link <span class="opt">optional</span></span>
+            <input name="link" placeholder="https://pastebin.com/raw/…" autocomplete="off" inputmode="url">
+            <span class="field__hint">
+              Optional — if you also host the script on Pastebin, GitHub, Rentry or similar.
+              It stays hidden behind the same LootLabs / Linkvertise step as the code.
+            </span>
+            <span class="field__err" data-err="link"></span>
+          </label>
 
           <label class="field" data-for="tags">
             <span class="field__label">Tags <b class="req">*</b> <span class="opt">comma separated</span></span>
@@ -379,12 +368,16 @@ export function createPublishForm({ onAuth, onPublished }) {
     if (!v.category) p.category = "Choose a category.";
     if (!v.thumbnail) p.thumbnail = "A thumbnail is required.";
     if (v.keyless === null) p.keyless = "Say whether it needs a key.";
-    if (!v.link) p.link = "Add the link where people get the script.";
-    else if (!linkOk(v.link)) p.link = "That host isn't accepted. Use Pastebin, GitHub, Gist, Rentry or similar — no shorteners.";
+    if (v.link && !linkOk(v.link)) p.link = "That host isn't accepted. Use Pastebin, GitHub, Gist, Rentry or similar — no shorteners.";
     const words = wordCount(v.desc);
     if (!v.desc) p.desc = "Write a description.";
     else if (words < MIN_WORDS) p.desc = `${MIN_WORDS - words} more word${MIN_WORDS - words === 1 ? "" : "s"} needed.`;
     if (!v.tags.length) p.tags = "Add at least one tag.";
+    if (!v.code.trim()) p.code = "Paste the script's Lua code — it's what people unlock.";
+    else {
+      const lua = checkLua(v.code);
+      if (!lua.ok) p.code = lua.why;
+    }
     return p;
   }
 
@@ -434,23 +427,33 @@ export function createPublishForm({ onAuth, onPublished }) {
   function paintLua(v) {
     const chip = $("[data-luachip]", node);
     const note = $("[data-luanote]", node);
+    const list = $("[data-luaerrors]", node);
     if (!chip) return;
     const has = Boolean(v.code.trim());
-    const { lua, hits } = detectLua(v.code);
+    const r = checkLua(v.code);
 
-    chip.className = "chip " + (lua ? "chip--ok" : has ? "chip--warn" : "chip--soft");
-    chip.textContent = !has ? "No code pasted"
-      : lua ? "Lua Detected"
-      : "Doesn't look like Lua yet";
+    chip.className = "chip " + (r.ok ? "chip--ok" : has ? "chip--warn" : "chip--soft");
+    chip.textContent = !has ? "No code yet"
+      : r.ok ? "✓ Lua Detected"
+      : r.lua ? `Lua — ${r.errors.length} problem${r.errors.length === 1 ? "" : "s"} to fix`
+      : "Not Lua yet";
 
-    // The wording here is the whole point of the feature. "Lua Detected" has to
-    // read as a statement about syntax, never as approval.
+    // "Lua Detected" is a statement about syntax, never approval — the
+    // wording below keeps it that way.
     if (note) {
       note.textContent = !has
-        ? "Optional. Pasting the code adds a “Lua Detected” badge — that only means the text looks like Luau, not that anyone has checked it."
-        : lua
-          ? `Luau syntax found (${hits} signals). This says the text looks like code — it is not a safety check and not verification.`
-          : "No Luau syntax found yet. You can still publish; the badge just won't appear.";
+        ? "Required. This is what people unlock. The checker looks for Lua and for unclosed blocks or brackets — it doesn't run the script or check it's safe."
+        : r.ok
+          ? `Looks like Lua, ${r.lines} line${r.lines === 1 ? "" : "s"}, blocks and brackets all closed. That's a syntax check, not a safety check or verification.`
+          : "";     // the reason is shown as the field's error just below
+      note.hidden = has && !r.ok;
+    }
+    if (list) {
+      const show = has && r.lua && r.errors.length > 0;
+      list.hidden = !show;
+      list.innerHTML = show
+        ? r.errors.map((e) => `<li><b>Line ${e.line}</b> ${esc(e.msg)}</li>`).join("")
+        : "";
     }
   }
 
@@ -584,7 +587,21 @@ export function createPublishForm({ onAuth, onPublished }) {
     if (btn) { btn.disabled = true; btn.textContent = "Thinking…"; }
 
     try {
-      const out = await describeScript({ desc: v.desc, title: v.title, game: v.game });
+      const out = await describeScript({
+        desc: v.desc, title: v.title, game: v.game, code: v.code, keyless: v.keyless,
+      });
+
+      // The helper could not run — say WHY, rather than pretending the text
+      // was already perfect. (It used to say "already reads well" every time
+      // the model failed, which is how a broken helper looked like a picky one.)
+      if (!out || out.ai === false) {
+        const msg = out?.error
+          || (out?.why === "limit" ? "The AI has hit today's free limit — try again tomorrow"
+            : out?.why === "no-model" ? "The AI helper isn't switched on for this site"
+            : "The AI couldn't rewrite that just now — try again in a moment");
+        toast(msg, "warn");
+        return;
+      }
       // The endpoint answers with the author's own text when the model returns
       // something unusable. Offering that back as a "rewrite" would be a lie
       // dressed as a feature, so it is reported as no change instead.
@@ -623,14 +640,14 @@ export function createPublishForm({ onAuth, onPublished }) {
 
     const src = thumb.value || thumb.auto;
     prev.innerHTML = src
-      ? `<img src="${esc(src)}" alt="Thumbnail preview">`
+      ? `<img class="fitimg__bg" src="${esc(src)}" alt="" aria-hidden="true"><img class="fitimg__fg" src="${esc(src)}" alt="Thumbnail preview">`
       : `<span class="thumbdrop__empty">No image yet</span>`;
     prev.classList.toggle("is-set", Boolean(src));
 
     if (clear) clear.hidden = !thumb.value;
     if (state) {
       state.textContent = thumb.value
-        ? `Using your upload${thumb.name ? ` — ${thumb.name}` : ""}.`
+        ? `Using your image${thumb.name ? ` — ${thumb.name}` : ""}${thumb.size ? ` (${thumb.size})` : ""}. It fits any screen.`
         : thumb.auto
           ? "Using the game's Roblox thumbnail. Upload one to override it."
           : "";
@@ -638,33 +655,45 @@ export function createPublishForm({ onAuth, onPublished }) {
     }
   }
 
-  /** Reads a chosen file, or explains exactly why it was not accepted. */
-  function takeFile(file) {
+  /**
+   * Takes a chosen file, shrinks it to fit, or explains exactly why not.
+   *
+   * Any normal image works: it is resized (longest side 1280px) and
+   * re-encoded in the browser, so a 4K screenshot arrives as a ~150 KB WebP
+   * instead of being refused by the server's size cap — which is what used
+   * to happen, with a misleading "isn't a supported image" message.
+   */
+  async function takeFile(file) {
     if (!file) return;
-    if (!THUMB_TYPES.includes(file.type))
-      return failThumb("That file type isn't supported. Use PNG, JPEG or WebP.");
+    if (file.type && !file.type.startsWith("image/"))
+      return failThumb("That isn't an image. Use a PNG, JPEG, WebP or GIF.");
+    if (file.type && !THUMB_TYPES.includes(file.type) && !/^image\//.test(file.type))
+      return failThumb("That image type isn't supported. Use PNG, JPEG, WebP or GIF.");
     if (file.size > MAX_THUMB_BYTES)
-      return failThumb(`That image is ${(file.size / 1048576).toFixed(1)} MB. The limit is 3 MB.`);
+      return failThumb(`That image is ${(file.size / 1048576).toFixed(1)} MB. The limit is 25 MB.`);
 
-    const reader = new FileReader();
-    reader.onerror = () => failThumb("That file couldn't be read.");
-    reader.onload = () => {
-      // Dimensions can only be known once it decodes, so the size check
-      // happens here rather than up front.
-      const img = new Image();
-      img.onerror = () => failThumb("That doesn't look like an image.");
-      img.onload = () => {
-        if (img.naturalWidth < MIN_THUMB_PX || img.naturalHeight < MIN_THUMB_PX)
-          return failThumb(`That image is ${img.naturalWidth}×${img.naturalHeight}. `
-            + `It needs to be at least ${MIN_THUMB_PX}×${MIN_THUMB_PX}.`);
-        thumb = { value: String(reader.result), auto: thumb.auto, name: file.name };
-        touched.add("thumbnail");
-        paintThumb();
-        repaintLive();
-      };
-      img.src = String(reader.result);
-    };
-    reader.readAsDataURL(file);
+    const state = $("[data-thumbstate]", node);
+    if (state) { state.textContent = "Preparing your image…"; state.classList.remove("is-ok"); }
+    let fitted;
+    try {
+      fitted = await fitImage(file);
+    } catch (err) {
+      return failThumb(err?.message === "too-large"
+        ? "That image couldn't be made small enough. Try a simpler one."
+        : "That file couldn't be read as an image.");
+    }
+    if (fitted.srcWidth < MIN_THUMB_PX || fitted.srcHeight < MIN_THUMB_PX)
+      return failThumb(`That image is ${fitted.srcWidth}×${fitted.srcHeight}. `
+        + `It needs to be at least ${MIN_THUMB_PX}×${MIN_THUMB_PX}.`);
+
+    thumb = { value: fitted.dataUrl, auto: thumb.auto, name: file.name,
+              size: `${fitted.width}×${fitted.height}` };
+    const slot = $('[data-err="thumbnail"]', node);
+    if (slot) slot.textContent = "";
+    $('[data-for="thumbnail"]', node)?.classList.remove("is-bad");
+    touched.add("thumbnail");
+    paintThumb();
+    repaintLive();
   }
 
   function failThumb(message) {

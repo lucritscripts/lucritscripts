@@ -66,5 +66,7 @@ export function safeImageSrc(value) {
   const raw = String(value || "").trim();
   if (!raw) return "";
   if (/^data:image\/(png|jpe?g|gif|webp|avif);base64,[A-Za-z0-9+/=\s]+$/i.test(raw)) return raw;
+  // Uploaded script thumbnails, served by our own API as real image files.
+  if (/^\/api\/thumbs\/[A-Za-z0-9_-]{1,40}(\?v=[a-z0-9]{1,16})?$/.test(raw)) return raw;
   return safeHref(raw);
 }

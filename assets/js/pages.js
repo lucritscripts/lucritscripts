@@ -1099,11 +1099,136 @@ export function createScriptPage({ onRequireAuth }) {
     return heldLocally(s.id);
   }
 
+  /**
+   * The sponsor-step box: what everyone who isn't the author sees.
+   *
+   * `preview` draws it for the AUTHOR, with buttons that don't start an
+   * unlock. Authors never pay their own paywall (and completing your own
+   * offers is exactly what gets publisher accounts zeroed), so on your own
+   * script the code is open — which made it look as if the LootLabs /
+   * Linkvertise step had been removed. The preview shows it is still there.
+   */
+  function gateHtml({ preview = false } = {}) {
+    const live = account.unlockProviders;
+    const LABEL = { lootlabs: "LootLabs", linkvertise: "Linkvertise" };
+    const lock = `
+      <div class="gate__lock" aria-hidden="true">
+        <svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+      </div>`;
+
+    if (preview) {
+      return `
+        <div class="gate gate--preview">
+          <span class="gate__badge">What visitors see</span>
+          ${lock}
+          <h3>Get this script</h3>
+          ${live.length ? `
+            <p>Visitors complete one short ${live.map((id) => LABEL[id] || id).join(" or ")} step to unlock the code${current?.hasLink ? " and link" : ""}. That's what pays you.</p>
+            <div class="gate__actions">
+              ${live.map((id, i) => `<button class="btn btn--primary${i ? " btn--alt" : ""}" data-act="preview-noop">Unlock with ${esc(LABEL[id] || id)}</button>`).join("")}
+            </div>
+            <p class="gate__note">Preview only — these buttons work for visitors, not on your own script.</p>`
+          : `
+            <p>The sponsor step isn't switched on, so visitors currently get this script free.</p>
+            <p class="gate__note">Add the LootLabs / Linkvertise keys in Cloudflare to switch it on.</p>`}
+          <button class="btn btn--ghost btn--sm" data-act="preview-exit">Back to my view</button>
+        </div>`;
+    }
+
+    const d = account.discord;
+    let body;
+    // The Discord condition comes FIRST, before any mention of a sponsor
+    // step. Somebody who cannot unlock at all should not be offered a set of
+    // offers to complete — the server would refuse them at the end of it.
+    if (d.requireMember && !account.discordLinked) {
+      body = `
+        <p>This library is for members of the Discord server.</p>
+        <div class="gate__actions">
+          ${d.invite ? `<a class="btn btn--discordauth" href="${esc(safeHref(d.invite))}"
+               target="_blank" rel="noopener">Join the Discord</a>` : ""}
+          <a class="btn btn--primary" href="/api/auth/discord/start">Sign in with Discord</a>
+        </div>
+        <p class="gate__note">Join the server, then sign in with Discord — after that it's
+           one short sponsor step per script, same as everyone else.</p>`;
+    } else if (blockedByDiscord) {
+      body = `
+        <p>${esc(blockedByDiscord.error || "You need to be in the Discord server.")}</p>
+        <div class="gate__actions">
+          ${blockedByDiscord.invite ? `<a class="btn btn--primary"
+               href="${esc(safeHref(blockedByDiscord.invite))}" target="_blank"
+               rel="noopener">Join the Discord</a>` : ""}
+          <button class="btn btn--ghost" data-act="recheck">I've joined — check again</button>
+        </div>`;
+    } else if (!live.length) {
+      // No provider configured. Offering a sponsor button here would be a
+      // lie — there is no ad to show and no author to pay.
+      body = `
+        <p>The sponsor step isn't switched on yet, so this one is on the house.</p>
+        <div class="gate__actions">
+          <button class="btn btn--primary" data-act="free" ${busy ? "disabled" : ""}>
+            ${busy ? "Opening…" : "Show me the script"}
+          </button>
+        </div>
+        <p class="gate__note">Once sponsors are live, unlocking pays the person who wrote this.</p>`;
+    } else {
+      body = `
+        <p>Complete one short sponsor step to unlock the code. It pays the person who wrote it.</p>
+        <div class="gate__actions">
+          ${live.map((id, i) => `
+            <button class="btn btn--primary${i ? " btn--alt" : ""}" data-act="${esc(id)}" ${busy ? "disabled" : ""}>
+              ${busy ? "Opening…" : `Unlock with ${esc(LABEL[id] || id)}`}
+            </button>`).join("")}
+        </div>
+        <p class="gate__note">You'll come straight back here with the script open,
+           and it stays unlocked for ${account.unlockMinutes} minutes.</p>`;
+    }
+    return `<div class="gate">${lock}<h3>Get this script</h3>${body}</div>`;
+  }
+
+  let previewVisitor = false;
+
   function render() {
     const s = current;
     if (!s) return;
     const cat = categoryOf(s.category);
-    const open = canSee(s);
+    const owner = isOwner(s);
+    const open = canSee(s) && !(owner && previewVisitor);
+    const img = s.thumbnail ? esc(safeImageSrc(s.thumbnail)) : "";
+
+    const side = open ? `
+        <div class="getpanel">
+          ${owner ? `
+            <div class="ownernote">
+              <span class="chip chip--ok">Your script — open for you</span>
+              <p>Visitors have to complete ${account.unlockProviders.length
+                ? account.unlockProviders.map((id) => id === "lootlabs" ? "LootLabs" : "Linkvertise").join(" or ")
+                : "the sponsor step"} before they can see the code.</p>
+              <button class="btn btn--ghost btn--sm" data-act="preview-visitor">See what visitors see</button>
+            </div>` : clockChip(s.id)}
+          <div class="getpanel__acts">
+            <button class="btn btn--primary" data-act="copy" ${code ? "" : "disabled"}>Copy code</button>
+            <button class="btn btn--ghost" data-act="raw" ${code ? "" : "disabled"}>Open raw</button>
+          </div>
+          ${payloadLink ? `
+            <div class="getlink">
+              <div class="getlink__text">
+                <b>Script link</b>
+                <span>${esc(payloadLink)}</span>
+              </div>
+              <a class="btn btn--primary btn--sm" href="${esc(safeHref(payloadLink))}"
+                 target="_blank" rel="noopener nofollow">Open link</a>
+            </div>
+            <p class="note">This link goes to the publisher, not to us. We don't host it
+               and can't vouch for what's on the other end.</p>` : ""}
+          <div class="getpanel__minor">
+            <button class="btn btn--ghost btn--sm${s.liked ? " is-on" : ""}" data-act="like">
+              ${s.liked ? "Liked" : "Like"}${s.likes ? ` · ${fmt(s.likes)}` : ""}
+            </button>
+            ${owner ? `<button class="btn btn--ghost btn--sm btn--danger" data-act="delete">Delete</button>` : ""}
+            <button class="btn btn--ghost btn--sm" data-act="report">Report</button>
+          </div>
+        </div>`
+      : gateHtml({ preview: owner && previewVisitor });
 
     sheet.body.innerHTML = `
       <header class="sheet__head">
@@ -1123,106 +1248,21 @@ export function createScriptPage({ onRequireAuth }) {
         </div>
       </header>
 
-      ${s.thumbnail ? `<img class="script__thumb" src="${esc(safeImageSrc(s.thumbnail))}" alt="">` : ""}
+      <div class="script__layout${img ? "" : " script__layout--noimg"}">
+        ${img ? `
+          <figure class="script__media fitimg">
+            <img class="fitimg__bg" src="${img}" alt="" aria-hidden="true">
+            <img class="fitimg__fg" src="${img}" alt="${esc(s.title)} thumbnail">
+          </figure>` : ""}
+        <aside class="script__side">${side}</aside>
+        <div class="script__desc">${esc(s.desc).replace(/\n+/g, "</p><p>").replace(/^/, "<p>") + "</p>"}</div>
+      </div>
 
-      <div class="script__desc">${esc(s.desc).replace(/\n+/g, "</p><p>").replace(/^/, "<p>") + "</p>"}</div>
-
-      ${open ? `
-        <div class="script__toolbar">
-          ${isOwner(s) ? `<span class="chip chip--ok">Your script — unlocked automatically</span>` : ""}
-          ${isOwner(s) ? "" : clockChip(s.id)}
-          <button class="btn btn--primary" data-act="copy">Copy code</button>
-          <button class="btn btn--ghost" data-act="raw">Open raw</button>
-          <button class="btn btn--ghost${s.liked ? " is-on" : ""}" data-act="like">
-            ${s.liked ? "Liked" : "Like"}${s.likes ? ` · ${fmt(s.likes)}` : ""}
-          </button>
-          ${isOwner(s) ? `<button class="btn btn--ghost btn--danger" data-act="delete">Delete</button>` : ""}
-          <button class="btn btn--ghost" data-act="report">Report</button>
-        </div>
-        ${payloadLink ? `
-          <div class="getlink">
-            <div class="getlink__text">
-              <b>Get the script</b>
-              <span>${esc(payloadLink)}</span>
-            </div>
-            <a class="btn btn--primary" href="${esc(safeHref(payloadLink))}"
-               target="_blank" rel="noopener nofollow">Open link</a>
-          </div>
-          <p class="note">This link goes to the publisher, not to us. We don't host it
-             and can't vouch for what's on the other end.</p>` : ""}
-
-        ${code
+      ${open ? (code
           ? `<div class="script__code">${renderCodeBlock(code)}</div>`
           : code === null
             ? `<div class="script__code"><p class="script__loading">Fetching the script…</p></div>`
-            : payloadLink
-              ? ""
-              : `<div class="script__code">${renderCodeBlock("-- no code")}</div>`}
-      ` : `
-        <div class="gate">
-          <div class="gate__lock" aria-hidden="true">
-            <svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
-          </div>
-          <h3>Get this script</h3>
-          ${(() => {
-            const live = account.unlockProviders;
-            const LABEL = { lootlabs: "Lootlabs", linkvertise: "Linkvertise" };
-
-            // The Discord condition comes FIRST, before any mention of a
-            // sponsor step. Somebody who cannot unlock at all should not be
-            // offered a set of offers to complete — the server would refuse
-            // them at the end of it, which is the worst possible order to find
-            // out in.
-            const d = account.discord;
-            if (d.requireMember && !account.discordLinked) {
-              return `
-                <p>This library is for members of the Discord server.</p>
-                <div class="gate__actions">
-                  ${d.invite ? `<a class="btn btn--discordauth" href="${esc(safeHref(d.invite))}"
-                       target="_blank" rel="noopener">Join the Discord</a>` : ""}
-                  <a class="btn btn--primary" href="/api/auth/discord/start">Sign in with Discord</a>
-                </div>
-                <p class="gate__note">Join the server, then sign in with Discord — after that it's
-                   one short sponsor step per script, same as everyone else.</p>`;
-            }
-            if (blockedByDiscord) {
-              return `
-                <p>${esc(blockedByDiscord.error || "You need to be in the Discord server.")}</p>
-                <div class="gate__actions">
-                  ${blockedByDiscord.invite ? `<a class="btn btn--primary"
-                       href="${esc(safeHref(blockedByDiscord.invite))}" target="_blank"
-                       rel="noopener">Join the Discord</a>` : ""}
-                  <button class="btn btn--ghost" data-act="recheck">I've joined — check again</button>
-                </div>`;
-            }
-
-            // No provider configured. Offering a sponsor button here would be
-            // a lie — there is no ad to show and no author to pay.
-            if (!live.length) {
-              return `
-                <p>The sponsor step isn't switched on yet, so this one is on the house.</p>
-                <div class="gate__actions">
-                  <button class="btn btn--primary" data-act="free" ${busy ? "disabled" : ""}>
-                    ${busy ? "Opening…" : "Show me the script"}
-                  </button>
-                </div>
-                <p class="gate__note">Once sponsors are live, unlocking pays the person who wrote this.</p>`;
-            }
-
-            return `
-              <p>Complete one short sponsor step to unlock the code. It pays the person who wrote it.</p>
-              <div class="gate__actions">
-                ${live.map((id, i) => `
-                  <button class="btn btn--primary${i ? " btn--alt" : ""}" data-act="${esc(id)}" ${busy ? "disabled" : ""}>
-                    ${busy ? "Opening…" : `Unlock with ${esc(LABEL[id] || id)}`}
-                  </button>`).join("")}
-              </div>
-              <p class="gate__note">You'll come straight back here with the script open,
-                 and it stays unlocked for ${account.unlockMinutes} minutes.</p>`;
-          })()}
-        </div>
-      `}`;
-
+            : "") : ""}`;
   }
 
   /**
@@ -1258,6 +1298,13 @@ export function createScriptPage({ onRequireAuth }) {
   sheet.body.addEventListener("click", async (e) => {
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (!act || !current) return;
+
+    if (act === "preview-visitor") { previewVisitor = true; render(); return; }
+    if (act === "preview-exit") { previewVisitor = false; render(); return; }
+    if (act === "preview-noop") {
+      toast("Preview — on your own script this does nothing. Visitors go to the sponsor step.", "warn");
+      return;
+    }
 
     if (act === "copy") {
       const ok = await copyText(code || "");
@@ -1349,6 +1396,7 @@ export function createScriptPage({ onRequireAuth }) {
       current = { ...script };
       code = null;
       busy = false;
+      previewVisitor = false;
       render();
       sheet.open();
 

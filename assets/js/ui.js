@@ -692,10 +692,74 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
     </nav>
     <button class="nav__search" aria-label="Search scripts">
       <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-3.5-3.5"></path></svg>
-    </button>`;
+    </button>
+    <button class="nav__menu" type="button" aria-label="Menu" aria-expanded="false" aria-controls="nav-drawer">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+    </button>
+    <div class="nav__drawer" id="nav-drawer" hidden></div>`;
   document.body.appendChild(nav);
 
+  /*
+   * Links collapse into a menu whenever they don't fit — measured, not guessed.
+   *
+   * The links used to vanish below 820px and otherwise just squeeze: between
+   * about 820 and 1200px wide they wrapped ("My / Scripts"), slid under the
+   * floating Dashboard button, and pushed the search button off the edge. Now
+   * the nav measures what it needs on every resize and switches to a menu
+   * button the moment the row would overflow, at any window size.
+   */
+  const linksEl = $(".nav__links", nav);
+  const drawer = $(".nav__drawer", nav);
+  const menuBtn = $(".nav__menu", nav);
+  drawer.innerHTML = linksEl.innerHTML;
+  let linksWidth = 0;
+  function fitNav() {
+    // Measure the links at their natural width (they're hidden while compact,
+    // so briefly un-compact to read it — one layout, once per resize frame).
+    if (window.innerWidth > 820) {
+      nav.classList.remove("nav--compact");
+      linksWidth = linksEl.scrollWidth || linksWidth;
+    }
+    const cs = getComputedStyle(nav);
+    const gap = parseFloat(cs.columnGap || cs.gap) || 0;
+    const brand = $(".nav__brand", nav).getBoundingClientRect().width;
+    const search = $(".nav__search", nav).getBoundingClientRect().width;
+    const need = parseFloat(cs.paddingLeft) + brand + gap + linksWidth + gap + search;
+    // The row has to stop short of the floating Dashboard button when that
+    // button sits up in the top bar; otherwise at the nav's own padding.
+    const dash = document.querySelector(".dashbtn");
+    const dr = dash?.getBoundingClientRect();
+    const limit = dr && dr.width && dr.top < 60
+      ? dr.left - 14
+      : nav.clientWidth - parseFloat(cs.paddingRight);
+    const tooNarrow = window.innerWidth <= 820 || need > limit;
+    nav.classList.toggle("nav--compact", tooNarrow);
+    if (!tooNarrow) closeDrawer();
+  }
+  function closeDrawer() {
+    drawer.hidden = true;
+    menuBtn.setAttribute("aria-expanded", "false");
+  }
+  menuBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const opening = drawer.hidden;
+    drawer.hidden = !opening;
+    menuBtn.setAttribute("aria-expanded", String(opening));
+  });
+  document.addEventListener("click", (e) => { if (!drawer.hidden && !nav.contains(e.target)) closeDrawer(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+  let fitQueued = false;
+  const queueFit = () => {
+    if (fitQueued) return;
+    fitQueued = true;
+    requestAnimationFrame(() => { fitQueued = false; fitNav(); });
+  };
+  window.addEventListener("resize", queueFit, { passive: true });
+  document.fonts?.ready?.then(queueFit);
+  queueFit();
+
   nav.addEventListener("click", (e) => {
+    if (e.target.closest(".nav__drawer button, .nav__drawer a")) closeDrawer();
     const jump = e.target.closest("[data-jump]");
     if (jump) { e.preventDefault(); onJump(jump.dataset.jump); return; }
     if (e.target.closest("[data-library]")) { onLibrary?.(); return; }
@@ -727,7 +791,7 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
       fill.style.transform = `scaleX(${progress})`;
       label.textContent = CHAPTERS[activeIndex]?.label || "";
       nav.classList.toggle("is-scrolled", progress > 0.004);
-      $$(".nav__links button", nav).forEach((b) => {
+      $$(".nav__links button, .nav__drawer button", nav).forEach((b) => {
         b.classList.toggle("is-on", b.dataset.jump === CHAPTERS[activeIndex]?.key);
       });
     },

@@ -118,9 +118,13 @@ export async function publishScript(script) {
  * Null on any failure, so a missing model or a rate limit degrades to "no
  * suggestion" rather than an error the publisher has to dismiss.
  */
-export async function describeScript({ desc, title, game }) {
-  const res = await call("/api/scripts/describe", { method: "POST", body: { desc, title, game } });
-  return res.ok ? res.data : null;
+export async function describeScript({ desc, title, game, code = "", keyless = null }) {
+  const res = await call("/api/scripts/describe", {
+    method: "POST", body: { desc, title, game, code: String(code || "").slice(0, 4000), keyless },
+  });
+  if (res.ok) return res.data;
+  // Errors (rate limit, signed out) come back as a reason, not as "no change".
+  return { ai: false, why: "error", error: res.error || "" };
 }
 
 export async function deleteScript(id) {
