@@ -156,6 +156,32 @@ export function createPublishForm({ onAuth, onPublished }) {
   let aiOffer = null;        // { improved, original } awaiting a decision
   let descTimer = 0;
 
+  /**
+   * The unprompted offer to tidy up a description.
+   *
+   * "Enhance with AI" was a button sitting under the box, and a button nobody
+   * looks at is a feature nobody uses — publishers typed four rushed words and
+   * hit submit. So the offer comes to them instead: when they stop typing, or
+   * when they leave the field, a small card appears and asks once.
+   *
+   * The rules below are what keep it from becoming nagware, which is the
+   * failure mode every "helpful" popup has:
+   *
+   *  - It waits for a PAUSE, or for the field to lose focus. Appearing
+   *    mid-sentence is an interruption, not an offer.
+   *  - It asks ONCE. Dismissing sets `promptMuted`, and only a substantial
+   *    rewrite — 40+ characters different from what they had when they said
+   *    no — earns another ask.
+   *  - It never appears while a rewrite is already on screen or in flight.
+   *  - It never takes focus. The cursor stays where they left it.
+   */
+  let promptUp = false;      // the card is on screen
+  let promptMuted = false;   // they said no; stay quiet
+  let promptMutedAt = "";    // what the text said when they said no
+  let idleTimer = 0;
+  const IDLE_MS = 1400;
+  const PROMPT_MIN_WORDS = 8;
+
   /* ------------------------------------------------------------ paint */
 
   function signedOut() {
@@ -267,6 +293,7 @@ export function createPublishForm({ onAuth, onPublished }) {
                 <span aria-hidden="true">✦</span> Enhance with AI
               </button>
             </div>
+            <div class="aiprompt" data-aiprompt hidden></div>
             <div class="aihints" data-hints hidden></div>
             <div class="aioffer" data-offer hidden></div>
             <span class="field__err" data-err="desc"></span>
@@ -451,6 +478,63 @@ export function createPublishForm({ onAuth, onPublished }) {
       </ul>`;
   }
 
+  /* ------------------------------------------- the offer, unprompted */
+
+  /** Whether the card has earned the right to be on screen right now. */
+  function promptEligible(v) {
+    if (aiBusy || aiOffer) return false;          // already mid-conversation
+    if (promptMuted) {
+      // They said no. Only a real rewrite earns another ask — not a typo fix.
+      if (Math.abs(v.desc.length - promptMutedAt.length) < 40) return false;
+      promptMuted = false;
+    }
+    // Below this there is nothing for the AI to work from, and the offer
+    // reads as pestering somebody who has barely started.
+    return wordCount(v.desc) >= PROMPT_MIN_WORDS;
+  }
+
+  function paintPrompt() {
+    const box = $("[data-aiprompt]", node);
+    if (!box) return;
+    if (!promptUp) { box.hidden = true; box.innerHTML = ""; return; }
+
+    const words = wordCount(values().desc);
+    const short = words < MIN_WORDS;
+
+    box.hidden = false;
+    box.innerHTML = `
+      <span class="aiprompt__spark" aria-hidden="true">✦</span>
+      <span class="aiprompt__body">
+        <b>Want this tidied up?</b>
+        <span>${short
+          ? `I can fix the writing and build it out toward the ${MIN_WORDS} words you need — using only what you've written.`
+          : "I can fix the spelling and grammar and make it read more clearly, without changing what you said."}</span>
+      </span>
+      <span class="aiprompt__acts">
+        <button class="btn btn--ai btn--xs" type="button" data-act="enhance">✦ Enhance</button>
+        <button class="btn btn--ghost btn--xs" type="button" data-act="nothanks">No thanks</button>
+      </span>`;
+  }
+
+  /** They paused, or left the field. */
+  function maybePrompt() {
+    const v = values();
+    if (!promptEligible(v)) {
+      if (promptUp) { promptUp = false; paintPrompt(); }
+      return;
+    }
+    if (promptUp) { paintPrompt(); return; }      // refresh the wording only
+    promptUp = true;
+    paintPrompt();
+  }
+
+  function mutePrompt() {
+    promptUp = false;
+    promptMuted = true;
+    promptMutedAt = values().desc;
+    paintPrompt();
+  }
+
   /* ----------------------------------------------------------- the AI */
 
   function paintOffer() {
@@ -489,6 +573,8 @@ export function createPublishForm({ onAuth, onPublished }) {
 
   async function enhance() {
     if (aiBusy) return;
+    promptUp = false;
+    paintPrompt();
     const v = values();
     if (wordCount(v.desc) < 8) return toast("Write a little more first — the AI works from what you wrote", "warn");
 
@@ -620,6 +706,10 @@ export function createPublishForm({ onAuth, onPublished }) {
       paintOffer();
       return;
     }
+    if (e.target.closest('[data-act="nothanks"]')) {
+      mutePrompt();
+      return;
+    }
     if (e.target.closest('[data-act="thumbclear"]')) {
       thumb = { value: "", auto: thumb.auto, name: "" };
       const input = $('input[name="thumbnail"]', node);
@@ -646,9 +736,35 @@ export function createPublishForm({ onAuth, onPublished }) {
       clearTimeout(descTimer);
       descTimer = setTimeout(repaintLive, 220);
       paintCounter(values());
+
+      // The card goes away the moment they start typing again — an offer
+      // about a sentence they are still changing is about the wrong sentence —
+      // and comes back when they next pause.
+      if (promptUp) { promptUp = false; paintPrompt(); }
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(maybePrompt, IDLE_MS);
       return;
     }
     repaintLive();
+  });
+
+  /**
+   * Leaving the description field is the clearest "I'm done with this" signal
+   * the form gets, so it offers immediately rather than waiting out the idle
+   * timer.
+   *
+   * `focusout` rather than `blur` because blur does not bubble, and this is a
+   * delegated listener on the whole form.
+   *
+   * The 120ms delay is not laziness. On focusout the click that MOVED focus is
+   * still being dispatched, and inserting a card into the layout underneath a
+   * travelling cursor shifts whatever they were about to click. Letting the
+   * click land first costs nothing and avoids a genuinely maddening bug.
+   */
+  node.addEventListener("focusout", (e) => {
+    if (e.target?.name !== "desc") return;
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(maybePrompt, 120);
   });
 
   node.addEventListener("change", (e) => {
@@ -750,6 +866,10 @@ export function createPublishForm({ onAuth, onPublished }) {
 
     thumb = { value: "", auto: "", name: "" };
     aiOffer = null;
+    promptUp = false;
+    promptMuted = false;
+    promptMutedAt = "";
+    clearTimeout(idleTimer);
     touched.clear();
     form.reset();
     picker?.reset();
