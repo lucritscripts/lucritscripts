@@ -2224,7 +2224,7 @@ async function handleAdminUsers(request, env) {
   });
 }
 
-async function handleAdminUserBan(request, env, { id }) {
+async function handleAdminUserBan(request, env, { id }, ctx) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
 
@@ -2241,10 +2241,36 @@ async function handleAdminUserBan(request, env, { id }) {
   await env.DB.prepare(`UPDATE users SET banned = ? WHERE id = ?`).bind(banned, id).run();
   if (banned) await env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(id).run();
 
+  // Suspending takes an author's scripts off the site, so it has to take them
+  // out of Discord too — otherwise the server keeps advertising scripts the
+  // site no longer shows, each with a Get Script button that leads nowhere.
+  // Lifting the suspension puts the same posts back rather than announcing
+  // again, so the channel doesn't fill with duplicates of returning scripts.
+  //
+  // Through the queue-backed functions, so a Discord hiccup here retries like
+  // any other sync instead of leaving the server out of step.
+  const after = (async () => {
+    const { results } = await env.DB.prepare(
+      `SELECT s.*, u.username AS author FROM scripts s
+         JOIN users u ON u.id = s.author_id
+        WHERE s.author_id = ? AND s.removed = 0`
+    ).bind(id).all().catch(() => ({ results: [] }));
+    for (const row of results || []) {
+      if (banned) await retireScriptPosts(env, row, row.author);
+      else await syncScriptPosts(env, row, row.author, { state: "live" });
+    }
+    if ((results || []).length) {
+      await modLog(env, banned ? "Account suspended" : "Suspension lifted",
+        `${(results || []).length} script post set${results.length === 1 ? "" : "s"} ${banned ? "retired" : "restored"} in Discord.`,
+        banned ? 0xef5350 : 0x66bb6a);
+    }
+  })();
+  if (ctx?.waitUntil) ctx.waitUntil(after.catch(() => {})); else after.catch(() => {});
+
   return ok({ data: { id, banned: Boolean(banned) } });
 }
 
-async function handleAdminUserDelete(request, env, { id }) {
+async function handleAdminUserDelete(request, env, { id }, ctx) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
   if (admin.id && id === admin.id) return bad(400, "You can't delete the account you're signed in as.");
@@ -2262,6 +2288,14 @@ async function handleAdminUserDelete(request, env, { id }) {
   // Their unlock history is kept. It records what happened, not who they were,
   // and deleting it would silently rewrite every earnings total on the site.
   await env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(id).run();
+
+  // Their scripts just went with them (ON DELETE CASCADE), but their Discord
+  // posts did not — `script_posts` has no foreign key. Sweep them now rather
+  // than on the next page view; anything this pass cannot reach (Discord down,
+  // more than one pass's worth) is picked up by the regular drain later.
+  const after = sweepOrphanPosts(env, { limit: 25 });
+  if (ctx?.waitUntil) ctx.waitUntil(after.catch(() => {})); else after.catch(() => {});
+
   return ok({ data: { id, deleted: true } });
 }
 
@@ -3419,6 +3453,11 @@ async function runDiscordJob(env, kind, scriptId) {
 async function drainDiscordQueue(env, { limit = 3 } = {}) {
   if (!botOn(env)) return { ran: 0, ok: 0 };
 
+  // Orphans first: they are the one kind of stale post the queue itself cannot
+  // represent, because a queued job is rebuilt from a script row and these have
+  // none. One indexed lookup when there is nothing to do.
+  await sweepOrphanPosts(env).catch(() => {});
+
   let rows = [];
   try {
     const out = await env.DB.prepare(
@@ -3463,6 +3502,84 @@ async function drainDiscordQueue(env, { limit = 3 } = {}) {
     }
   }
   return { ran: rows.length, ok };
+}
+
+/**
+ * Discord posts whose script no longer exists at all.
+ *
+ * Deleting an account removes its scripts by ON DELETE CASCADE — and nothing
+ * else. `script_posts` has no foreign key (it also tracks executors, whose ids
+ * live in a different table), so the tracking rows survive, and so do the
+ * messages: a struck-through card is what a removed script gets, but a
+ * cascade-deleted one got nothing, and kept a live "Get Script" button pointing
+ * at a page that says the script does not exist. Found in production: two test
+ * accounts deleted from the admin panel left six such posts in the server.
+ *
+ * The script row is gone, so the replacement embed cannot be rebuilt from it.
+ * Instead each message is READ first and its own title is struck through —
+ * somebody scrolling the channel still sees what the post was, and why it is
+ * dead, rather than a generic tombstone.
+ *
+ * Runs inside the ordinary queue drain, so it needs no admin action and no
+ * passcode: deploying this cleans up whatever is already orphaned, and every
+ * future deletion cleans itself up on the next page view. Bounded per pass for
+ * the same 10ms-CPU reason the queue is.
+ */
+async function sweepOrphanPosts(env, { limit = 4 } = {}) {
+  if (!botOn(env)) return { swept: 0 };
+
+  let rows = [];
+  try {
+    const out = await env.DB.prepare(
+      `SELECT p.script_id, p.channel_id, p.message_id
+         FROM script_posts p
+        WHERE p.kind <> 'executor'
+          AND NOT EXISTS (SELECT 1 FROM scripts s WHERE s.id = p.script_id)
+        LIMIT ?`
+    ).bind(limit).all();
+    rows = out.results || [];
+  } catch { return { swept: 0 }; }
+
+  let swept = 0;
+  for (const r of rows) {
+    const path = `/channels/${r.channel_id}/messages/${r.message_id}`;
+    const msg = await bot(env, path);
+
+    // The message is already gone (deleted by hand, or the channel was). Nothing
+    // to strike through; the tracking row is all that is left to tidy.
+    const missing = msg === null;
+
+    if (!missing) {
+      const old = msg?.embeds?.[0] || {};
+      const title = String(old.title || "Script").replace(/^~~|~~$/g, "");
+      const edited = await bot(env, path, {
+        method: "PATCH",
+        body: {
+          embeds: [{
+            title: `~~${clip(title, 240)}~~`,
+            description: "**This script is no longer available on Lucrit Scripts.**",
+            color: 0x4a5568,
+            ...(old.author ? { author: { name: old.author.name } } : {}),
+            footer: { text: "Lucrit Scripts · lucritscripts.site" },
+            timestamp: old.timestamp || new Date().toISOString(),
+          }],
+          // Explicitly empty. Leaving `components` out keeps the old button,
+          // and a live-looking Get Script button on a dead script is the whole
+          // problem this function exists to fix.
+          components: [],
+          allowed_mentions: { parse: [] },
+        },
+      });
+      if (!edited) continue;              // Discord said no; try again next pass
+    }
+
+    await env.DB.prepare(`DELETE FROM script_posts WHERE script_id = ? AND channel_id = ?`)
+      .bind(r.script_id, r.channel_id).run().catch(() => {});
+    swept++;
+  }
+
+  if (swept) await botLog(env, `Retired ${swept} Discord post${swept === 1 ? "" : "s"} for scripts that no longer exist.`);
+  return { swept };
 }
 
 /** Integration errors and bot events, in their own channel. */
