@@ -126,6 +126,15 @@ console.log("\nDesktop");
   check("a dot jumps straight to its section", Math.abs(pub.top) < 40, JSON.stringify(pub));
   check("…and lights up as the current one", pub.on === "submit", JSON.stringify(pub));
 
+  // The front page has its own way to the publish form.
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(600);
+  check("the front page has a 'Publish a Script' button", await page.locator('.hero__cta [data-jump="submit"]').isVisible());
+  await page.locator('.hero__cta [data-jump="submit"]').click();
+  await page.waitForTimeout(2800);
+  const viaHero = await page.evaluate(() => Math.round(document.getElementById("ch-submit").getBoundingClientRect().top));
+  check("…which takes you straight to the publish form", Math.abs(viaHero) < 40, String(viaHero));
+
   // The animation is kept: a section further down starts hidden and glides in.
   await page.evaluate(() => window.scrollTo(0, 0));
   await page.waitForTimeout(400);

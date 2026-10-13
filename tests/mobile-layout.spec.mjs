@@ -39,6 +39,7 @@ for (const [w, h] of [[360, 740], [390, 844]]) {
     return { lowest, cueTop: cue.top, vh: innerHeight, n: btns.length };
   });
   check("all hero buttons are on the first screen, above the swipe cue", hero.lowest < hero.cueTop && hero.n >= 4, JSON.stringify(hero));
+  check("'Publish a Script' is one of them", await page.locator('.hero__cta [data-jump="submit"]').isVisible());
   check("no sideways scrolling", await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
   // Floating buttons step aside while scrolling down, and come back.
