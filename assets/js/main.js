@@ -508,6 +508,24 @@ let hidden = false;
 
 document.addEventListener("visibilitychange", () => { hidden = document.hidden; });
 
+// Phones: the floating Ask / Dashboard buttons sit in both bottom corners,
+// on top of whatever is there. Hide them while scrolling down; bring them back
+// on any upward scroll, after a short pause, or at the very bottom.
+if (caps.mobile) {
+  let lastY = window.scrollY, idle = 0;
+  const html = document.documentElement;
+  window.addEventListener("scroll", () => {
+    const y = window.scrollY;
+    const atEnd = y + window.innerHeight >= document.documentElement.scrollHeight - 40;
+    const down = y > lastY + 4 && y > 120 && !atEnd;
+    if (down) html.classList.add("is-scrolling-down");
+    else if (y < lastY - 4 || atEnd || y <= 120) html.classList.remove("is-scrolling-down");
+    lastY = y;
+    clearTimeout(idle);
+    idle = setTimeout(() => html.classList.remove("is-scrolling-down"), 1400);
+  }, { passive: true });
+}
+
 // Phones draw the backdrop on a budget and step it down if the device still
 // can't keep up. Each rung is cheaper than the last; the final rung freezes
 // the world on its current frame so scrolling stays smooth on the weakest

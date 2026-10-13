@@ -954,7 +954,10 @@ export function createChoreography({ chrome, onCategoryIndex }) {
     const i = sections.findIndex((x) => x.key === key);
     if (i < 0) return 0;
     if (i === 0) return 0;
-    return sections[i].a;
+    // Land with the section's label just under the fixed nav bar.
+    const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    const nav = window.innerWidth <= 820 ? 8 : 0;
+    return Math.max(0, sections[i].a - nav / max);
   }
 
   /* --------------------------------------------------------- settling */
