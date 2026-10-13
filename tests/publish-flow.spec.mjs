@@ -202,12 +202,12 @@ check("…and the form says it's using it", /Using your image/.test(shrunk.state
 
 aiReply = new Error("model down");
 await form.locator('textarea[name="desc"]').fill("af script for pet sim it hatches eggs and farms coins on mobile");
-await form.locator('[data-act="enhance"]').click();
+await form.locator('[data-act="enhance"]').first().click();
 await author.page.waitForTimeout(700);
 const t1 = await author.page.locator(".toast").textContent();
 check("a failed AI rewrite says so (not 'already reads well')", /couldn't rewrite/i.test(t1) && !/reads well/.test(t1), t1);
 aiReply = { response: { description: LONG, tags: ["AutoFarm"] } };
-await form.locator('[data-act="enhance"]').click();
+await form.locator('[data-act="enhance"]').first().click();
 await author.page.waitForTimeout(700);
 check("a working AI rewrite is offered side by side", await form.locator("[data-offer]:not([hidden]) [data-act='accept']").count() === 1);
 
