@@ -204,7 +204,7 @@ function attachTilt(root, strength = 8) {
  * count line then offers a way back out.
  */
 export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLibrary }) {
-  const state = { query: "", cat: "", game: "" };
+  const state = { query: "", cat: "", game: "", limit: 12 };
   const root = el("div", { class: "library", id });
 
   root.innerHTML = `
@@ -280,7 +280,8 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
       (cat || game ? ` <button class="library__undo" type="button" data-clear-filters>clear</button>` : "");
 
     if (list.length) {
-      results.innerHTML = `<div class="results__grid">${list.map((s) => cardMarkup(s)).join("")}</div>`;
+      results.innerHTML = `<div class="results__grid">${list.slice(0, state.limit).map((s) => cardMarkup(s)).join("")}</div>`
+        + moreButton(list.length);
       return;
     }
 
@@ -325,12 +326,32 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
         <div class="games games--compact">${games.map(gameTileMarkup).join("")}</div>` : ""}
       ${scripts.length ? `
         <h3 class="results__head">Scripts</h3>
-        <div class="results__grid">${scripts.map((s) => cardMarkup(s)).join("")}</div>` : ""}`;
+        <div class="results__grid">${scripts.slice(0, state.limit).map((s) => cardMarkup(s)).join("")}</div>
+        ${moreButton(scripts.length)}` : ""}`;
   }
 
+  /*
+   * The results used to sit in their own small scrolling box. On a phone that
+   * box swallowed the swipe — you scrolled the list, hit its end, and the page
+   * wouldn't move. Results now flow with the page, a page at a time.
+   */
+  function moreButton(total) {
+    const left = total - state.limit;
+    return left > 0
+      ? `<button class="btn btn--ghost results__more" type="button" data-more-results>
+           Show ${Math.min(RESULTS_PAGE, left)} more <span class="results__left">(${left} left)</span>
+         </button>`
+      : "";
+  }
+
+  let viewKey = "";
   function render() {
     clear.hidden = !state.query;
     paintGameMenu();
+
+    // A new search or filter starts back at the first page.
+    const key = `${state.query.trim()}|${state.game}|${state.cat}`;
+    if (key !== viewKey) { viewKey = key; state.limit = RESULTS_PAGE; }
 
     if (state.query.trim()) searchView();
     else scriptsView();
@@ -365,6 +386,11 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
   });
 
   root.addEventListener("click", (e) => {
+    if (e.target.closest("[data-more-results]")) {
+      state.limit += RESULTS_PAGE;
+      if (state.query.trim()) searchView(); else scriptsView();
+      return;
+    }
     if (e.target.closest("[data-more]")) { onOpenLibrary?.(); return; }
     if (e.target.closest("[data-clear-filters]")) {
       state.cat = "";
@@ -454,14 +480,15 @@ const CATEGORY_WORLDS = [
 export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump, onPublish, onAuth, onInfo }) {
   const content = el("main", { id: "content" });
 
-  // The stage is a 100vh scroll box. Most chapters fit inside it and never
-  // scroll, but a few — Publish above all — are taller than the screen, and
-  // without `data-native-scroll` the wheel handler would drive the page past
-  // them instead of letting you read to the bottom.
+  // Sections are ordinary, full-width blocks that flow down the page (Oct
+  // 2026). They used to be 100vh boxes pinned in place that scrolled on their
+  // own — on a phone, a swipe that started on the content scrolled that inner
+  // box instead of the page, so the page only moved if you swiped along the
+  // very edges of the screen. Now there is one scroll: the page's.
   const chapter = (key, label, len, inner) => `
     <section class="chapter" id="ch-${key}" data-chapter="${key}" style="--len:${len}">
       <div class="chapter__inner">
-        <div class="chapter__stage" data-native-scroll>
+        <div class="chapter__stage">
           <span class="chapter__tag" aria-hidden="true">${label}</span>
           ${inner}
         </div>
@@ -493,10 +520,11 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
           <button class="btn btn--ghost" data-auth="account">View Account</button>
         </div>
       </div>
-      <div class="scrollcue" aria-hidden="true">
-        <span>Scroll to explore</span>
-        <svg viewBox="0 0 24 24"><path d="M12 4v14M6 13l6 6 6-6"/></svg>
-      </div>`),
+      <button class="scrollcue" type="button" data-jump="universe" aria-label="Scroll down to explore">
+        <span class="scrollcue__mouse" aria-hidden="true"></span>
+        <svg class="scrollcue__finger" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6M7 11l5-5 5 5"/></svg>
+        <span><span class="scrollcue__label--mouse">Scroll to explore</span><span class="scrollcue__label--touch">Swipe up to explore</span></span>
+      </button>`),
 
     chapter("universe", "02 / The Library", CHAPTERS[1].len, `
       <div class="statement">
@@ -524,7 +552,7 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
 
     chapter("categories", "05 / Worlds", CHAPTERS[4].len, `
       <div class="worlds">
-        <div class="worlds__rail" aria-hidden="true"></div>
+        <div class="worlds__rail" role="tablist" aria-label="Script categories"></div>
         <div class="worlds__stage"></div>
       </div>`),
 
@@ -569,7 +597,8 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
   /* ---- category worlds ---- */
   const rail = $(".worlds__rail", content);
   const stage = $(".worlds__stage", content);
-  rail.innerHTML = CATEGORY_WORLDS.map((w) => `<span>${w.title}</span>`).join("");
+  rail.innerHTML = CATEGORY_WORLDS.map((w, i) =>
+    `<button type="button" data-world-tab="${i}" role="tab">${w.title}</button>`).join("");
   stage.innerHTML = CATEGORY_WORLDS.map((w, i) => {
     const cat = categoryOf(w.id);
     return `<div class="world" data-i="${i}" style="--cat:${cat.accent}">
@@ -785,12 +814,25 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
   const fill = $(".progress__fill", nav);
   const label = $("[data-label]", nav);
 
+  // Section dots down the right edge: shows where you are on the page and
+  // jumps anywhere in one click. Desktop only — phones have the menu.
+  const dots = el("nav", { class: "sectiondots", "aria-label": "Page sections" });
+  dots.innerHTML = CHAPTERS.map((c) =>
+    `<button type="button" data-jump="${c.key}" aria-label="${c.label}"><span>${c.label}</span></button>`).join("");
+  dots.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-jump]");
+    if (b) onJump(b.dataset.jump);
+  });
+  document.body.appendChild(dots);
+  const dotButtons = $$("button", dots);
+
   return {
     nav,
     update(progress, activeIndex) {
       fill.style.transform = `scaleX(${progress})`;
       label.textContent = CHAPTERS[activeIndex]?.label || "";
       nav.classList.toggle("is-scrolled", progress > 0.004);
+      dotButtons.forEach((b, i) => b.classList.toggle("is-on", i === activeIndex));
       $$(".nav__links button, .nav__drawer button", nav).forEach((b) => {
         b.classList.toggle("is-on", b.dataset.jump === CHAPTERS[activeIndex]?.key);
       });
@@ -801,6 +843,9 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
 /* ============================================================
    Scroll choreography
    ============================================================ */
+
+const FLOW = true;
+const RESULTS_PAGE = 12;   // sections flow down the page; see buildChapters
 
 export function createChoreography({ chrome, onCategoryIndex }) {
   const sections = $$(".chapter").map((node) => ({
@@ -813,9 +858,59 @@ export function createChoreography({ chrome, onCategoryIndex }) {
 
   const cue = $(".scrollcue");
   const worlds = $$(".world");
-  const railItems = $$(".worlds__rail span");
+  const railItems = $$(".worlds__rail [data-world-tab]");
+
+  /* ---- reveal: each section glides in once as it comes on screen ----
+     The animation people see is kept — a fade and a short rise — but it is
+     triggered by the section ARRIVING, not tied to the exact scroll position.
+     Content is never half-transparent while you are trying to read it, and
+     nothing depends on scrolling a precise distance. */
+  const reveal = "IntersectionObserver" in window
+    ? new IntersectionObserver((entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) { e.target.classList.add("is-in"); reveal.unobserve(e.target); }
+        }
+      }, { rootMargin: "0px 0px -12% 0px", threshold: 0.06 })
+    : null;
+  sections.forEach((s, i) => {
+    if (i === 0 || !reveal) s.node.classList.add("is-in");
+    else reveal.observe(s.node);
+  });
+
+  /* ---- category worlds: tabs that also cycle on their own ----
+     These used to change with scroll position, which is why that chapter was
+     nearly four screens tall. Now they are tabs: click one, or let them
+     rotate every few seconds while the section is on screen. */
   let lastWorld = -1;
-  let worldsShown = true;   // true at start so the first out-of-band update clears them
+  let worldIdx = 0;
+  let worldTimer = 0;
+  let worldsVisible = false;
+  let worldsPinned = false;   // someone picked a tab — stop rotating for good
+  function showWorld(i, { user = false } = {}) {
+    worldIdx = (i + worlds.length) % worlds.length;
+    worlds.forEach((w, k) => {
+      const on = k === worldIdx;
+      w.classList.toggle("is-on", on);
+      w.style.opacity = "";
+    });
+    railItems.forEach((r, k) => {
+      r.classList.toggle("is-on", k === worldIdx);
+      r.setAttribute("aria-selected", String(k === worldIdx));
+    });
+    if (worldIdx !== lastWorld) { lastWorld = worldIdx; onCategoryIndex?.(worldIdx); }
+    if (user) { worldsPinned = true; clearInterval(worldTimer); worldTimer = 0; }
+  }
+  railItems.forEach((r) => r.addEventListener("click", () => showWorld(Number(r.dataset.worldTab), { user: true })));
+  if (worlds.length) showWorld(0);
+  const catSection = sections.find((x) => x.key === "categories");
+  if (catSection && "IntersectionObserver" in window && !document.documentElement.classList.contains("reduced-motion")) {
+    new IntersectionObserver(([e]) => {
+      worldsVisible = e.isIntersecting;
+      if (worldsVisible && !worldTimer && !worldsPinned) {
+        worldTimer = setInterval(() => showWorld(worldIdx + 1), 4200);
+      } else if (!worldsVisible && worldTimer) { clearInterval(worldTimer); worldTimer = 0; }
+    }, { threshold: 0.35 }).observe(catSection.node);
+  }
 
   /**
    * Scroll progress is scrollY / (docHeight - viewportHeight), but a section
@@ -833,6 +928,16 @@ export function createChoreography({ chrome, onCategoryIndex }) {
   measure();
   window.addEventListener("resize", measure, { passive: true });
   window.addEventListener("load", measure, { passive: true });
+  // Sections are as tall as their content now, and content arrives late (the
+  // library, the publish form, "show more"), so positions are re-read when it does.
+  if ("ResizeObserver" in window) {
+    let queued = false;
+    new ResizeObserver(() => {
+      if (queued) return;
+      queued = true;
+      requestAnimationFrame(() => { queued = false; measure(); window.dispatchEvent(new Event("lucrit:layout")); });
+    }).observe(document.getElementById("content"));
+  }
 
   function toCameraProgress(p) {
     for (let i = 0; i < sections.length; i++) {
@@ -849,7 +954,7 @@ export function createChoreography({ chrome, onCategoryIndex }) {
     const i = sections.findIndex((x) => x.key === key);
     if (i < 0) return 0;
     if (i === 0) return 0;
-    return sections[i].a + (sections[i].b - sections[i].a) * 0.45;
+    return sections[i].a;
   }
 
   /* --------------------------------------------------------- settling */
@@ -878,6 +983,10 @@ export function createChoreography({ chrome, onCategoryIndex }) {
    * scrolling inside a chapter is never interfered with.
    */
   function snapTarget(progress, direction = 0) {
+    // Sections flow now, so there is no half-faded "limbo" to glide out of.
+    // The page stays exactly where the reader stops it — the forced settle
+    // was a large part of why scrolling felt like a fight.
+    if (FLOW) return null;
     const zones = restZones();
 
     for (const z of zones) {
@@ -903,58 +1012,20 @@ export function createChoreography({ chrome, onCategoryIndex }) {
   }
 
   function update(progress) {
+    // The active section is the one under the upper third of the screen —
+    // what someone is actually looking at, for the nav highlight and dots.
+    const max = Math.max(1, document.documentElement.scrollHeight - window.innerHeight);
+    const probe = progress + (window.innerHeight * 0.35) / max;
     let active = 0;
-
     sections.forEach((s, i) => {
-      const span = Math.max(1e-6, s.b - s.a);
-      const local = clamp01((progress - s.a) / span);
-      const inView = progress >= s.a - 0.02 && progress <= s.b + 0.02;
-      if (progress >= s.a && progress < s.b) active = i;
-
-      const isFirst = i === 0;
-      const isLast = i === sections.length - 1;
-      const fadeIn = isFirst ? 1 : clamp01(local / 0.22);
-      const fadeOut = isLast ? 1 : 1 - clamp01((local - 0.78) / 0.22);
-      const vis = Math.min(fadeIn, fadeOut);
-
-      // Only touch the DOM when something changed: this runs on every scroll
-      // event, and on phones redundant style writes and the scrollTop read
-      // below (which forces a layout) added up to dropped frames.
-      const opacity = vis.toFixed(3);
-      const transform =
-        `translate3d(0, ${((1 - fadeIn) * 30 - (1 - fadeOut) * 24).toFixed(2)}px, 0)`;
-      if (s._opacity !== opacity) { s._opacity = opacity; s.stage.style.opacity = opacity; }
-      if (s._transform !== transform) { s._transform = transform; s.stage.style.transform = transform; }
-      const pe = vis > 0.35 ? "auto" : "none";
-      if (s._pe !== pe) { s._pe = pe; s.stage.style.pointerEvents = pe; }
-      if (s._live !== inView) {
-        // Leaving view: rewind any inner scroll so it starts at the top next time.
-        if (!inView && s._live !== undefined) s.stage.scrollTop = 0;
-        s._live = inView;
-        s.node.classList.toggle("is-live", inView);
-      }
+      if (probe >= s.a) active = i;
+      const live = i === active;
+      if (s._live !== live) { s._live = live; s.node.classList.toggle("is-live", live); }
     });
 
-    if (cue) cue.style.opacity = String(clamp01(1 - progress / 0.015));
-
-    const cat = sections.find((s) => s.key === "categories");
-    if (cat && progress >= cat.a && progress <= cat.b) {
-      const t = clamp01((progress - cat.a) / Math.max(1e-6, cat.b - cat.a));
-      const idx = Math.min(CATEGORY_WORLDS.length - 1, Math.floor(t * CATEGORY_WORLDS.length));
-      const inner = t * CATEGORY_WORLDS.length - idx;
-      worlds.forEach((w, i) => {
-        const on = i === idx;
-        w.classList.toggle("is-on", on);
-        w.style.opacity = on ? String(clamp01(Math.min(inner / 0.16, (1 - inner) / 0.16))) : "0";
-      });
-      railItems.forEach((r, i) => r.classList.toggle("is-on", i === idx));
-      if (idx !== lastWorld) { lastWorld = idx; onCategoryIndex?.(idx); }
-      worldsShown = true;
-    } else {
-      if (worldsShown) {
-        worlds.forEach((w) => { w.style.opacity = "0"; w.classList.remove("is-on"); });
-        worldsShown = false;
-      }
+    if (cue) {
+      const o = clamp01(1 - progress / 0.02).toFixed(2);
+      if (cue._o !== o) { cue._o = o; cue.style.opacity = o; cue.style.pointerEvents = o > 0.2 ? "auto" : "none"; }
     }
 
     chrome.update(progress, active);
