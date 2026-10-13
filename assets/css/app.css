@@ -2462,6 +2462,54 @@ img, video { max-width: 100%; }
 .script__code { margin-top: 6px; }
 .script__code pre, .script__code .code { max-width: 100%; overflow-x: auto; }
 
+/* ---- suggested scripts: same game, closest description first ---- */
+.suggest { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
+.suggest__head { font-size: 1.05rem; font-weight: 640; color: var(--ink); letter-spacing: -0.01em; }
+.suggest__head b { color: var(--cyan); font-weight: 680; }
+.suggest__note { margin-top: 4px; font-size: 0.82rem; color: var(--ink-3); }
+.suggest__grid {
+  display: grid; gap: 12px; margin-top: 14px;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 220px), 1fr));
+}
+.suggest__card {
+  --cat: var(--blue);
+  display: grid; grid-template-rows: auto 1fr; text-align: left; min-width: 0;
+  font: inherit; color: inherit; cursor: pointer; padding: 0; overflow: hidden;
+  border: 1px solid var(--line-2); border-radius: var(--r);
+  background: rgba(8, 12, 22, 0.9);
+  transition: border-color 0.2s var(--ease), transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+}
+.suggest__card:hover, .suggest__card:focus-visible {
+  border-color: color-mix(in srgb, var(--cat) 55%, transparent);
+  transform: translateY(-2px);
+  box-shadow: 0 10px 28px -14px color-mix(in srgb, var(--cat) 60%, transparent);
+  outline: none;
+}
+.suggest__thumb { display: block; aspect-ratio: 16 / 9; background: #070a12; overflow: hidden; }
+.suggest__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.suggest__ph {
+  display: grid; place-items: center; width: 100%; height: 100%;
+  font-size: 2rem; font-weight: 700; color: color-mix(in srgb, var(--cat) 70%, white);
+  background: radial-gradient(circle at 30% 30%, color-mix(in srgb, var(--cat) 28%, transparent), transparent 70%);
+}
+.suggest__body { display: grid; gap: 6px; padding: 12px 14px 14px; align-content: start; min-width: 0; }
+.suggest__chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.suggest__chips:empty { display: none; }
+.suggest__title { font-weight: 640; font-size: 0.95rem; color: var(--ink); overflow-wrap: anywhere; }
+.suggest__desc {
+  font-size: 0.8rem; line-height: 1.45; color: var(--ink-2); overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.suggest__meta { font-size: 0.74rem; color: var(--ink-3); }
+@media (max-width: 520px) {
+  /* Phones: two across with a shorter body, so four fit on about one screen. */
+  .suggest__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  .suggest__body { padding: 10px 11px 12px; }
+  .suggest__desc, .suggest__key { display: none; }
+  .suggest__card { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) { .suggest__card { transition: none; } .suggest__card:hover { transform: none; } }
+
 /* Cards: the thumbnail always fills its frame, whatever its shape. */
 .card__thumb { object-fit: cover; object-position: center; background: #070a12; }
 
