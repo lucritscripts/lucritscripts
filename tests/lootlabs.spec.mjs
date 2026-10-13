@@ -53,7 +53,7 @@ const id = pub.data.id;
 console.log("The locker we ask LootLabs for");
 let r = await call("POST", "/api/unlock/start", { scriptId: id, provider: "lootlabs" });
 const req = sent.at(-1)?.body || {};
-check("tier 3 — 'Profit Maximization' (easier than tier 4's app installs)", req.tier_id === 3, JSON.stringify(req));
+check("tier 2 — 'Gaming Offers & Recommendations' (easiest for a Roblox crowd)", req.tier_id === 2, JSON.stringify(req));
 check("5 tasks — the most LootLabs allows per session", req.number_of_tasks === 5);
 check("Classic theme (1), not the old Minecraft skin (3)", req.theme === 1);
 check("title cut to LootLabs' 30-character limit", typeof req.title === "string" && req.title.length <= 30);
@@ -62,7 +62,7 @@ check("returns to the site naming the script and click", /^https:\/\/lucritscrip
 check("token sent as a Bearer header", sent.at(-1)?.auth === "Bearer test-token");
 check("the link carries puid for the postback", /&puid=[a-f0-9]{32}$/.test(r.json?.data?.url || ""), r.json?.data?.url);
 const config = await call("GET", "/api/config");
-check("/api/config reports the settings in force", JSON.stringify(config.json.data.lootlabs) === '{"tier":3,"tasks":5,"theme":1}',
+check("/api/config reports the settings in force", JSON.stringify(config.json.data.lootlabs) === '{"tier":2,"tasks":5,"theme":1}',
   JSON.stringify(config.json.data.lootlabs));
 
 console.log("\nPostback arrives AFTER the visitor is back (the real-world order)");
