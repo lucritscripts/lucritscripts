@@ -1776,14 +1776,15 @@ const clampInt = (value, min, max, fallback) => {
   return Math.min(max, Math.max(min, n));
 };
 
-// Defaults, Oct 2026: LootLabs' own "Maximum Profit" tier (4), the most tasks
-// it allows per session (5 — LootLabs reports each completed task, so every
-// extra one is extra revenue even from visitors who stop early), and the
-// Classic theme (1). LootLabs has no Roblox theme — Classic is the plain one;
-// the old default was 3, the Minecraft skin. Override any of these with the
-// LOOT_TIER / LOOT_TASKS / LOOT_THEME variables in Cloudflare.
+// Defaults, Oct 2026: tier 3 "Profit Maximization" — easier for visitors than
+// tier 4 ("Maximum Profit and Software Products"), whose offers were mostly
+// "download and install this app", which a lot of people won't do (tried
+// 11–13 Oct). Still the most tasks LootLabs allows per session (5 — each
+// completed task is reported, so extra ones still earn from people who stop
+// early), and the Classic theme (1); LootLabs has no Roblox theme. Override
+// any of these with LOOT_TIER / LOOT_TASKS / LOOT_THEME in Cloudflare.
 const lootSettings = (env) => ({
-  tier: clampInt(env.LOOT_TIER, 1, 4, 4),
+  tier: clampInt(env.LOOT_TIER, 1, 4, 3),
   tasks: clampInt(env.LOOT_TASKS, 1, 5, 5),
   theme: clampInt(env.LOOT_THEME, 1, 5, 1),
 });
