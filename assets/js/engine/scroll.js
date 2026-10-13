@@ -18,7 +18,9 @@
 const NEW_GESTURE_MS = 140;
 
 export class SmoothScroll {
-  constructor({ reducedMotion = false, ease = 0.11 } = {}) {
+  // Lighter than it was (ease 0.11, wheel ×2): the page used to keep sliding
+  // well after the wheel stopped, which read as heavy and hard to control.
+  constructor({ reducedMotion = false, ease = 0.17 } = {}) {
     this.enabled = !reducedMotion;
     this.ease = ease;
     this.target = window.scrollY;
@@ -171,7 +173,7 @@ export class SmoothScroll {
     this._measure();
     const step = e.deltaMode === 1 ? e.deltaY * 18 : e.deltaY;
     if (step) this.direction = Math.sign(step);
-    this.target = Math.max(0, Math.min(this.max, this.target + step * 2.0));
+    this.target = Math.max(0, Math.min(this.max, this.target + step * 1.15));
     this._start();
     // Arm the settle from the last wheel tick, not from when the flick runs
     // out — so the glide picks up the moment the reader stops scrolling.
@@ -183,6 +185,14 @@ export class SmoothScroll {
     if (y !== this._lastY) {
       if (!this.animating) this.direction = Math.sign(y - this._lastY) || this.direction;
       this._lastY = y;
+    }
+
+    // We were gliding, but the page is somewhere we didn't put it: another
+    // input took over. Stop and follow it instead of dragging it back.
+    if (this.animating && this._wrote !== undefined && Math.abs(y - this._wrote) > 4) {
+      this.animating = false;
+      this.snapping = false;
+      this._last = 0;
     }
 
     // A scroll we did not drive (touch, keys, scrollbar, anchor jump).
@@ -201,7 +211,16 @@ export class SmoothScroll {
     requestAnimationFrame(this._tick);
   }
 
+  /** Every scroll we drive goes through here, so a scroll we did NOT drive can be spotted. */
+  _write(y) {
+    this._wrote = Math.round(y);
+    window.scrollTo(0, y);
+  }
+
   _tick(now) {
+    // Someone took over mid-glide (dragged the scrollbar, used a key, tapped a
+    // link that scrolls). Their scroll wins; the glide stops.
+    if (!this.animating) return;
     // The settle runs on a fixed duration rather than exponential easing, so
     // it always finishes in the same amount of time — including on a device
     // rendering at a handful of frames per second, where an exponential ease
@@ -211,7 +230,7 @@ export class SmoothScroll {
       const eased = 1 - Math.pow(1 - t, 3);
       this.current = this._snapFrom + (this.target - this._snapFrom) * eased;
       this.velocity = this.target - this.current;
-      window.scrollTo(0, this.current);
+      this._write(this.current);
       this._lastY = Math.round(this.current);
       this._emit();
 
@@ -231,7 +250,7 @@ export class SmoothScroll {
 
     if (Math.abs(delta) < 0.35) {
       this.current = this.target;
-      window.scrollTo(0, this.current);
+      this._write(this.current);
       this.animating = false;
       this._last = 0;
       this._lastY = this.current;
@@ -247,7 +266,7 @@ export class SmoothScroll {
     const k = Math.min(1, 1 - Math.pow(1 - this.ease, dt * 60));
 
     this.current += delta * k;
-    window.scrollTo(0, this.current);
+    this._write(this.current);
     this._emit();
     requestAnimationFrame(this._tick);
   }
