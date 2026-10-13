@@ -90,7 +90,14 @@ const info = createInfoPage();
 
 const scriptPage = createScriptPage({
   onRequireAuth: () => { toast("Sign in to rate scripts", "warn"); auth.open("signup"); },
+  // Suggestions under a script are drawn from the library already loaded,
+  // and open at their own address like any other script.
+  getLibrary: () => library,
+  onOpenScript: (s) => openScript(s),
 });
+// A deep link can open a script before the library arrives; draw its
+// suggestions once it does.
+onLibraryChange(() => scriptPage.refresh());
 
 const dashboard = createDashboard({
   onRequireAuth: () => auth.open("signup"),

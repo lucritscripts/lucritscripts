@@ -24,6 +24,7 @@ import {
   noteWindow as noteUnlockWindow, clockChip, onExpire,
 } from "./unlockclock.js";
 import { pathForCreator } from "./router.js";
+import { suggestionsFor } from "./similar.js";
 
 export const esc = (s) => String(s ?? "")
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
@@ -1035,7 +1036,7 @@ function heldLocally(id) {
   return false;
 }
 
-export function createScriptPage({ onRequireAuth }) {
+export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenScript = null }) {
   const sheet = createOverlay({ id: "script", label: "Script", wide: true });
   let current = null;
   let code = null;         // fetched separately, and only once we're allowed it
@@ -1187,6 +1188,51 @@ export function createScriptPage({ onRequireAuth }) {
 
   let previewVisitor = false;
 
+  /**
+   * "More scripts for this game", under the script.
+   *
+   * Same game first, closest description first (see similar.js); other games
+   * only top it up when this game has too few of its own. Built from the
+   * library the page already holds, so it costs no request.
+   */
+  function suggestionsHtml(s) {
+    const picks = suggestionsFor(s, getLibrary() || [], 4);
+    if (!picks.length) return "";
+    const game = s.game || "this game";
+    const allSame = picks.every((p) => p.sameGame);
+    const anySame = picks.some((p) => p.sameGame);
+    const title = anySame
+      ? `More <b>${esc(game)}</b> scripts`
+      : "Similar scripts";
+    const tile = ({ script: x, sameGame }, i) => {
+      const c = categoryOf(x.category);
+      const img = x.thumbnail ? esc(safeImageSrc(x.thumbnail)) : "";
+      const desc = String(x.desc || "");
+      return `
+        <button class="suggest__card" type="button" data-suggest="${esc(x.id)}" style="--cat:${c.accent}">
+          <span class="suggest__thumb">${img
+            ? `<img src="${img}" alt="" loading="lazy">`
+            : `<span class="suggest__ph" aria-hidden="true">${esc((x.game || x.title || "?").slice(0, 1))}</span>`}</span>
+          <span class="suggest__body">
+            <span class="suggest__chips">
+              ${i === 0 && sameGame ? `<span class="chip chip--ok">Closest match</span>` : ""}
+              ${!sameGame ? `<span class="chip chip--soft">${esc(x.game || "Other game")}</span>` : ""}
+              ${x.keyless === false ? `<span class="chip chip--warn suggest__key">Key</span>` : `<span class="chip chip--ok suggest__key">Keyless</span>`}
+            </span>
+            <span class="suggest__title">${esc(x.title)}</span>
+            <span class="suggest__desc">${esc(desc.slice(0, 120))}${desc.length > 120 ? "…" : ""}</span>
+            <span class="suggest__meta">@${esc(x.author)} · ${fmt(x.views || 0)} views</span>
+          </span>
+        </button>`;
+    };
+    return `
+      <section class="suggest" aria-label="Suggested scripts">
+        <h3 class="suggest__head">${title}</h3>
+        ${anySame && !allSame ? `<p class="suggest__note">Plus a few close matches from other games.</p>` : ""}
+        <div class="suggest__grid">${picks.map(tile).join("")}</div>
+      </section>`;
+  }
+
   function render() {
     const s = current;
     if (!s) return;
@@ -1262,7 +1308,9 @@ export function createScriptPage({ onRequireAuth }) {
           ? `<div class="script__code">${renderCodeBlock(code)}</div>`
           : code === null
             ? `<div class="script__code"><p class="script__loading">Fetching the script…</p></div>`
-            : "") : ""}`;
+            : "") : ""}
+
+      ${suggestionsHtml(s)}`;
   }
 
   /**
@@ -1304,7 +1352,31 @@ export function createScriptPage({ onRequireAuth }) {
     return true;
   }
 
+  // A suggestion whose picture won't load shows its letter tile instead of a
+  // broken-image box. (`error` doesn't bubble, hence the capture listener.)
+  sheet.body.addEventListener("error", (e) => {
+    const img = e.target;
+    if (!(img instanceof HTMLImageElement) || !img.closest(".suggest__thumb")) return;
+    const card = img.closest(".suggest__card");
+    const ph = document.createElement("span");
+    ph.className = "suggest__ph";
+    ph.setAttribute("aria-hidden", "true");
+    ph.textContent = (card?.querySelector(".suggest__title")?.textContent || "?").trim().slice(0, 1);
+    img.replaceWith(ph);
+  }, true);
+
   sheet.body.addEventListener("click", async (e) => {
+    // A suggested script: open it in this same sheet, at its own address.
+    const pick = e.target.closest("[data-suggest]")?.dataset.suggest;
+    if (pick) {
+      const next = (getLibrary() || []).find((x) => x.id === pick);
+      if (!next) return;
+      if (onOpenScript) onOpenScript(next); else self.open(next);
+      sheet.body.scrollTop = 0;
+      sheet.body.closest(".sheet__panel")?.scrollTo?.({ top: 0 });
+      return;
+    }
+
     const act = e.target.closest("[data-act]")?.dataset.act;
     if (!act || !current) return;
 
@@ -1400,7 +1472,10 @@ export function createScriptPage({ onRequireAuth }) {
     }
   });
 
-  return {
+  // `self` so a suggestion can reopen the sheet when no router is wired in.
+  const self = {
+    /** Redraws the suggestions when the library arrives or changes. */
+    refresh() { if (sheet.isOpen && current) render(); },
     async open(script) {
       current = { ...script };
       code = null;
@@ -1462,6 +1537,7 @@ export function createScriptPage({ onRequireAuth }) {
     /** Whatever is on screen, so the router can name the URL after it. */
     get current() { return current; },
   };
+  return self;
 }
 
 export async function copyText(text) {
