@@ -2492,3 +2492,143 @@ img, video { max-width: 100%; }
 .publish__form select { padding-top: 0; padding-bottom: 0; line-height: 50px; }
 .publish__form .gpick__field input.gpick__input { border: 0; background: transparent; box-shadow: none; padding-top: 0; padding-bottom: 0; }
 .pubform__grid { row-gap: 22px; }
+
+/* =====================================================================
+   Flow layout (Oct 2026) — one page, one scroll
+   Sections used to be 100vh boxes pinned in place, faded by exact scroll
+   position, each scrolling on its own. On phones a swipe on the content
+   scrolled the inner box instead of the page, and on desktop it took about
+   twenty screens of scrolling to get through nine sections. Now each section
+   is as tall as its content (at least one screen), the page scrolls normally
+   everywhere, and sections glide in once as they arrive.
+   ===================================================================== */
+.chapter { height: auto !important; min-height: 100vh; min-height: 100svh; pointer-events: auto; }
+.chapter__inner { position: relative; height: auto; pointer-events: auto; }
+.chapter__stage {
+  height: auto; min-height: 100vh; min-height: 100svh;
+  overflow: visible; overscroll-behavior: auto;
+  padding: 104px 0 84px;
+  pointer-events: auto;
+  opacity: 0; transform: translateY(34px);
+  transition: opacity 0.8s var(--ease), transform 0.8s var(--ease);
+  will-change: auto;
+}
+.chapter.is-in .chapter__stage { opacity: 1; transform: none; }
+.chapter__tag { top: 92px; }
+@media (max-width: 820px) {
+  .chapter__stage { padding: 92px 0 64px; min-height: 0; }
+  .chapter { min-height: 0; }
+  #ch-hero, #ch-hero .chapter__stage { min-height: 100vh; min-height: 100svh; }
+}
+html.reduced-motion .chapter__stage { transition: none; }
+
+/* Results flow with the page and page with a button — no inner scroll box. */
+.library__results { max-height: none !important; overflow: visible; padding-right: 3px; }
+.results__more { display: flex; margin: 18px auto 4px; }
+.results__left { color: var(--ink-3); font-weight: 450; }
+
+/* Category tabs (were scroll-driven). */
+.worlds__rail button {
+  text-align: left; padding: 4px 0; cursor: pointer;
+  font-size: 0.76rem; letter-spacing: 0.16em; text-transform: uppercase;
+  color: var(--ink-3); transition: color 0.3s, transform 0.3s var(--ease);
+}
+.worlds__rail button:hover { color: var(--ink-2); }
+.worlds__rail button.is-on { color: var(--ink); transform: translateX(5px); }
+.world { transition: opacity 0.45s var(--ease), transform 0.45s var(--ease); transform: translateY(8px); }
+.world.is-on { opacity: 1; transform: none; }
+@media (max-width: 1080px) {
+  .worlds__rail { overflow-x: auto; flex-wrap: nowrap !important; scrollbar-width: none; }
+  .worlds__rail button { flex: none; }
+}
+
+/* ---- "there's more below": a cue people actually notice ---- */
+.scrollcue {
+  left: 50%; transform: translateX(-50%); bottom: 34px;
+  flex-direction: column; gap: 10px;
+  padding: 8px 14px; border-radius: 999px;
+  color: var(--ink-2); cursor: pointer; z-index: 3;
+  transition: color .25s, opacity .3s;
+}
+.scrollcue:hover { color: var(--ink); }
+.scrollcue__mouse {
+  width: 24px; height: 38px; border: 2px solid currentColor; border-radius: 14px;
+  position: relative; opacity: 0.85;
+}
+.scrollcue__mouse::after {
+  content: ""; position: absolute; left: 50%; top: 7px; width: 4px; height: 8px;
+  margin-left: -2px; border-radius: 2px; background: var(--cyan);
+  animation: wheel 1.6s var(--ease) infinite;
+}
+@keyframes wheel { 0% { transform: translateY(0); opacity: 1; } 70% { transform: translateY(12px); opacity: 0; } 100% { opacity: 0; } }
+.scrollcue__finger { display: none; }
+.scrollcue svg { width: 18px; height: 18px; }
+@media (pointer: coarse), (max-width: 820px) {
+  .scrollcue__mouse { display: none; }
+  .scrollcue__finger { display: block; animation: swipe 1.8s var(--ease) infinite; }
+  .scrollcue { bottom: 22px; }
+}
+@keyframes swipe { 0% { transform: translateY(10px); opacity: 0; } 30% { opacity: 1; } 100% { transform: translateY(-14px); opacity: 0; } }
+.scrollcue__label--touch { display: none; }
+@media (pointer: coarse), (max-width: 820px) {
+  .scrollcue__label--mouse { display: none; }
+  .scrollcue__label--touch { display: inline; }
+}
+
+/* ---- section dots: where you are, and a click to anywhere ---- */
+.sectiondots {
+  position: fixed; right: 18px; top: 50%; transform: translateY(-50%); z-index: 55;
+  display: grid; gap: 6px;
+}
+.sectiondots button {
+  position: relative; display: grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 50%;
+}
+.sectiondots button::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%;
+  background: rgba(160, 190, 230, 0.35);
+  transition: transform .25s var(--ease), background .25s;
+}
+.sectiondots button:hover::before { background: var(--ink-2); transform: scale(1.25); }
+.sectiondots button.is-on::before { background: var(--cyan); transform: scale(1.45); box-shadow: 0 0 10px rgba(72, 229, 255, .6); }
+.sectiondots button span {
+  position: absolute; right: 28px; white-space: nowrap; pointer-events: none;
+  font-size: 0.72rem; letter-spacing: .08em; color: var(--ink);
+  padding: 4px 9px; border-radius: 8px; background: rgba(10, 14, 25, .92); border: 1px solid var(--line);
+  opacity: 0; transform: translateX(6px); transition: opacity .2s, transform .2s;
+}
+.sectiondots button:hover span, .sectiondots button:focus-visible span { opacity: 1; transform: none; }
+@media (max-width: 820px), (pointer: coarse) { .sectiondots { display: none; } }
+/* The chapter label sits above its content instead of floating over it. */
+.chapter__tag { position: static; display: block; margin-bottom: 18px; }
+.chapter__stage { justify-content: center; }
+@media (max-width: 820px) {
+  /* On phones the cue sits under the buttons rather than on top of them. */
+  .scrollcue { position: static; transform: none; margin: 30px auto 0; }
+  #ch-hero .chapter__stage { justify-content: flex-start; padding-top: 84px; }
+}
+@media (max-width: 820px) {
+  /* Pinned to the bottom of the screen on first load — on a phone the hero is
+     taller than the screen, so a cue at the end of it is a cue nobody sees.
+     It fades out as soon as the page moves. */
+  .scrollcue {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%); margin: 0;
+    flex-direction: row; gap: 8px; padding: 9px 16px;
+    background: #0b101c; border: 1px solid var(--line-2);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6); z-index: 60;
+    font-size: 0.66rem; white-space: nowrap;
+  }
+}
+/* Same on laptops: when the hero is taller than the window (most laptop
+   screens), a cue at the end of the hero is below the fold. Pin it to the
+   bottom of the window until the page moves. */
+.scrollcue {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); margin: 0;
+  flex-direction: row; gap: 10px; padding: 8px 16px 8px 12px;
+  background: #0b101c; border: 1px solid var(--line-2);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6); z-index: 60;
+  font-size: 0.66rem; white-space: nowrap;
+}
+.scrollcue__mouse { width: 18px; height: 28px; border-width: 2px; border-radius: 10px; }
+.scrollcue__mouse::after { top: 5px; height: 6px; }
+@keyframes wheel { 0% { transform: translateY(0); opacity: 1; } 70% { transform: translateY(8px); opacity: 0; } 100% { opacity: 0; } }
