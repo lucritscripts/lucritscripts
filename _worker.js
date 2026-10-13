@@ -1870,21 +1870,98 @@ function base64Url(text) {
  * is just giving the script away, which is the exact thing this exists to
  * prevent. If Linkvertise is unreachable the visitor is told to try again.
  */
-async function linkvertiseVerified(env, hash) {
-  if (!/^[a-f0-9]{64}$/i.test(String(hash || ""))) return false;
+async function linkvertiseVerified(env, hash, note) {
+  // Their docs call it "a random string of 64 characters"; it has always been
+  // hex in practice, but nothing promises that, and rejecting a real hash on
+  // its shape is a silent, total failure. Shape is only a sanity limit here —
+  // Linkvertise's answer is the actual check.
+  if (!/^[A-Za-z0-9_-]{16,256}$/.test(String(hash || ""))) {
+    await linkvertiseNote(env, note, { ok: false, why: "no usable hash on the return URL" });
+    return false;
+  }
   try {
     const url = "https://publisher.linkvertise.com/api/v1/anti_bypassing"
       + `?token=${encodeURIComponent(env.LINKVERTISE_TOKEN)}`
       + `&hash=${encodeURIComponent(hash)}`;
     const res = await fetch(url, { method: "POST", signal: AbortSignal.timeout(8000) });
-    const body = (await res.text()).trim().toLowerCase();
-    // Documented to answer TRUE or FALSE as bare text; tolerate a JSON-ish
-    // wrapper in case that changes, but never treat anything else as a pass.
-    return body === "true" || body === '"true"' || body === "{\"status\":true}";
+    const raw = (await res.text()).trim();
+    // Documented as a bare TRUE / FALSE. Accept the JSON shapes it could grow
+    // into, but never treat anything else as a pass.
+    let pass = /^"?true"?$/i.test(raw);
+    if (!pass) {
+      try {
+        const j = JSON.parse(raw);
+        pass = j === true || j?.status === true || j?.valid === true || j?.data?.status === true;
+      } catch { /* not JSON */ }
+    }
+    await linkvertiseNote(env, note, { ok: pass, http: res.status, said: raw.slice(0, 160) });
+    return pass;
   } catch (err) {
     console.warn("linkvertise unreachable", err?.message);
+    await linkvertiseNote(env, note, { ok: false, why: "unreachable: " + String(err?.message || err).slice(0, 80) });
     return false;
   }
+}
+
+/**
+ * What Linkvertise said, kept for a week.
+ *
+ * Seven Linkvertise unlocks were started on the live site and none was ever
+ * claimed, with nothing anywhere to say why. These rows say it: whether a hash
+ * came back at all, and what their API answered (never the token).
+ *   SELECT k, v FROM cache WHERE k LIKE 'lvdiag:%' ORDER BY expires DESC
+ */
+async function linkvertiseNote(env, key, info) {
+  if (!key) return;
+  console.log("linkvertise", key, JSON.stringify(info));
+  await env.DB.prepare(`INSERT OR REPLACE INTO cache (k, v, expires) VALUES (?, ?, ?)`)
+    .bind("lvdiag:" + key, JSON.stringify({ at: nowSec(), ...info }), nowSec() + 86400 * 7)
+    .run().catch(() => {});
+}
+
+/**
+ * GET /api/unlock/lv/<clickId>?hash=… — where Linkvertise sends the visitor.
+ *
+ * WHY THIS EXISTS: the old return address was `/?unlocked=<script>`, and
+ * Linkvertise adds its proof as `?hash=…` — a SECOND question mark. The page
+ * then read `unlocked` as "s_123?hash=abc…", found no hash at all, and quietly
+ * did nothing. Every Linkvertise unlock on the live site died exactly there
+ * (7 started, 0 claimed).
+ *
+ * Now the return address is a path with no query string of its own, so
+ * `?hash=` lands cleanly, and the server checks the hash the instant the
+ * visitor arrives — their hash is only good for a few seconds, which a page
+ * that first loads a 3D scene and a library could easily miss. A good hash
+ * marks the click done, exactly like a LootLabs postback, and the visitor is
+ * sent on to the normal claim with their click id. Nothing about the visitor's
+ * IP or session is involved, so phones that change address mid-trip are fine.
+ */
+async function handleLinkvertiseReturn(request, env, { id: clickId }) {
+  const url = new URL(request.url);
+  const click = await env.DB.prepare(
+    `SELECT script_id, provider, done FROM unlock_clicks WHERE click_id = ? AND expires > ?`
+  ).bind(clickId, nowSec()).first();
+  if (!click || click.provider !== "linkvertise")
+    return goTo("/?lv=expired");
+
+  if (!click.done && unlockProviders(env).includes("linkvertise")) {
+    // `hash` normally; dig it out of the raw query too, in case it arrives
+    // glued on with a stray `?` or under a different separator.
+    const hash = url.searchParams.get("hash")
+      || (/[?&]hash=([A-Za-z0-9_-]+)/.exec(decodeURIComponent(url.search)) || [])[1] || "";
+    if (await linkvertiseVerified(env, hash, clickId)) {
+      await env.DB.prepare(`UPDATE unlock_clicks SET done = 1 WHERE click_id = ? AND done = 0`)
+        .bind(clickId).run();
+    }
+  }
+  // Either way, back to the script; the claim says plainly if it failed.
+  // Relative, so they stay on whichever of our domains they came in on.
+  return goTo(`/?unlocked=${encodeURIComponent(click.script_id)}&click=${encodeURIComponent(clickId)}`);
+}
+
+/** A redirect nothing may cache: it carries a one-time unlock. */
+function goTo(location) {
+  return new Response(null, { status: 302, headers: { Location: location, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" } });
 }
 
 function unlockConfigured(env) {
@@ -1929,7 +2006,8 @@ async function handleUnlockStart(request, env) {
   if (provider === "linkvertise" && unlockProviders(env).includes("linkvertise")) {
     const url = env.LINKVERTISE_USER_ID
       // Dynamic: the destination carries the script id, so the return does too.
-      ? linkvertiseLink(env, `${site}/?unlocked=${encodeURIComponent(script.id)}`,
+      // No query string of its own, so Linkvertise's `?hash=` lands cleanly.
+      ? linkvertiseLink(env, `${site}/api/unlock/lv/${clickId}`,
                         clickId.replace(/\D/g, "").slice(0, 6) || "1")
       // Fixed link: one destination for everything, so which script this was
       // for is only known from the click row and the client's own hint.
@@ -2046,14 +2124,20 @@ async function handleUnlockClaim(request, env) {
   // We still require a click row we minted for THIS subject and script, so a
   // valid hash cannot be pointed at a script the visitor never started.
   if (hash && unlockProviders(env).includes("linkvertise")) {
-    const pending = await env.DB.prepare(
-      `SELECT click_id FROM unlock_clicks
-        WHERE subject = ? AND script_id = ? AND provider = 'linkvertise' AND expires > ?
-        ORDER BY at DESC LIMIT 1`
-    ).bind(subject, script.id, now).first();
+    // (The fixed-link setup, LINKVERTISE_URL, still comes back this way.)
+    const pending = clickId
+      ? await env.DB.prepare(
+          `SELECT click_id FROM unlock_clicks
+            WHERE click_id = ? AND script_id = ? AND provider = 'linkvertise' AND expires > ?`
+        ).bind(String(clickId), script.id, now).first()
+      : await env.DB.prepare(
+          `SELECT click_id FROM unlock_clicks
+            WHERE subject = ? AND script_id = ? AND provider = 'linkvertise' AND expires > ?
+            ORDER BY at DESC LIMIT 1`
+        ).bind(subject, script.id, now).first();
 
     if (!pending) return bad(400, "Start the unlock from the script page first.");
-    if (!(await linkvertiseVerified(env, hash)))
+    if (!(await linkvertiseVerified(env, hash, pending.click_id)))
       return bad(400, "That unlock couldn't be verified. Try the sponsor step again.");
 
     await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(pending.click_id).run();
@@ -2076,7 +2160,7 @@ async function handleUnlockClaim(request, env) {
     // with nobody left to claim it. (That exact row was in the database: a
     // finished, paid unlock that never opened.) So wait a few seconds here,
     // and if it still hasn't arrived, tell the page to keep asking.
-    for (let i = 0; click && !click.done && i < 6; i++) {
+    for (let i = 0; click && !click.done && click.provider !== "linkvertise" && i < 6; i++) {
       await new Promise((r) => setTimeout(r, 1000));
       click = await readClick();
     }
@@ -2088,6 +2172,10 @@ async function handleUnlockClaim(request, env) {
     // 128-bit secret and single-use, which is what actually stops sharing.)
     if (!click) return bad(400, "That unlock couldn't be verified. Start it again from the script page.");
     if (click.script_id !== script.id) return bad(400, "That unlock was for a different script.");
+    // Linkvertise is checked on the way back (handleLinkvertiseReturn), so
+    // there is nothing to wait for: not done means it didn't verify.
+    if (!click.done && click.provider === "linkvertise")
+      return bad(400, "Linkvertise didn't confirm that one. Try the Linkvertise step again.");
     if (!click.done)
       return bad(409, "Waiting for LootLabs to confirm the tasks…", { pending: true });
 
@@ -5135,6 +5223,7 @@ const PATTERNS = [
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
   ["GET", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleScriptCode],
   ["GET", /^\/api\/thumbs\/([A-Za-z0-9_-]{1,40})$/, handleThumb],
+  ["GET", /^\/api\/unlock\/lv\/([a-f0-9]{32})$/, handleLinkvertiseReturn],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/edit$/, handleScriptUpdate],
   ["DELETE", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})$/, handleScriptDelete],
   ["POST", /^\/api\/scripts\/([A-Za-z0-9_-]{1,40})\/like$/, handleScriptLike],
