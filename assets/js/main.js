@@ -643,6 +643,15 @@ runBotCheck().then((how) => {
 // Grab it before anything else touches the address bar, so a refresh cannot
 // replay it and the parameters do not linger where they'd be shared around.
 capturePendingUnlock();
+{
+  // Back from Linkvertise with a link that had already expired or was unknown.
+  const u = new URL(location.href);
+  if (u.searchParams.get("lv") === "expired") {
+    u.searchParams.delete("lv");
+    history.replaceState(null, "", u.toString());
+    toast("That Linkvertise link expired. Open the script and start again.", "warn");
+  }
+}
 
 // Resolve the address bar before the library loads.
 //

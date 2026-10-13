@@ -194,8 +194,21 @@ const STARTED = "lucrit:startedUnlock";
 export function capturePendingUnlock() {
   try {
     const url = new URL(location.href);
-    const clickId = url.searchParams.get("click");
-    const hash = url.searchParams.get("hash");
+    let clickId = url.searchParams.get("click");
+    let hash = url.searchParams.get("hash");
+    // Linkvertise appends `?hash=` even when the address already has a query,
+    // which turned `?unlocked=s_1` into `?unlocked=s_1?hash=…` and hid the
+    // hash inside the script id. Current links return through
+    // /api/unlock/lv/… instead; this unpicks any older ones still in flight.
+    for (const name of ["unlocked", "click"]) {
+      const v = url.searchParams.get(name);
+      if (v && v.includes("?hash=")) {
+        const [clean, h] = v.split("?hash=");
+        url.searchParams.set(name, clean);
+        hash = hash || h;
+        if (name === "click") clickId = clean;
+      }
+    }
 
     // LootLabs sends them back to a URL we built, so it names the script.
     // Linkvertise links point at one fixed destination configured by hand in
