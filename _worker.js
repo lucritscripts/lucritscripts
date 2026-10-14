@@ -1776,18 +1776,17 @@ const clampInt = (value, min, max, fallback) => {
   return Math.min(max, Math.max(min, n));
 };
 
-// Defaults, Oct 2026: tier 2 "Gaming Offers & Recommendations" — gaming-style
-// offers suit a Roblox audience and are easier for visitors to finish. History:
-// tier 4 ("Maximum Profit and Software Products", 11–13 Oct) was mostly
-// "download and install this app", which a lot of people won't do; tier 3
-// ("Profit Maximization") was tried next on 13 Oct; tier 2 after that. Still the
-// most tasks LootLabs allows per session (5 — each completed task is reported,
-// so extra ones still earn from people who stop early), and the Classic theme
-// (1); LootLabs has no Roblox theme. Override any of these with LOOT_TIER /
-// LOOT_TASKS / LOOT_THEME in Cloudflare.
+// Defaults, 14 Oct 2026: as EASY as LootLabs goes — ONE task, tier 1
+// ("Trending & Recommended"), Classic theme. Visitors kept finding it too
+// hard: tier 4 (11–13 Oct) was mostly "install this app", tiers 3 and 2
+// (13 Oct) still asked for up to 5 tasks, and LootLabs only sends the visitor
+// back once the locker's tasks are done — every extra task is another place
+// to give up. One task earns less per unlock but loses far fewer people.
+// LootLabs has no Roblox theme. Override any of these without a code change
+// with LOOT_TIER / LOOT_TASKS / LOOT_THEME in Cloudflare (e.g. LOOT_TASKS=2).
 const lootSettings = (env) => ({
-  tier: clampInt(env.LOOT_TIER, 1, 4, 2),
-  tasks: clampInt(env.LOOT_TASKS, 1, 5, 5),
+  tier: clampInt(env.LOOT_TIER, 1, 4, 1),
+  tasks: clampInt(env.LOOT_TASKS, 1, 5, 1),
   theme: clampInt(env.LOOT_THEME, 1, 5, 1),
 });
 
