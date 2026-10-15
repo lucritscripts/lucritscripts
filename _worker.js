@@ -2116,8 +2116,8 @@ const FLOW_TTL_SEC = 2 * 3600;
 // The two real LootLabs links, made in the Creator's Panel on 15 Oct 2026:
 // "Lucrit Unlock - Step 1" → /unlock/lootlabs?step=1 and "… Step 2" →
 // /unlock/lootlabs?step=2 (LootLabs merges links that share a destination, so
-// each step needs its own). Roblox theme, "Gaming Offers & Recommendations"
-// tier, max 5 tasks each (switched from Trending the same day) —
+// each step needs its own). Roblox theme, "Trending and Recommendations" tier,
+// max 4 tasks each (Gaming Offers was tried briefly and reverted) —
 // change those in the LootLabs dashboard, not here. LOOTLABS_LINKS in
 // Cloudflare overrides these if it's ever set.
 const DEFAULT_LOOT_LINKS = [
