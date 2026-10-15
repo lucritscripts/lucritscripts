@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Get Key · Lucrit Scripts</title>
+  <meta name="description" content="Get your Lucrit Scripts key in two quick checkpoints.">
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/img/favicon-64.png">
+  <!--
+    Get Key — the Script Maniac Hub key system, on lucritscripts.site.
+
+    Same Firebase project (smh-keysystem), same Firestore "keys" collection,
+    same document shape { valid, expiresAt, inUse, boundTo, lastPing }, same
+    "SMH-" key format and 8-hour expiry — so the Roblox loader that already
+    checks those keys keeps working unchanged.
+
+    The three old pages are one page here, switched by ?step=:
+      /getkey          Checkpoint One   → LootLabs Key Step 1 (loot-link.com/s?9YxZvLfL)
+      /getkey?step=1   Final Checkpoint → LootLabs Key Step 2 (lootdest.org/s?33Kx6iTB)
+      /getkey?step=2   Your Key is Ready → writes the key to Firestore
+    Each LootLabs link's destination is the next ?step= address.
+
+    Own CSP (the main site's lives in index.html): Firebase SDKs from gstatic,
+    Firestore over googleapis.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'self';
+    script-src 'self' 'unsafe-inline' https://www.gstatic.com;
+    connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com https://www.google-analytics.com;
+    style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+    font-src https://fonts.gstatic.com;
+    img-src 'self' data:;
+    frame-src https://smh-keysystem.firebaseapp.com;
+    base-uri 'none'; form-action 'none'">
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <style>
+    /* ==== Base Styles ==== */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html, body {
+      height: 100%;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      background-color: #0a0a0a;
+      color: #00e0ff;
+      user-select: none;
+      transition: background 0.4s ease, color 0.4s ease;
+    }
+
+    /* ==== Light Mode ==== */
+    body.light-mode {
+      background-color: #ffffff;
+      color: #000000;
+    }
+
+    /* ==== Container ==== */
+    .container {
+      width: 90%;
+      max-width: 600px;
+      background: linear-gradient(135deg, #050505, #1a1a1a);
+      border: 3px solid #003366;
+      border-radius: 20px;
+      padding: 3rem 2rem;
+      text-align: center;
+      box-shadow:
+        0 0 20px rgba(0, 255, 255, 0.2),
+        inset 0 0 12px rgba(0, 255, 255, 0.05);
+      transition: all 0.3s ease-in-out;
+    }
+
+    body.light-mode .container {
+      background: #ffffff;
+      color: #000000;
+      border: 2px solid #cccccc;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.06);
+    }
+
+    /* ==== Headings & Text ==== */
+    h1 {
+      font-size: 2rem;
+      margin-bottom: 1rem;
+      color: #00eaff;
+      text-shadow: 0 0 10px rgba(0, 255, 255, 0.4);
+    }
+
+    body.light-mode h1 {
+      color: #000000;
+      text-shadow: none;
+    }
+
+    p {
+      font-size: 1rem;
+      line-height: 1.6;
+      color: #d0f6ff;
+    }
+
+    body.light-mode p {
+      color: #000000;
+    }
+
+    /* ==== Checkpoint progress ==== */
+    .steps {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      margin: 0 0 1.25rem;
+      list-style: none;
+    }
+    .steps li {
+      font-family: 'Share Tech Mono', monospace;
+      font-size: 0.85rem;
+      padding: 0.3rem 0.8rem;
+      border-radius: 999px;
+      border: 1px solid #00eaff44;
+      color: #6fb8c4;
+    }
+    .steps li.is-now { border-color: #00eaff; color: #00eaff; box-shadow: 0 0 10px #00eaff55; }
+    .steps li.is-done { border-color: #35d07f; color: #35d07f; }
+    body.light-mode .steps li { color: #555; border-color: #ccc; }
+    body.light-mode .steps li.is-now { color: #000; border-color: #000; box-shadow: none; }
+
+    #messageText { margin-bottom: 1.25rem; font-size: 1.15rem; font-weight: 600; }
+
+    /* ==== Buttons ==== */
+    button {
+      display: inline-block;
+      background: linear-gradient(145deg, #00bcd4, #0097a7);
+      color: #ffffff;
+      padding: 0.9rem 2rem;
+      font-size: 1rem;
+      font-weight: 600;
+      border: none;
+      border-radius: 14px;
+      cursor: pointer;
+      box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+      transition: all 0.3s ease-in-out;
+    }
+
+    button:hover {
+      background: #00838f;
+      box-shadow: 0 0 25px #00eaffaa;
+      transform: translateY(-3px);
+    }
+
+    button:disabled { opacity: 0.7; cursor: wait; transform: none; }
+
+    #copyBtn {
+      margin-top: 0.75rem;
+    }
+
+    /* ==== Key Display Box ==== */
+    #keyBox {
+      background-color: #101820;
+      color: #00eaff;
+      font-family: 'Courier New', monospace;
+      font-size: 1rem;
+      padding: 1.25rem;
+      border: 2px solid #00eaff88;
+      border-radius: 14px;
+      box-shadow: inset 0 0 20px #00eaff33;
+      margin-top: 1rem;
+      word-break: break-word;
+      user-select: all;
+    }
+
+    body.light-mode #keyBox {
+      background-color: #f7f7f7;
+      color: #000000;
+      border: 2px solid #cccccc;
+      box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.05);
+    }
+
+    /* ==== Timer Text ==== */
+    #countdown,
+    #keyTimer {
+      margin-top: 1.25rem;
+      font-size: 1rem;
+      font-weight: bold;
+      color: #ffdd57;
+    }
+
+    body.light-mode #countdown,
+    body.light-mode #keyTimer {
+      color: #222222;
+    }
+
+    /* ==== Theme Toggle Button ==== */
+    #darkToggle {
+      position: fixed;
+      top: 1rem;
+      right: 1rem;
+      padding: 0.5rem 1rem;
+      font-size: 0.95rem;
+      border: 2px solid #00eaff;
+      background: transparent;
+      color: #00eaff;
+      border-radius: 30px;
+      cursor: pointer;
+      box-shadow: 0 0 8px #00eaff88;
+      transition: all 0.3s ease;
+    }
+
+    #darkToggle:hover {
+      background-color: #00eaff;
+      color: #000;
+      box-shadow: 0 0 16px #00eaff;
+    }
+
+    body.light-mode #darkToggle {
+      border-color: #000000;
+      color: #000000;
+      box-shadow: 0 0 6px #999;
+    }
+
+    body.light-mode #darkToggle:hover {
+      background-color: #000000;
+      color: #ffffff;
+      box-shadow: 0 0 10px #000000;
+    }
+
+    /* ==== Back to the site ==== */
+    #backLink {
+      position: fixed;
+      top: 1rem;
+      left: 1rem;
+      padding: 0.5rem 1rem;
+      font-size: 0.95rem;
+      color: #00eaff;
+      text-decoration: none;
+      border: 2px solid #00eaff55;
+      border-radius: 30px;
+    }
+    #backLink:hover { border-color: #00eaff; box-shadow: 0 0 10px #00eaff66; }
+    body.light-mode #backLink { color: #000; border-color: #ccc; }
+
+    .note { margin-top: 1rem; font-size: 0.85rem; color: #6fb8c4; }
+    body.light-mode .note { color: #555; }
+
+    /* ==== Responsive Layout ==== */
+    @media (max-width: 768px) {
+      .container {
+        padding: 2.5rem 1.5rem;
+      }
+
+      h1 {
+        font-size: 1.8rem;
+      }
+
+      button {
+        padding: 0.8rem 1.5rem;
+        font-size: 0.95rem;
+      }
+
+      #keyBox {
+        font-size: 0.95rem;
+      }
+    }
+
+    @media (max-width: 480px) {
+      .container {
+        padding: 2rem 1rem;
+      }
+
+      h1 {
+        font-size: 1.5rem;
+      }
+
+      p {
+        font-size: 0.95rem;
+      }
+
+      button {
+        width: 100%;
+        padding: 0.75rem;
+      }
+
+      #darkToggle, #backLink {
+        top: 0.75rem;
+        font-size: 0.85rem;
+        padding: 0.4rem 0.8rem;
+      }
+      #darkToggle { right: 0.75rem; }
+      #backLink { left: 0.75rem; }
+
+      #keyBox {
+        font-size: 0.9rem;
+      }
+    }
+  </style>
+
+  <!-- ✅ Referrer check (checkpoints 2 and 3 only).
+       Same rule as the old pages: arriving at ?step=1 or ?step=2 must come
+       from LootLabs, otherwise back to checkpoint one. LootLabs now sends
+       visitors from lootdest.org / links.lootlabs.gg as well as loot-link.com,
+       so those are allowed too. -->
+  <script>
+    (function () {
+      var step = new URLSearchParams(location.search).get("step");
+      if (step !== "1" && step !== "2") return;
+      var allowedReferrers = [
+        "loot-link.com",
+        "loot-links.com",
+        "lootdest.org",
+        "lootdest.info",
+        "lootlabs.gg",
+        "https://ty-rewarded.s3.us-east-1.amazonaws.com"
+      ];
+      var referrer = (document.referrer || "").toLowerCase();
+      var isAllowed = allowedReferrers.some(function (domain) { return referrer.indexOf(domain) !== -1; });
+      if (!isAllowed) {
+        console.warn("Access denied: invalid referrer.");
+        window.location.replace("/getkey");   // back to checkpoint one
+        return;
+      }
+      // Step 2 also needs step 1 to have been done in this browser.
+      try {
+        if (step === "1") localStorage.setItem("smh_cp1", Date.now().toString());
+        if (step === "2") {
+          var cp1 = parseInt(localStorage.getItem("smh_cp1"), 10);
+          if (!cp1 || Date.now() - cp1 > 3 * 60 * 60 * 1000) window.location.replace("/getkey");
+        }
+      } catch (e) { /* private mode — referrer check still applies */ }
+    })();
+  </script>
+
+  <!-- Firebase SDK -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // ✅ Firebase Configuration (smh-keysystem — the same project the Roblox loader checks)
+    const firebaseConfig = {
+      apiKey: "AIzaSyDpgv4ZMQ_VKdW565VsDReKGYKJMTVeK58",
+      authDomain: "smh-keysystem.firebaseapp.com",
+      projectId: "smh-keysystem",
+      storageBucket: "smh-keysystem.appspot.com",
+      messagingSenderId: "619718800070",
+      appId: "1:619718800070:web:56ea94a00d5dfcd8e09dc7"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getFirestore(app);
+    window.firestoreDB = db;
+  </script>
+</head>
+<body>
+  <a id="backLink" href="/">← Lucrit Scripts</a>
+  <button id="darkToggle">Light Mode</button>
+  <div class="container">
+    <h1>Lucrit Scripts KeySystem</h1>
+    <ol class="steps" id="steps" aria-label="Progress">
+      <li data-cp="0">Checkpoint 1</li>
+      <li data-cp="1">Checkpoint 2</li>
+      <li data-cp="2">Key</li>
+    </ol>
+    <p id="messageText">CheckPoint One</p>
+
+    <div id="captchaContainer">
+      <button id="finishBtn">Get Key</button>
+    </div>
+
+    <div id="keyActiveSection" style="display:none;">
+      <p><strong>You have already created a key.</strong></p>
+      <p>Key is still active: <span id="keyTimer">Loading...</span></p>
+      <div id="keyBox"></div>
+      <button id="copyBtn">Copy Key</button>
+    </div>
+
+    <div id="countdown">Loading timer...</div>
+    <p class="note" id="stepNote"></p>
+  </div>
+
+  <script type="module">
+    import {
+      doc, setDoc, getDoc
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+    // ✅ The two LootLabs key links (Creator's Panel, 15 Oct 2026).
+    const STEP_LINKS = {
+      0: "https://loot-link.com/s?9YxZvLfL",   // Lucrit Key - Step 1 → /getkey?step=1
+      1: "https://lootdest.org/s?33Kx6iTB",    // Lucrit Key - Step 2 → /getkey?step=2
+    };
+
+    const db = window.firestoreDB;
+    const SESSION_MS = 3 * 60 * 60 * 1000; // 3 hours session
+    const KEY_MS = 8 * 60 * 60 * 1000;     // 8 hours key validity
+
+    const keyStorage = 'smh_key';
+    const keyTimeStorage = 'smh_keyTime';
+    const sessionStart = 'smh_sessionStart';
+
+    const darkToggle = document.getElementById('darkToggle');
+    const countdown = document.getElementById('countdown');
+    const finishBtn = document.getElementById('finishBtn');
+    const copyBtn = document.getElementById('copyBtn');
+    const keyBox = document.getElementById('keyBox');
+    const keyActiveSection = document.getElementById('keyActiveSection');
+    const captchaContainer = document.getElementById('captchaContainer');
+    const messageText = document.getElementById('messageText');
+    const keyTimerDisplay = document.getElementById('keyTimer');
+    const stepNote = document.getElementById('stepNote');
+
+    // Which checkpoint this visit is: 0 = start, 1 = back from step 1, 2 = back from step 2.
+    const stepParam = new URLSearchParams(location.search).get('step');
+    const STEP = stepParam === '2' ? 2 : stepParam === '1' ? 1 : 0;
+
+    // TODO: Replace this with the actual Roblox user ID somehow
+    // For example, after player login, fetch or input their UserId here:
+    const currentRobloxUserId = "12345678";
+
+    function updateDarkToggleText() {
+      darkToggle.textContent = document.body.classList.contains('light-mode') ? 'Dark Mode' : 'Light Mode';
+    }
+    darkToggle.onclick = () => {
+      document.body.classList.toggle('light-mode');
+      localStorage.setItem('smh_darkMode', document.body.classList.contains('light-mode') ? '1' : '0');
+      updateDarkToggleText();
+    };
+    if (localStorage.getItem('smh_darkMode') === '1') {
+      document.body.classList.add('light-mode');
+    }
+    updateDarkToggleText();
+
+    if (!localStorage.getItem(sessionStart)) {
+      localStorage.setItem(sessionStart, Date.now().toString());
+    }
+
+    function formatTime(ms) {
+      if (ms < 0) return "00:00:00";
+      const s = Math.floor(ms / 1000);
+      const h = Math.floor(s / 3600).toString().padStart(2, '0');
+      const m = Math.floor((s % 3600) / 60).toString().padStart(2, '0');
+      const sec = (s % 60).toString().padStart(2, '0');
+      return `${h}:${m}:${sec}`;
+    }
+
+    function paintSteps(current) {
+      document.querySelectorAll('#steps li').forEach((li) => {
+        const n = Number(li.dataset.cp);
+        li.className = n < current ? 'is-done' : n === current ? 'is-now' : '';
+      });
+    }
+
+    function showKeyUI(key) {
+      messageText.style.display = 'none';
+      captchaContainer.style.display = 'none';
+      keyActiveSection.style.display = 'block';
+      keyBox.textContent = key;
+      stepNote.textContent = '';
+      paintSteps(3);
+    }
+
+    // The checkpoint screens — the old pages' text and buttons.
+    function showNormalUI() {
+      messageText.style.display = 'block';
+      captchaContainer.style.display = 'block';
+      keyActiveSection.style.display = 'none';
+      keyBox.textContent = '';
+      finishBtn.style.display = '';
+      finishBtn.disabled = false;
+      paintSteps(STEP);
+      if (STEP === 0) {
+        messageText.textContent = 'CheckPoint One';
+        finishBtn.textContent = 'Get Key';
+        stepNote.textContent = 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.';
+        finishBtn.onclick = () => { window.location.href = STEP_LINKS[0]; };
+      } else if (STEP === 1) {
+        messageText.textContent = 'Final Checkpoint';
+        finishBtn.textContent = 'Get Key';
+        stepNote.textContent = 'Checkpoint one done ✓ — one more and your key is ready.';
+        finishBtn.onclick = () => { window.location.href = STEP_LINKS[1]; };
+      } else {
+        messageText.textContent = 'Your Key is Ready';
+        finishBtn.textContent = 'Get Your Key';
+        stepNote.textContent = 'Both checkpoints done ✓';
+        finishBtn.onclick = createNewKey;
+      }
+    }
+
+    async function validateKeyFromFirestore(key) {
+      try {
+        const docSnap = await getDoc(doc(db, "keys", key));
+        if (!docSnap.exists()) return false;
+
+        const data = docSnap.data();
+        const now = Date.now();
+
+        // Check validity and expiration
+        if (data.valid !== true || typeof data.expiresAt !== 'number' || now >= data.expiresAt) {
+          return false;
+        }
+
+        // **Removed boundTo blocking here, so anyone can use a bound key**
+
+        return true;
+      } catch (e) {
+        console.error(e);
+        return false;
+      }
+    }
+
+    async function checkKey() {
+      const key = localStorage.getItem(keyStorage);
+      if (!key) {
+        showNormalUI();
+        return false;
+      }
+
+      const valid = await validateKeyFromFirestore(key);
+      if (!valid) {
+        localStorage.removeItem(keyStorage);
+        localStorage.removeItem(keyTimeStorage);
+        window.location.href = "/getkey";
+        return false;
+      }
+
+      showKeyUI(key);
+      return true;
+    }
+
+    async function createNewKey() {
+      finishBtn.disabled = true;
+      finishBtn.textContent = "Creating Key...";
+
+      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+      let key = "SMH-";
+      const rnd = new Uint32Array(16);
+      crypto.getRandomValues(rnd);
+      for (let i = 0; i < 16; i++) {
+        key += chars.charAt(rnd[i] % chars.length);
+      }
+
+      const now = Date.now();
+      const expiresAt = now + KEY_MS;
+
+      try {
+        await setDoc(doc(db, "keys", key), {
+          valid: true,
+          expiresAt,
+          inUse: false,
+          boundTo: currentRobloxUserId,
+          lastPing: Date.now()
+        });
+
+        localStorage.setItem(keyStorage, key);
+        localStorage.setItem(keyTimeStorage, expiresAt.toString());
+        localStorage.setItem(sessionStart, now.toString());
+        localStorage.removeItem('smh_cp1');   // the next key starts at checkpoint one again
+
+        showKeyUI(key);
+        finishBtn.style.display = "none";
+        messageText.style.display = "none";
+        updateTimerUI();
+      } catch (e) {
+        console.error(e);
+        alert("Error creating key.");
+        finishBtn.disabled = false;
+        finishBtn.textContent = "Get Your Key";
+      }
+    }
+
+    copyBtn.onclick = () => {
+      navigator.clipboard.writeText(keyBox.textContent);
+      copyBtn.textContent = "Copied!";
+      setTimeout(() => copyBtn.textContent = "Copy Key", 2000);
+    };
+
+    function updateTimerUI() {
+      const key = localStorage.getItem(keyStorage);
+      const keyExpires = parseInt(localStorage.getItem(keyTimeStorage), 10);
+      const sessionStartTime = parseInt(localStorage.getItem(sessionStart), 10);
+      const now = Date.now();
+
+      const sessionRemaining = SESSION_MS - (now - sessionStartTime);
+      const keyRemaining = keyExpires - now;
+
+      if (key && keyRemaining > 0) {
+        countdown.textContent = `Key valid for: ${formatTime(keyRemaining)}`;
+        keyTimerDisplay.textContent = formatTime(keyRemaining);
+      } else if (!key && sessionRemaining > 0) {
+        countdown.textContent = `Session valid for: ${formatTime(sessionRemaining)}`;
+      } else {
+        countdown.textContent = "Session expired. Restarting...";
+        ['smh_key', 'smh_keyTime', 'smh_sessionStart', 'smh_cp1'].forEach((k) => localStorage.removeItem(k));
+        setTimeout(() => window.location.href = "/getkey", 1500);
+      }
+    }
+
+    async function periodicKeyValidation() {
+      const key = localStorage.getItem(keyStorage);
+      if (!key) return;
+      const valid = await validateKeyFromFirestore(key);
+      if (!valid) {
+        ['smh_key', 'smh_keyTime', 'smh_cp1'].forEach((k) => localStorage.removeItem(k));
+        alert("Key expired or invalid.");
+        window.location.href = "/getkey";
+      }
+    }
+
+    async function main() {
+      const hasKey = await checkKey();
+      if (!hasKey) showNormalUI();
+      updateTimerUI();
+      setInterval(updateTimerUI, 1000);
+      setInterval(periodicKeyValidation, 60000);
+
+      // ✅ Periodic Firestore ping to update lastPing
+      setInterval(async () => {
+        const key = localStorage.getItem(keyStorage);
+        if (!key) return;
+
+        try {
+          const ref = doc(db, "keys", key);
+          await setDoc(ref, {
+            lastPing: Date.now()
+          }, { merge: true });
+        } catch (e) {
+          console.error("Failed to update lastPing:", e);
+        }
+      }, 1000);
+    }
+
+    main();
+  </script>
+</body>
+</html>
