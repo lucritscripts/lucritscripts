@@ -29,6 +29,8 @@ check("step 1 link is the new LootLabs key link", PAGE.includes("https://loot-li
 check("step 2 link is the new LootLabs key link", PAGE.includes("https://lootdest.org/s?33Kx6iTB"));
 check("old SMH links are gone", !/rYmzSp1H|lGzg5zVy/.test(PAGE));
 check("never wipes the whole site's storage", !/localStorage\.clear\(\)/.test(PAGE));
+check("keys start with LUCRIT-", PAGE.includes('let key = "LUCRIT-";') && !PAGE.includes('let key = "SMH-"'));
+check("lastPing every 30 seconds, not every second", /\}, 30000\);/.test(PAGE) && !/lastPing[\s\S]{0,400}\}, 1000\);/.test(PAGE));
 
 const FAKE_APP = `export function initializeApp(c){ window.__fbConfig = c; return { c }; }`;
 const FAKE_FS = `
@@ -98,7 +100,7 @@ await page.evaluate(() => localStorage.setItem("lucrit:human", "keep-me"));
 await page.locator("#finishBtn").click();
 await page.locator("#keyActiveSection").waitFor({ state: "visible" });
 const key = (await page.locator("#keyBox").textContent()).trim();
-check("key looks like the loader expects (SMH- + 16)", /^SMH-[A-HJ-NP-Z2-9]{16}$/.test(key), key);
+check("key starts with LUCRIT- (+ 16)", /^LUCRIT-[A-HJ-NP-Z2-9]{16}$/.test(key), key);
 const stored = await page.evaluate((k) => JSON.parse(localStorage.getItem("__fs_test"))["keys/" + k], key);
 check("written to Firestore keys/<key>", !!stored);
 check("…with valid:true, inUse:false, boundTo, lastPing",
