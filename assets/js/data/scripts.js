@@ -98,18 +98,63 @@ const escAttr = (v) => String(v ?? "")
  * `pages.js` (the script sheet), and ui.js already imports pages.js — putting
  * it in either one would be a cycle. Nothing here imports anything.
  */
-export function statusBadges(script, { showUnverified = false } = {}) {
+/**
+ * Labels staff can set from the admin panel. Same ids, same order as
+ * ADMIN_LABEL_IDS in _worker.js (tests/adminlabels.spec.mjs checks it).
+ * `warn` labels also raise the caution box on the script page.
+ */
+export const ADMIN_LABELS = [
+  { id: "risky",     text: "Risky",           tone: "red",    warn: true,
+    tip: "Staff flagged this script as risky. Use it at your own risk." },
+  { id: "banrisk",   text: "Ban Risk",        tone: "red",    warn: true,
+    tip: "Staff believe using this can get your account banned." },
+  { id: "patched",   text: "Patched",         tone: "grey",   warn: true,
+    tip: "This no longer works \u2014 the game patched it." },
+  { id: "outdated",  text: "Outdated",        tone: "orange",
+    tip: "Older script; parts of it may not work on the current game version." },
+  { id: "working",   text: "Working",         tone: "green",
+    tip: "Staff tested this recently and it worked." },
+  { id: "updated",   text: "Updated",         tone: "blue",
+    tip: "Recently updated for the current version of the game." },
+  { id: "featured",  text: "Featured",        tone: "purple",
+    tip: "Featured by the Lucrit Scripts team." },
+  { id: "staffpick", text: "Staff Pick",      tone: "pink",
+    tip: "A favourite of the Lucrit Scripts team." },
+  { id: "hot",       text: "Hot",             tone: "orange",
+    tip: "Popular right now." },
+  { id: "mobile",    text: "Mobile Friendly", tone: "cyan",
+    tip: "Works on mobile executors." },
+];
+const LABEL_ICON = { risky: "\u26a0 ", banrisk: "\u26d4 ", patched: "\u2716 ", working: "\u2714 ",
+  featured: "\u2605 ", staffpick: "\u2665 ", hot: "\ud83d\udd25 ", updated: "\u21bb " };
+
+export function labelBadge(id) {
+  const l = ADMIN_LABELS.find((x) => x.id === id);
+  if (!l) return "";
+  return `<span class="badge badge--label badge--${l.tone}" data-label="${l.id}" title="${escAttr(l.tip)}">${LABEL_ICON[l.id] || ""}${l.text}</span>`;
+}
+
+/** Warning labels first, so a card that can only fit two shows the ones that matter. */
+export function sortedLabels(ids = []) {
+  const known = ADMIN_LABELS.filter((l) => ids.includes(l.id));
+  return [...known.filter((l) => l.warn), ...known.filter((l) => !l.warn)].map((l) => l.id);
+}
+
+export function statusBadges(script, { showUnverified = false, showLua = true, maxLabels = Infinity } = {}) {
   const out = [];
   if (script?.verified) {
     out.push(`<span class="badge badge--verified" title="${escAttr(
       "A person on the Lucrit Scripts team reviewed this script."
     )}">\u2713 Verified</span>`);
-  } else if (showUnverified) {
+  }
+  for (const id of sortedLabels(script?.labels || []).slice(0, maxLabels)) out.push(labelBadge(id));
+  if (!script?.verified && showUnverified) {
     out.push(`<span class="badge badge--unverified" title="${escAttr(
       "Nobody has reviewed this script yet."
     )}">Not reviewed</span>`);
   }
-  if (script?.lua) {
+  // The script page leaves this one off (owner's call, 15 Oct 2026); cards keep it.
+  if (showLua && script?.lua) {
     out.push(`<span class="badge badge--lua" title="${escAttr(
       "The submitted code contains Luau syntax. This is an automatic check of the text — "
       + "it does not mean the script is safe, working, or reviewed."
