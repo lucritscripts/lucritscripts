@@ -2917,3 +2917,15 @@ html.reduced-motion .chapter__stage { transition: none; }
   .adm__acts { justify-content: flex-start; }
   .adm__labels { grid-template-columns: 1fr; }
 }
+
+/* ---- admin: Keys tab (Get Key keys, live from Firebase) ---- */
+.adm__key { font-family: var(--mono); font-size: 0.8rem; color: var(--ink); letter-spacing: 0.03em; word-break: break-all; }
+.adm__copy {
+  margin-left: 6px; padding: 1px 6px; border-radius: 6px; font-size: 0.8rem; line-height: 1.4;
+  color: var(--ink-3); border: 1px solid var(--line); background: transparent; cursor: pointer;
+}
+.adm__copy:hover { color: var(--cyan); border-color: var(--cyan); }
+/* Destructive admin buttons (Delete). Used by the accounts, scripts and keys tabs. */
+.btn--danger { color: #ff8a95; border-color: rgba(255, 77, 94, 0.45); }
+.btn--danger:hover { color: #fff; background: rgba(255, 77, 94, 0.18); border-color: var(--red); }
+.btn--danger:disabled, .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
