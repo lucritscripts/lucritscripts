@@ -21,7 +21,8 @@ globalThis.fetch = async (url, init = {}) => {
   return realFetch(url, init);
 };
 
-const env = freshEnv(worker, { LOOTLABS_TOKEN: "t", SITE_URL: "https://lucritscripts.site" });
+// "api" switches off the built-in dashboard links so the API path is tested too.
+const env = freshEnv(worker, { LOOTLABS_TOKEN: "t", SITE_URL: "https://lucritscripts.site", LOOTLABS_LINKS: "api" });
 const call = async (method, path, body, ip = "198.51.100.7") => {
   const res = await worker.fetch(new Request("https://lucrit.test" + path, {
     method, headers: { "Content-Type": "application/json", "CF-Connecting-IP": ip },
@@ -104,7 +105,19 @@ await call("POST", "/api/unlock/flow/check", { flowId: f2 });
 r = await call("POST", "/api/unlock/flow/go", { flowId: f2 });
 check("step 2 uses your second link", /^https:\/\/loot-link\.com\/s\?StepTwo&puid=/.test(r.json?.data?.url || ""), r.json?.data?.url);
 check("…and no API call at all", lockers.length === before, `${lockers.length - before} calls`);
+env.LOOTLABS_LINKS = "api";
+
+console.log("\nThe real dashboard links (default)");
 delete env.LOOTLABS_LINKS;
+r = await call("POST", "/api/unlock/flow", { scriptId: id, provider: "lootlabs" });
+const f3 = r.json.data.flowId;
+r = await call("POST", "/api/unlock/flow/go", { flowId: f3 });
+check("step 1 → lootdest.org/s?gBsJVZu6 + puid", /^https:\/\/lootdest\.org\/s\?gBsJVZu6&puid=[a-f0-9]{32}$/.test(r.json?.data?.url || ""), r.json?.data?.url);
+await postback(r.json.data.url);
+await call("POST", "/api/unlock/flow/check", { flowId: f3 });
+r = await call("POST", "/api/unlock/flow/go", { flowId: f3 });
+check("step 2 → lootdest.org/s?3c4ePbHu + puid", /^https:\/\/lootdest\.org\/s\?3c4ePbHu&puid=/.test(r.json?.data?.url || ""), r.json?.data?.url);
+env.LOOTLABS_LINKS = "api";
 
 console.log("\nIn the browser");
 const errors = [];
