@@ -1680,6 +1680,56 @@ async function handleAdminLog(request, env) {
   })) });
 }
 
+/* ─────────────────────────────────────────── Get Key: your key, any device ── */
+
+/**
+ * The key a signed-in user made on /getkey, so it shows again on another
+ * device (or after clearing the browser) instead of making them do the
+ * checkpoints again. The key itself lives in Firebase; this is only a
+ * per-account pointer to it, kept in the `cache` table until it expires.
+ *
+ * Saving a key to your own account grants nothing — the page still checks the
+ * key against Firebase before showing it, and the loader only trusts Firebase.
+ */
+const GETKEY_FORMAT = /^LUCRIT-[A-HJ-NP-Z2-9]{16}$/;
+const GETKEY_MAX_MS = 8 * 3600 * 1000;
+
+async function handleMyKeyGet(request, env) {
+  const user = await currentUser(request, env);
+  if (!user) return ok({ data: null, signedIn: false });
+  const saved = await cacheGet(env, `getkey:${user.id}`);
+  const live = saved && GETKEY_FORMAT.test(saved.key) && Number(saved.expiresAt) > Date.now();
+  return ok({ data: live ? { key: saved.key, expiresAt: Number(saved.expiresAt) } : null, signedIn: true });
+}
+
+async function handleMyKeyPut(request, env) {
+  const user = await currentUser(request, env);
+  if (!user) return bad(401, "Sign in to keep your key on every device.");
+  const body = await request.json().catch(() => ({}));
+  const key = String(body.key || "");
+  const expiresAt = Math.floor(Number(body.expiresAt) || 0);
+  const left = expiresAt - Date.now();
+  if (!GETKEY_FORMAT.test(key)) return bad(400, "That isn't a Lucrit key.");
+  if (left <= 0 || left > GETKEY_MAX_MS + 60_000) return bad(400, "That key's expiry doesn't look right.");
+  await cachePut(env, `getkey:${user.id}`, { key, expiresAt }, Math.ceil(left / 1000));
+  return ok({ data: { key, expiresAt } });
+}
+
+/**
+ * POST /api/admin/log — lets the panel record things that didn't go through
+ * this Worker, i.e. Get Key actions done straight against Firebase from the
+ * Keys tab. Staff-only; only "Key …" actions, so it can't forge other entries.
+ */
+async function handleAdminLogWrite(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  const body = await request.json().catch(() => ({}));
+  const action = String(body.action || "").trim();
+  if (!/^Key(s)? /i.test(action) && !/^Expired keys /i.test(action)) return bad(400, "Only key actions can be logged here.");
+  await adminLog(env, action, String(body.target || ""), String(body.detail || ""));
+  return ok({ data: { logged: true } });
+}
+
 async function handleScriptVerify(request, env, { id }, ctx) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
@@ -5681,6 +5731,9 @@ const ROUTES = {
   "GET  /api/admin/scripts": handleAdminScripts,
   "GET  /api/admin/reports": handleAdminReports,
   "GET  /api/admin/log": handleAdminLog,
+  "POST /api/admin/log": handleAdminLogWrite,
+  "GET  /api/getkey/mine": handleMyKeyGet,
+  "POST /api/getkey/mine": handleMyKeyPut,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,

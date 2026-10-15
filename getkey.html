@@ -374,6 +374,7 @@
       paintSteps(STEP);
       if (STEP === 0) {
         messageText.textContent = 'Checkpoint One';
+        // (the sign-in hint is added below once we know they're signed out)
         finishBtn.textContent = 'Get Key';
         stepNote.textContent = 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.';
         finishBtn.onclick = () => { window.location.href = STEP_LINKS[0]; };
@@ -412,7 +413,37 @@
       }
     }
 
+    // ✅ Your key on every device: a signed-in visitor's key is remembered on
+    // their Lucrit account (/api/getkey/mine), so it shows again here even on
+    // another phone/PC or after clearing the browser.
+    let signedIn = false;
+    async function accountKey() {
+      try {
+        const res = await fetch('/api/getkey/mine', { credentials: 'same-origin' });
+        const body = await res.json();
+        signedIn = Boolean(body.signedIn);
+        return body.ok && body.data ? body.data : null;
+      } catch { return null; }
+    }
+    function saveToAccount(key, expiresAt) {
+      if (!signedIn) return;
+      fetch('/api/getkey/mine', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, expiresAt }),
+      }).catch(() => {});
+    }
+
     async function checkKey() {
+      let restored = false;
+      const fromAccount = await accountKey();
+      if (!localStorage.getItem(keyStorage) && fromAccount && fromAccount.expiresAt > Date.now()
+          && await validateKeyFromFirestore(fromAccount.key)) {
+        localStorage.setItem(keyStorage, fromAccount.key);
+        localStorage.setItem(keyTimeStorage, String(fromAccount.expiresAt));
+        restored = true;
+      }
+
       const key = localStorage.getItem(keyStorage);
       if (!key) {
         showNormalUI();
@@ -421,13 +452,20 @@
 
       const valid = await validateKeyFromFirestore(key);
       if (!valid) {
-        localStorage.removeItem(keyStorage);
-        localStorage.removeItem(keyTimeStorage);
-        window.location.href = "/getkey";
+        // Expired or deleted: forget it and start at checkpoint one (no
+        // redirect, so a stale account copy can't bounce the page in a loop).
+        ['smh_key', 'smh_keyTime', 'smh_cp1'].forEach((k) => localStorage.removeItem(k));
+        localStorage.setItem(sessionStart, Date.now().toString());
+        showNormalUI();
         return false;
       }
 
       showKeyUI(key);
+      if (restored) stepNote.textContent = 'Restored from your Lucrit account.';
+      // Made while signed out, or on another device? Keep it on the account too.
+      if (!fromAccount || fromAccount.key !== key) {
+        saveToAccount(key, parseInt(localStorage.getItem(keyTimeStorage), 10));
+      }
       return true;
     }
 
@@ -459,6 +497,7 @@
         localStorage.setItem(keyTimeStorage, expiresAt.toString());
         localStorage.setItem(sessionStart, now.toString());
         localStorage.removeItem('smh_cp1');   // the next key starts at checkpoint one again
+        saveToAccount(key, expiresAt);         // so it shows on their other devices too
 
         showKeyUI(key);
         finishBtn.style.display = "none";
@@ -512,7 +551,13 @@
 
     async function main() {
       const hasKey = await checkKey();
-      if (!hasKey) showNormalUI();
+      if (!hasKey) {
+        showNormalUI();
+        if (!signedIn && STEP === 0) {
+          stepNote.innerHTML = 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.'
+            + '<br><a href="/" style="color:var(--cyan)">Sign in</a> first to keep your key on all your devices.';
+        }
+      }
       updateTimerUI();
       setInterval(updateTimerUI, 1000);
       setInterval(periodicKeyValidation, 60000);
