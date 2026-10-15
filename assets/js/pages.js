@@ -1036,7 +1036,7 @@ function heldLocally(id) {
   return false;
 }
 
-export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenScript = null }) {
+export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenScript = null, onStartFlow = null }) {
   const sheet = createOverlay({ id: "script", label: "Script", wide: true });
   let current = null;
   let code = null;         // fetched separately, and only once we're allowed it
@@ -1173,7 +1173,11 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
         <p class="gate__note">Once sponsors are live, unlocking pays the person who wrote this.</p>`;
     } else {
       body = `
-        <p>Complete one short sponsor step to unlock the code. It pays the person who wrote it.</p>
+        <p>${live.includes("lootlabs") && live.length === 1
+          ? "Complete two quick LootLabs steps to unlock the code."
+          : live.includes("lootlabs")
+            ? "LootLabs: two quick steps. Linkvertise: one. Either one unlocks the code."
+            : "Complete one short sponsor step to unlock the code."} It pays the person who wrote it.</p>
         <div class="gate__actions">
           ${live.map((id, i) => `
             <button class="btn btn--primary${i ? " btn--alt" : ""}" data-act="${esc(id)}" ${busy ? "disabled" : ""}>
@@ -1437,6 +1441,11 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
       toast("Try the unlock again");
       return;
     }
+
+    // LootLabs is a two-step page of its own now (/unlock/lootlabs), the way
+    // the old Script Maniac Hub key system worked: step 1, back here, step 2,
+    // back here, script. Each step is checked with LootLabs' postback.
+    if (act === "lootlabs" && onStartFlow) { onStartFlow(current, "lootlabs"); return; }
 
     if (act === "free" || account.unlockProviders.includes(act)) {
       if (busy) return;

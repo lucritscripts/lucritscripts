@@ -21,6 +21,7 @@ import { capturePendingUnlock, takePendingUnlock, deleteScript } from "./library
 import { createCreatorPage } from "./creator.js";
 import { createExecutorsPage } from "./executors.js";
 import { createPublishForm } from "./publish.js";
+import { createUnlockFlowPage } from "./unlockflow.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -94,6 +95,8 @@ const scriptPage = createScriptPage({
   // and open at their own address like any other script.
   getLibrary: () => library,
   onOpenScript: (s) => openScript(s),
+  // LootLabs runs through its own page now: /unlock/lootlabs?s=<id>.
+  onStartFlow: (s, provider) => router.go(`/unlock/${provider}?s=${encodeURIComponent(s.id)}`),
 });
 // A deep link can open a script before the library arrives; draw its
 // suggestions once it does.
@@ -127,6 +130,16 @@ const dashboard = createDashboard({
 // drawn, and resolving the route would draw it a second time on top of itself.
 
 const executorsPage = createExecutorsPage();
+
+// The two-step unlock page. When it finishes, the visitor lands on the script
+// itself — the server already holds their grant, so it opens unlocked.
+const unlockPage = createUnlockFlowPage({
+  onDone: (script) => {
+    if (!script) { router.go("/", { replace: true }); return; }
+    router.go(pathForScript(script), { replace: true });
+  },
+  onExit: () => router.go("/", { replace: true }),
+});
 
 const creatorPage = createCreatorPage({
   onOpenScript: (s) => openScript(s),
@@ -195,6 +208,7 @@ function closeRoutedPages(keep = null) {
   if (keep !== "dashboard") dashboard.close();
   if (keep !== "creator") creatorPage.close();
   if (keep !== "admin") adminPage.close();
+  if (keep !== "unlock") unlockPage.close();
   // One sheet, two routes: the listing and a detail view share it, so backing
   // from an executor to /executors must not shut the thing it is moving into.
   if (keep !== "executors" && keep !== "executor") executorsPage.close();
@@ -298,6 +312,20 @@ const router = createRouter({
     executorsPage.open(slug);
   },
 
+  /**
+   * /unlock/lootlabs — arrives two ways: from a script's "Unlock with LootLabs"
+   * button (?s=<id>), or back from LootLabs at the bare address. The page sorts
+   * out which; the ?s= is dropped from the address bar once read.
+   */
+  unlock({ provider }) {
+    if (provider !== "lootlabs") { router.go("/", { replace: true }); return; }
+    closeRoutedPages("unlock");
+    const scriptId = new URLSearchParams(location.search).get("s") || "";
+    if (scriptId) history.replaceState(null, "", "/unlock/lootlabs");
+    setTitle("Unlock");
+    unlockPage.open({ scriptId });
+  },
+
   // A path the app does not own reached the shell somehow. Draw the home page
   // rather than an empty screen.
   unknown() { closeRoutedPages(); setTitle(""); router.correct("/"); },
@@ -312,6 +340,7 @@ document.addEventListener("lucrit:script-closed", () => router.leave("creation")
 document.addEventListener("lucrit:dashboard-closed", () => router.leave("dashboard"));
 document.addEventListener("lucrit:creator-closed", () => router.leave("creator"));
 document.addEventListener("lucrit:admin-closed", () => router.leave("admin"));
+document.addEventListener("lucrit:unlock-closed", () => router.leave("unlock"));
 // The executors sheet is `id: "executors"`, so it fires one event for both of
 // its routes. Whichever one the address bar is currently on is the one to hand
 // back; `leave` is a no-op for the other.

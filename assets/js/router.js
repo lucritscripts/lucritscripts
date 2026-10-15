@@ -16,6 +16,7 @@
 //   /executors                     the executor listing
 //   /executors/<slug>              one executor
 //   /admin                         the owner's panel
+//   /unlock/<provider>             the two-step unlock page (?s=<script id>)
 //
 // Two decisions worth keeping.
 //
@@ -75,7 +76,7 @@ function decode(segment) {
 }
 
 export function parse(pathname = location.pathname) {
-  const parts = String(pathname).split("/").filter(Boolean).map(decode);
+  const parts = String(pathname).split(/[?#]/)[0].split("/").filter(Boolean).map(decode);
 
   if (!parts.length) return { name: "home" };
   if (parts.length === 1 && parts[0] === "admin") return { name: "admin" };
@@ -95,6 +96,10 @@ export function parse(pathname = location.pathname) {
   if (parts[0] === "executors" && parts.length === 1) return { name: "executors" };
   if (parts[0] === "executors" && parts.length === 2)
     return { name: "executor", slug: parts[1] };
+
+  // The two-step unlock page: /unlock/lootlabs (later /unlock/linkvertise).
+  if (parts[0] === "unlock" && parts.length === 2 && /^[a-z]+$/.test(parts[1]))
+    return { name: "unlock", provider: parts[1] };
 
   return { name: "unknown", pathname };
 }

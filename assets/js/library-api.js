@@ -256,3 +256,25 @@ export function takePendingUnlock() {
     return null;
   }
 }
+
+/* ------------------------------------------------- two-step unlock flow */
+
+// The flow id lives in localStorage so the visitor can leave for LootLabs and
+// land back on /unlock/lootlabs (a fixed address) with the flow still in hand.
+const FLOW_KEY = "lucrit:flow";
+
+export function savedFlow() {
+  try { return JSON.parse(localStorage.getItem(FLOW_KEY) || "null"); } catch { return null; }
+}
+export function rememberFlow(flow) {
+  try {
+    if (flow) localStorage.setItem(FLOW_KEY, JSON.stringify(flow));
+    else localStorage.removeItem(FLOW_KEY);
+  } catch { /* private mode: the flow just can't survive the round trip */ }
+}
+
+export const startFlow = (scriptId, provider = "lootlabs") =>
+  call("/api/unlock/flow", { method: "POST", body: { scriptId, provider } });
+export const getFlow = (flowId) => call(`/api/unlock/flow?id=${encodeURIComponent(flowId)}`);
+export const goFlow = (flowId) => call("/api/unlock/flow/go", { method: "POST", body: { flowId } });
+export const checkFlow = (flowId) => call("/api/unlock/flow/check", { method: "POST", body: { flowId } });
