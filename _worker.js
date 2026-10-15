@@ -2113,9 +2113,22 @@ async function lootLocker(env, script, returnUrl, label = "") {
 const FLOW_STEPS = 2;
 const FLOW_TTL_SEC = 2 * 3600;
 
+// The two real LootLabs links, made in the Creator's Panel on 15 Oct 2026:
+// "Lucrit Unlock - Step 1" → /unlock/lootlabs?step=1 and "… Step 2" →
+// /unlock/lootlabs?step=2 (LootLabs merges links that share a destination, so
+// each step needs its own). Roblox theme, Trending tier, up to 5 tasks each —
+// change those in the LootLabs dashboard, not here. LOOTLABS_LINKS in
+// Cloudflare overrides these if it's ever set.
+const DEFAULT_LOOT_LINKS = [
+  "https://lootdest.org/s?gBsJVZu6",
+  "https://lootdest.org/s?3c4ePbHu",
+];
+
 function flowLinks(env) {
-  return String(env.LOOTLABS_LINKS || "").split(/[\s,]+/).map((x) => x.trim())
+  const set = String(env.LOOTLABS_LINKS || "").split(/[\s,]+/).map((x) => x.trim())
     .filter((x) => /^https:\/\/[^\s]+$/i.test(x));
+  if (set.length) return set;
+  return env.LOOTLABS_LINKS === "api" ? [] : DEFAULT_LOOT_LINKS;
 }
 
 async function flowLoad(env, id) {
