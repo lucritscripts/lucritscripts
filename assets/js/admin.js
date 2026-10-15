@@ -14,6 +14,7 @@
 // the convenience; the Worker is the rule.
 
 import { esc, fmt, toast, createOverlay } from "./pages.js";
+import { statusBadges, labelBadge, ADMIN_LABELS } from "./data/scripts.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -75,6 +76,21 @@ export function createAdminPage({ onChanged } = {}) {
   let tab = "users";
   let query = "";
   let searchTimer = 0;
+
+  // Scripts tab state.
+  let filter = "all";        // see FILTERS below
+  let sort = "new";
+  let editing = null;        // script id whose label editor is open
+  const selected = new Set();
+  let scriptRows = [];       // last list drawn, for bulk actions
+
+  const FILTERS = [
+    ["all", "All"], ["live", "Live"], ["verified", "Verified"], ["unverified", "Not verified"],
+    ["labeled", "Labeled"], ["risky", "Risky"], ["reported", "Reported"],
+    ["flagged", "Flagged"], ["removed", "Taken down"],
+  ];
+  const SORTS = [["new", "Newest"], ["old", "Oldest"], ["views", "Most views"],
+    ["copies", "Most copies"], ["reports", "Most reports"], ["title", "Title A–Z"]];
 
   /* ------------------------------------------------------------- gate */
 
@@ -145,7 +161,8 @@ export function createAdminPage({ onChanged } = {}) {
     const q = query ? `&q=${encodeURIComponent(query)}` : "";
     const rows =
       tab === "users" ? await get(`/api/admin/users?limit=100${q}`)
-      : tab === "scripts" ? await get(`/api/admin/scripts?limit=100${q}`)
+      : tab === "scripts" ? await get(`/api/admin/scripts?limit=200${q}&f=${encodeURIComponent(filter)}&sort=${encodeURIComponent(sort)}`)
+      : tab === "activity" ? await get("/api/admin/log")
       : tab === "executors" ? await get("/api/admin/executors")
       : tab === "queue" ? await get("/api/admin/discord/queue")
       : await get("/api/admin/reports");
@@ -163,27 +180,33 @@ export function createAdminPage({ onChanged } = {}) {
       </header>
 
       <div class="stats">
-        ${tile("Accounts", o.users)}
+        ${tile("Accounts", o.users, o.newUsersWeek ? `+${fmt(o.newUsersWeek)} this week` : "")}
         ${tile("Suspended", o.banned)}
-        ${tile("Live scripts", o.scripts)}
+        ${tile("Live scripts", o.scripts, o.newScriptsWeek ? `+${fmt(o.newScriptsWeek)} this week` : "")}
+        ${tile("Verified scripts", o.verifiedScripts)}
+        ${tile("Labeled", o.labeled)}
+        ${tile("Marked risky", o.risky)}
+        ${tile("Flagged", o.flagged)}
         ${tile("Taken down", o.removed)}
+        ${tile("Unlocks today", o.unlocksToday, `${fmt(o.unlocksWeek)} this week`)}
         ${tile("Paid unlocks", o.verified)}
         ${tile("Open reports", o.reports)}
       </div>
 
       <nav class="tabs" role="tablist">
         ${[["users", "Accounts"], ["scripts", "Scripts"], ["executors", "Executors"],
-           ["queue", "Discord queue"], ["reports", "Reports"]]
+           ["queue", "Discord queue"], ["reports", "Reports"], ["activity", "Activity"]]
           .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}"
             data-admintab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
-      ${tab === "reports" || tab === "executors" || tab === "queue" ? "" : `
+      ${tab === "reports" || tab === "executors" || tab === "queue" || tab === "activity" ? "" : `
         <div class="library__search" style="margin:14px 0">
           <input class="library__input" type="search" data-adminq
-                 placeholder="${tab === "users" ? "Search name or email" : "Search title or author"}"
+                 placeholder="${tab === "users" ? "Search name or email" : "Search title, author or game"}"
                  value="${esc(query)}">
         </div>`}
+      ${tab === "scripts" ? scriptsToolbar() : ""}
 
       ${!rows.ok ? `<p class="note note--warn">${esc(rows.error || "Couldn't load that list.")}</p>`
         // The executors tab draws even when empty: the publish form lives
@@ -191,7 +214,8 @@ export function createAdminPage({ onChanged } = {}) {
         // the first one.
         : tab === "executors" ? executorsPanel(rows.data)
         : tab === "queue" ? queuePanel(rows.data, rows.configured)
-        : !rows.data.length ? `<p class="muted">Nothing here.</p>`
+        : tab === "activity" ? activityPanel(rows.data)
+        : !rows.data.length ? `<p class="muted">Nothing here${tab === "scripts" && filter !== "all" ? " for this filter" : ""}.</p>`
         : tab === "users" ? usersTable(rows.data)
         : tab === "scripts" ? scriptsTable(rows.data)
         : reportsTable(rows.data)}`;
@@ -201,10 +225,11 @@ export function createAdminPage({ onChanged } = {}) {
     if (box && query) { box.focus(); box.setSelectionRange(query.length, query.length); }
   }
 
-  const tile = (label, value) => `
+  const tile = (label, value, sub = "") => `
     <div class="stat">
       <span class="stat__k">${esc(label)}</span>
-      <span class="stat__v">${fmt(value)}</span>
+      <span class="stat__v">${fmt(value || 0)}</span>
+      ${sub ? `<span class="stat__sub">${esc(sub)}</span>` : ""}
     </div>`;
 
   function usersTable(rows) {
@@ -238,29 +263,102 @@ export function createAdminPage({ onChanged } = {}) {
          with them. Deleting is not.</p>`;
   }
 
-  function scriptsTable(rows) {
-    const flagged = rows.filter((s) => s.state && s.state !== "approved" && !s.removed).length;
+  function scriptsToolbar() {
+    const labelOpts = ADMIN_LABELS.map((l) =>
+      `<option value="label:${l.id}"${filter === "label:" + l.id ? " selected" : ""}>Label: ${esc(l.text)}</option>`).join("");
     return `
-      ${flagged ? `
+      <div class="adm__bar">
+        <div class="adm__pills" role="group" aria-label="Filter">
+          ${FILTERS.map(([id, label]) => `<button class="adm__pill${filter === id ? " is-on" : ""}"
+             data-adminfilter="${id}">${label}</button>`).join("")}
+          <select class="adm__select" data-adminfilterlabel aria-label="Filter by label">
+            <option value="">By label…</option>${labelOpts}
+          </select>
+        </div>
+        <label class="adm__sort">Sort
+          <select class="adm__select" data-adminsort>
+            ${SORTS.map(([id, label]) => `<option value="${id}"${sort === id ? " selected" : ""}>${label}</option>`).join("")}
+          </select>
+        </label>
+      </div>`;
+  }
+
+  function bulkBar() {
+    if (!selected.size) return "";
+    return `
+      <div class="adm__bulk" data-bulkbar>
+        <b>${selected.size} selected</b>
+        <button class="btn btn--ghost btn--xs" data-bulk="verify">Verify</button>
+        <button class="btn btn--ghost btn--xs" data-bulk="unverify">Unverify</button>
+        <select class="adm__select" data-bulklabel aria-label="Label">
+          ${ADMIN_LABELS.map((l) => `<option value="${l.id}">${esc(l.text)}</option>`).join("")}
+        </select>
+        <button class="btn btn--ghost btn--xs" data-bulk="addlabel">Add label</button>
+        <button class="btn btn--ghost btn--xs" data-bulk="removelabel">Remove label</button>
+        <button class="btn btn--ghost btn--xs btn--danger" data-bulk="takedown">Take down</button>
+        <button class="btn btn--ghost btn--xs" data-bulk="restore">Restore</button>
+        <button class="btn btn--ghost btn--xs" data-bulk="clear">Clear selection</button>
+      </div>`;
+  }
+
+  // The label editor shows each label exactly as visitors will see it.
+  function labelEditor(s) {
+    return `
+      <tr class="adm__editor" data-editor="${esc(s.id)}" data-script="${esc(s.id)}">
+        <td colspan="6">
+          <p class="adm__edhead"><b>Labels for “${esc(s.title)}”</b>
+            <span class="muted">Shown on the script page and its card. Red ones also put a warning box on the page.</span></p>
+          <div class="adm__labels">
+            ${ADMIN_LABELS.map((l) => `
+              <label class="adm__labelpick${l.warn ? " is-warn" : ""}">
+                <input type="checkbox" name="lbl" value="${l.id}"${(s.labels || []).includes(l.id) ? " checked" : ""}>
+                ${labelBadge(l.id)}
+                <span class="muted">${esc(l.tip)}</span>
+              </label>`).join("")}
+          </div>
+          <label class="field" style="margin-top:12px"><span>Staff note (optional, shown on the script page)</span>
+            <input name="staffnote" maxlength="280" value="${esc(s.staffNote || "")}"
+                   placeholder="e.g. Uses remote spam that the game's anti-cheat catches — alt accounts only."></label>
+          <div class="gate__actions" style="justify-content:flex-start;margin-top:10px">
+            <button class="btn btn--primary btn--sm" data-adminact="savelabels">Save labels</button>
+            <button class="btn btn--ghost btn--sm" data-adminact="clearlabels">Remove all</button>
+            <button class="btn btn--ghost btn--sm" data-adminact="closeeditor">Cancel</button>
+          </div>
+        </td>
+      </tr>`;
+  }
+
+  function scriptsTable(rows) {
+    scriptRows = rows;
+    for (const id of [...selected]) if (!rows.some((r) => r.id === id)) selected.delete(id);
+    const flagged = rows.filter((s) => s.state && s.state !== "approved" && !s.removed).length;
+    const allOn = rows.length && rows.every((r) => selected.has(r.id));
+    return `
+      ${flagged && filter !== "flagged" ? `
         <p class="note note--warn">
           ${flagged} script${flagged === 1 ? " is" : "s are"} flagged by the checker.
           ${flagged === 1 ? "It is" : "They are"} live and visible like any other —
           this is a note to look, not a takedown.
         </p>` : ""}
+      <p class="muted" style="margin:0 0 8px">${fmt(rows.length)} script${rows.length === 1 ? "" : "s"}${rows.length >= 200 ? " (first 200 — search or filter to narrow)" : ""}</p>
+      ${bulkBar()}
       <table class="rows">
-        <thead><tr><th>Script</th><th>Views</th><th>Copies</th><th>Reports</th><th></th></tr></thead>
+        <thead><tr>
+          <th style="width:28px"><input type="checkbox" data-selectall aria-label="Select all"${allOn ? " checked" : ""}></th>
+          <th>Script</th><th>Views</th><th>Copies</th><th>Reports</th><th></th></tr></thead>
         <tbody>
           ${rows.map((s) => `
-            <tr data-script="${esc(s.id)}">
+            <tr data-script="${esc(s.id)}"${s.removed ? ' class="is-removed"' : ""}>
+              <td><input type="checkbox" data-select="${esc(s.id)}" aria-label="Select ${esc(s.title)}"${selected.has(s.id) ? " checked" : ""}></td>
               <td>
                 <b>${esc(s.title)}</b>
                 ${s.removed ? ` <span class="chip chip--warn">removed</span>` : ""}
                 ${s.state && s.state !== "approved" && !s.removed
                   ? ` <span class="chip chip--warn" title="${esc(s.note || "The checker wasn't confident.")}">flagged</span>`
                   : ""}
-                ${s.verified ? ` <span class="badge badge--verified">✓ Verified</span>` : ""}
-                ${s.lua ? ` <span class="badge badge--lua">Lua Detected</span>` : ""}
-                <br><span class="muted">@${esc(s.author)} · ${esc(s.game)} · ${esc(s.createdAt)}</span>
+                <div class="adm__badges">${statusBadges(s)}</div>
+                <span class="muted">@${esc(s.author)} · ${esc(s.game)} · ${esc(s.createdAt)}</span>
+                ${s.staffNote ? `<br><span class="muted">Staff note: ${esc(s.staffNote)}</span>` : ""}
                 ${s.state && s.state !== "approved" && s.note
                   ? `<br><span class="muted">Checker: ${esc(s.note)}</span>`
                   : ""}
@@ -268,26 +366,50 @@ export function createAdminPage({ onChanged } = {}) {
               <td>${fmt(s.views)}</td>
               <td>${fmt(s.copies)}</td>
               <td>${s.reports ? `<b>${fmt(s.reports)}</b>` : "0"}</td>
-              <td>
-                ${s.state && s.state !== "approved"
-                  ? `<button class="btn btn--ghost btn--xs" data-adminact="clearflag">Clear flag</button>`
-                  : ""}
+              <td class="adm__acts">
+                ${s.removed ? "" : `<a class="btn btn--ghost btn--xs" target="_blank" rel="noopener"
+                   href="/creations/${encodeURIComponent(s.author)}/${encodeURIComponent(s.slug || "")}">View ↗</a>`}
+                <button class="btn btn--ghost btn--xs" data-adminact="labels">Labels${s.labels?.length ? ` (${s.labels.length})` : ""}</button>
                 <button class="btn btn--ghost btn--xs" data-adminact="verify"
                         data-verified="${s.verified ? "1" : "0"}">
                   ${s.verified ? "Unverify" : "Verify"}
                 </button>
+                ${s.state && s.state !== "approved"
+                  ? `<button class="btn btn--ghost btn--xs" data-adminact="clearflag">Clear flag</button>`
+                  : ""}
                 <button class="btn btn--ghost btn--xs" data-adminact="state"
                         data-removed="${s.removed ? "1" : "0"}">
                   ${s.removed ? "Restore" : "Take down"}
                 </button>
                 <button class="btn btn--ghost btn--xs" data-adminact="counters"
                         data-views="${s.views}" data-copies="${s.copies}">Counters</button>
+                <button class="btn btn--ghost btn--xs" data-adminact="copyid">Copy ID</button>
               </td>
-            </tr>`).join("")}
+            </tr>
+            ${editing === s.id ? labelEditor(s) : ""}`).join("")}
         </tbody>
       </table>
       <p class="muted">A script stays on the site until it is taken down here, or its
          author is suspended. Nothing else hides one.</p>`;
+  }
+
+  function activityPanel(rows) {
+    if (!rows.length) return `<div class="empty"><p><b>No activity yet.</b> Verifies, labels, takedowns,
+      suspensions and dismissed reports show up here as they happen.</p></div>`;
+    return `
+      <table class="rows">
+        <thead><tr><th>When</th><th>Action</th><th>On</th><th>Details</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => `
+            <tr>
+              <td class="muted" title="${esc(new Date(r.at * 1000).toLocaleString())}">${esc(AGO(r.at))}</td>
+              <td><b>${esc(r.action)}</b></td>
+              <td>${esc(r.target)}</td>
+              <td class="muted">${esc(r.detail || "—")}</td>
+            </tr>`).join("")}
+        </tbody>
+      </table>
+      <p class="muted">The newest 200 of the last 1,000 admin actions.</p>`;
   }
 
   /**
@@ -445,6 +567,54 @@ export function createAdminPage({ onChanged } = {}) {
 
   /* ----------------------------------------------------- interactions */
 
+  sheet.body.addEventListener("change", (e) => {
+    const t = e.target;
+    if (t.matches("[data-adminsort]")) { sort = t.value; panel(); return; }
+    if (t.matches("[data-adminfilterlabel]")) { if (t.value) { filter = t.value; selected.clear(); panel(); } return; }
+    if (t.matches("[data-select]")) {
+      if (t.checked) selected.add(t.dataset.select); else selected.delete(t.dataset.select);
+      redrawBulk(); return;
+    }
+    if (t.matches("[data-selectall]")) {
+      for (const r of scriptRows) { if (t.checked) selected.add(r.id); else selected.delete(r.id); }
+      sheet.body.querySelectorAll("[data-select]").forEach((c) => { c.checked = t.checked; });
+      redrawBulk(); return;
+    }
+  });
+
+  // The bulk bar redraws on its own so ticking a box doesn't refetch the list.
+  function redrawBulk() {
+    const old = $("[data-bulkbar]", sheet.body);
+    const html = bulkBar();
+    if (old) { if (html) old.outerHTML = html; else old.remove(); return; }
+    if (html) $("table.rows", sheet.body)?.insertAdjacentHTML("beforebegin", html);
+  }
+
+  async function runBulk(kind) {
+    const ids = [...selected];
+    const label = $("[data-bulklabel]", sheet.body)?.value;
+    if (kind === "takedown" && !confirm(`Take down ${ids.length} script${ids.length === 1 ? "" : "s"}?`)) return;
+    let done = 0, failed = 0;
+    for (const id of ids) {
+      const row = scriptRows.find((r) => r.id === id);
+      const path = `/api/admin/scripts/${encodeURIComponent(id)}`;
+      let res;
+      if (kind === "verify" || kind === "unverify") res = await send(`${path}/verify`, "POST", { verified: kind === "verify" });
+      else if (kind === "takedown" || kind === "restore") res = await send(`${path}/state`, "POST", { removed: kind === "takedown" });
+      else if (kind === "addlabel" || kind === "removelabel") {
+        const cur = new Set(row?.labels || []);
+        if (kind === "addlabel") cur.add(label); else cur.delete(label);
+        res = await send(`${path}/labels`, "POST", { labels: [...cur] });
+      }
+      if (res?.status === 423) { toast("The passcode timed out", "warn"); return paint(); }
+      if (res?.ok) done++; else failed++;
+    }
+    toast(failed ? `${done} done, ${failed} failed` : `Done — ${done} script${done === 1 ? "" : "s"}`, failed ? "warn" : "ok");
+    selected.clear();
+    panel();
+    if (done) onChanged?.();
+  }
+
   sheet.body.addEventListener("input", (e) => {
     if (!e.target.closest("[data-adminq]")) return;
     query = e.target.value;
@@ -544,7 +714,18 @@ export function createAdminPage({ onChanged } = {}) {
     }
 
     const tabBtn = e.target.closest("[data-admintab]");
-    if (tabBtn) { tab = tabBtn.dataset.admintab; query = ""; panel(); return; }
+    if (tabBtn) { tab = tabBtn.dataset.admintab; query = ""; editing = null; selected.clear(); panel(); return; }
+
+    const pill = e.target.closest("[data-adminfilter]");
+    if (pill) { filter = pill.dataset.adminfilter; selected.clear(); editing = null; panel(); return; }
+
+    const bulk = e.target.closest("[data-bulk]");
+    if (bulk) {
+      if (bulk.dataset.bulk === "clear") { selected.clear(); panel(); return; }
+      bulk.disabled = true;
+      await runBulk(bulk.dataset.bulk);
+      return;
+    }
 
     const btn = e.target.closest("[data-adminact]");
     if (!btn) return;
@@ -554,6 +735,15 @@ export function createAdminPage({ onChanged } = {}) {
     const executor = btn.closest("[data-executor]")?.dataset.executor;
     const scriptId = btn.closest("[data-script]")?.dataset.script;
     const reportId = btn.closest("[data-report]")?.dataset.report;
+
+    // Editor open/close and clipboard don't call the server.
+    if (act === "labels") { editing = editing === scriptId ? null : scriptId; panel(); return; }
+    if (act === "closeeditor") { editing = null; panel(); return; }
+    if (act === "copyid") {
+      try { await navigator.clipboard.writeText(scriptId); toast("Copied " + scriptId); }
+      catch { prompt("Script ID:", scriptId); }
+      return;
+    }
 
     btn.disabled = true;
     let res = { ok: false, error: "Nothing to do." };
@@ -582,6 +772,14 @@ export function createAdminPage({ onChanged } = {}) {
     } else if (act === "clearflag") {
       res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/state`, "POST",
         { status: "approved" });
+
+    } else if (act === "savelabels" || act === "clearlabels") {
+      const ed = btn.closest("[data-editor]");
+      const labels = act === "clearlabels" ? []
+        : [...ed.querySelectorAll('input[name="lbl"]:checked')].map((c) => c.value);
+      const note = act === "clearlabels" ? "" : ed.querySelector('input[name="staffnote"]').value;
+      res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/labels`, "POST", { labels, note });
+      if (res.ok) editing = null;
 
     } else if (act === "verify") {
       res = await send(`/api/admin/scripts/${encodeURIComponent(scriptId)}/verify`, "POST",

@@ -6,7 +6,7 @@
 
 import { account, STAT_WINDOWS } from "./account.js";
 import * as stats from "./stats.js";
-import { CATEGORIES, BOARDS, categoryOf, statusBadges } from "./data/scripts.js";
+import { CATEGORIES, BOARDS, categoryOf, statusBadges, ADMIN_LABELS } from "./data/scripts.js";
 import { renderCodeBlock } from "./engine/highlight.js";
 
 /* ------------------------------------------------------------------ util */
@@ -1036,6 +1036,26 @@ function heldLocally(id) {
   return false;
 }
 
+/**
+ * What staff said about this script, from the admin panel.
+ *
+ * A warning label (Risky, Ban Risk, Patched) gets a red caution box so nobody
+ * runs it without seeing that first; otherwise a staff note, if there is one,
+ * shows as a quiet info box. Nothing here comes from the publisher.
+ */
+function staffBox(s) {
+  const warns = ADMIN_LABELS.filter((l) => l.warn && (s.labels || []).includes(l.id));
+  const note = String(s.staffNote || "").trim();
+  if (!warns.length && !note) return "";
+  if (warns.length) {
+    return `<div class="staffbox staffbox--warn" role="note">
+      <b>\u26A0 Staff warning: ${warns.map((l) => esc(l.text)).join(" · ")}</b>
+      <p>${note ? esc(note) : esc(warns[0].tip)}</p>
+    </div>`;
+  }
+  return `<div class="staffbox" role="note"><b>Staff note</b><p>${esc(note)}</p></div>`;
+}
+
 export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenScript = null, onStartFlow = null }) {
   const sheet = createOverlay({ id: "script", label: "Script", wide: true });
   let current = null;
@@ -1285,7 +1305,7 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
         <div class="chips">
           <span class="chip" style="--cat:${cat.accent}">${cat.label}</span>
           ${s.keyless ? `<span class="chip chip--ok">Keyless</span>` : `<span class="chip chip--warn">Key required</span>`}
-          ${statusBadges(s, { showUnverified: true })}
+          ${statusBadges(s, { showUnverified: true, showLua: false })}
           ${(s.tags || []).map((t) => `<span class="chip chip--soft">${esc(t)}</span>`).join("")}
         </div>
         <h2>${esc(s.title)}</h2>
@@ -1297,6 +1317,8 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
           <span>${esc(s.added)}</span>
         </div>
       </header>
+
+      ${staffBox(s)}
 
       <div class="script__layout${img ? "" : " script__layout--noimg"}">
         ${img ? `

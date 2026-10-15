@@ -125,7 +125,7 @@ export function cardMarkup(script, { large = false } = {}) {
         <div class="card__top">
           <span class="chip">${cat.label}</span>
           ${script.keyless === false ? `<span class="chip chip--warn">Key</span>` : `<span class="chip chip--ok">Keyless</span>`}
-          ${statusBadges(script)}
+          ${statusBadges(script, { maxLabels: 2 })}
         </div>
         <h3 class="card__title">${esc(script.title)}</h3>
         ${script.game ? `<p class="card__game">${esc(script.game)}</p>` : ""}
