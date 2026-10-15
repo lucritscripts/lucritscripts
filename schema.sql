@@ -155,7 +155,21 @@ CREATE TABLE IF NOT EXISTS scripts (
   -- this one says "this looks like code", not "we checked it".
   lua         INTEGER NOT NULL DEFAULT 0,
 
+  -- Staff labels (JSON array of ids from ADMIN_LABEL_IDS — "risky",
+  -- "patched", "working"…) and a staff note, both set only from /admin.
+  labels      TEXT    NOT NULL DEFAULT '[]',
+  admin_note  TEXT    NOT NULL DEFAULT '',
+
   created_at  TEXT NOT NULL
+);
+
+-- What staff did in the admin panel, newest first (the Activity tab).
+CREATE TABLE IF NOT EXISTS admin_log (
+  id     INTEGER PRIMARY KEY AUTOINCREMENT,
+  at     INTEGER NOT NULL,
+  action TEXT NOT NULL,
+  target TEXT NOT NULL DEFAULT '',
+  detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS scripts_status ON scripts(status);
 CREATE INDEX IF NOT EXISTS scripts_author ON scripts(author_id);

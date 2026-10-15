@@ -893,6 +893,15 @@ const SCRIPT_COLUMNS = `s.id, s.author_id, s.title, s.game, s.category, s.descr,
   s.verified, s.lua, s.status, s.link <> '' AS has_link,
   u.username AS author`;
 
+// The same, plus the staff labels/note. Used only once ensureAdminSchema has
+// confirmed those columns exist, so a public page can never 500 on a database
+// that predates them — it just shows no labels.
+const SCRIPT_COLUMNS_STAFF = `${SCRIPT_COLUMNS}, s.labels, s.admin_note`;
+async function scriptCols(env) {
+  try { await ensureAdminSchema(env); return SCRIPT_COLUMNS_STAFF; }
+  catch { return SCRIPT_COLUMNS; }
+}
+
 /**
  * `s.link` is NOT in that list, and that omission is the point.
  *
@@ -1046,6 +1055,11 @@ function publicScript(row, extra = {}) {
     verified: Boolean(row.verified),
     lua: Boolean(row.lua),
 
+    // Staff labels and note, set only from the admin panel. Absent columns
+    // (a database the admin schema hasn't reached yet) read as none.
+    labels: parseLabels(row.labels),
+    staffNote: String(row.admin_note || ""),
+
     // Whether there is a link behind the unlock — never the link itself.
     hasLink: Boolean(row.has_link),
 
@@ -1127,7 +1141,7 @@ async function handleScriptList(request, env) {
   if (author) { where.push("s.author_id = ?"); binds.push(author); }
 
   const { results } = await env.DB.prepare(
-    `SELECT ${SCRIPT_COLUMNS},
+    `SELECT ${await scriptCols(env)},
             (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
        FROM scripts s JOIN users u ON u.id = s.author_id
       WHERE ${where.join(" AND ")}
@@ -1168,7 +1182,7 @@ async function handleScriptList(request, env) {
 
 async function handleScriptGet(request, env, { id }) {
   const row = await env.DB.prepare(
-    `SELECT ${SCRIPT_COLUMNS},
+    `SELECT ${await scriptCols(env)},
             (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
        FROM scripts s JOIN users u ON u.id = s.author_id
       WHERE s.id = ? AND s.removed = 0 AND u.banned = 0`
@@ -1252,7 +1266,7 @@ async function handleCreator(request, env, { id }) {
   if (!user) return bad(404, "No such creator.");
 
   const { results } = await env.DB.prepare(
-    `SELECT ${SCRIPT_COLUMNS},
+    `SELECT ${await scriptCols(env)},
             (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
        FROM scripts s JOIN users u ON u.id = s.author_id
       WHERE s.author_id = ? AND s.removed = 0
@@ -1426,7 +1440,7 @@ async function handleScriptPublish(request, env, _params, ctx) {
   ).run();
 
   const row = await env.DB.prepare(
-    `SELECT ${SCRIPT_COLUMNS}, 0 AS likes
+    `SELECT ${await scriptCols(env)}, 0 AS likes
        FROM scripts s JOIN users u ON u.id = s.author_id WHERE s.id = ?`
   ).bind(id).first();
 
@@ -1538,6 +1552,134 @@ async function handleScriptCode(request, env, { id }) {
  * person saying they looked at this script. A script can be approved and
  * unverified, which is the normal case, and the badges say different things.
  */
+/* ─────────────────────────────────────────── admin labels + activity ── */
+
+/**
+ * Labels staff can put on a script from the admin panel ("Risky", "Patched",
+ * "Working"…), plus a free-text staff note shown on the script page.
+ *
+ * A fixed vocabulary, not free text: a label is a claim the SITE makes, so
+ * every one of them has a colour and a tooltip decided once, here and in
+ * assets/js/data/scripts.js (ADMIN_LABELS — tests/adminlabels.spec.mjs keeps
+ * the two lists identical). Publishers can't set these; only the requireAdmin
+ * route below writes the column.
+ */
+const ADMIN_LABEL_IDS = [
+  "risky", "banrisk", "patched", "outdated",
+  "working", "updated", "featured", "staffpick", "hot", "mobile",
+];
+
+function parseLabels(raw) {
+  let list = [];
+  try { list = JSON.parse(raw || "[]"); } catch { list = []; }
+  if (!Array.isArray(list)) return [];
+  return ADMIN_LABEL_IDS.filter((id) => list.includes(id));   // known ids, canonical order
+}
+
+/**
+ * Adds the admin columns/table if this database predates them.
+ *
+ * Production D1 was created from an older schema.sql, and a missed migration
+ * would turn every label save into a 500. Rather than rely on someone running
+ * SQL in the console, the first admin request that needs them adds them —
+ * additive only (ADD COLUMN / CREATE TABLE IF NOT EXISTS), never a rewrite.
+ * Once per database per isolate.
+ */
+const adminSchemaDone = new WeakMap();
+function ensureAdminSchema(env) {
+  const key = env.DB;
+  if (adminSchemaDone.has(key)) return adminSchemaDone.get(key);
+  const p = (async () => {
+    let have = null;
+    try {
+      const { results } = await env.DB.prepare(`PRAGMA table_info(scripts)`).all();
+      have = new Set((results || []).map((c) => c.name));
+    } catch { have = null; }
+    const add = async (col, sql) => {
+      if (have && have.has(col)) return;
+      try { await env.DB.prepare(sql).run(); }
+      catch (e) { if (!/duplicate column/i.test(String(e?.message || e))) throw e; }
+    };
+    await add("labels", `ALTER TABLE scripts ADD COLUMN labels TEXT NOT NULL DEFAULT '[]'`);
+    await add("admin_note", `ALTER TABLE scripts ADD COLUMN admin_note TEXT NOT NULL DEFAULT ''`);
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS admin_log (
+         id     INTEGER PRIMARY KEY AUTOINCREMENT,
+         at     INTEGER NOT NULL,
+         action TEXT NOT NULL,
+         target TEXT NOT NULL DEFAULT '',
+         detail TEXT NOT NULL DEFAULT ''
+       )`).run();
+  })();
+  adminSchemaDone.set(key, p);
+  p.catch(() => adminSchemaDone.delete(key));   // a failed attempt is retried next time
+  return p;
+}
+
+/** One line in the panel's Activity tab. Never fails the action it records. */
+async function adminLog(env, action, target = "", detail = "") {
+  try {
+    await ensureAdminSchema(env);
+    await env.DB.prepare(`INSERT INTO admin_log (at, action, target, detail) VALUES (?, ?, ?, ?)`)
+      .bind(Math.floor(Date.now() / 1000), clip(action, 80), clip(target, 160), clip(detail, 400)).run();
+    // Keep it bounded: the newest 1000 entries are plenty for "who did what".
+    if (Math.random() < 0.05) {
+      await env.DB.prepare(
+        `DELETE FROM admin_log WHERE id NOT IN (SELECT id FROM admin_log ORDER BY id DESC LIMIT 1000)`).run();
+    }
+  } catch { /* the log is a convenience, never a reason to refuse */ }
+}
+
+/** POST /api/admin/scripts/:id/labels  { labels: [...], note: "" } */
+async function handleAdminScriptLabels(request, env, { id }, ctx) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  await ensureAdminSchema(env);
+
+  const row = await env.DB.prepare(
+    `SELECT id, title, labels, admin_note FROM scripts WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+
+  const body = await request.json().catch(() => ({}));
+  if (!Array.isArray(body.labels)) return bad(400, "labels must be a list.");
+  const unknown = body.labels.filter((l) => !ADMIN_LABEL_IDS.includes(l));
+  if (unknown.length) return bad(400, `Unknown label: ${String(unknown[0]).slice(0, 30)}`);
+  const labels = ADMIN_LABEL_IDS.filter((l) => body.labels.includes(l));
+  const note = body.note === undefined ? String(row.admin_note || "")
+    : String(body.note).replace(/\s+/g, " ").trim().slice(0, 280);
+
+  await env.DB.prepare(`UPDATE scripts SET labels = ?, admin_note = ? WHERE id = ?`)
+    .bind(JSON.stringify(labels), note, id).run();
+
+  const before = parseLabels(row.labels);
+  const added = labels.filter((l) => !before.includes(l));
+  const removed = before.filter((l) => !labels.includes(l));
+  const parts = [
+    added.length ? `+${added.join(", +")}` : "",
+    removed.length ? `−${removed.join(", −")}` : "",
+    note !== String(row.admin_note || "") ? (note ? `note: “${note}”` : "note cleared") : "",
+  ].filter(Boolean);
+  if (parts.length) {
+    await adminLog(env, "Labels changed", row.title, parts.join(" · "));
+    const after = modLog(env, "Script labels changed", `**${row.title}** — ${parts.join(" · ")}`,
+      labels.some((l) => ["risky", "banrisk", "patched"].includes(l)) ? 0xef5350 : 0x42a5f5);
+    if (ctx?.waitUntil) ctx.waitUntil(after.catch(() => {})); else after.catch(() => {});
+  }
+  return ok({ data: { id, labels, note } });
+}
+
+/** GET /api/admin/log — the panel's Activity tab. */
+async function handleAdminLog(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  await ensureAdminSchema(env);
+  const { results } = await env.DB.prepare(
+    `SELECT id, at, action, target, detail FROM admin_log ORDER BY id DESC LIMIT 200`).all();
+  return ok({ data: (results || []).map((r) => ({
+    id: r.id, at: Number(r.at) || 0, action: r.action, target: r.target, detail: r.detail,
+  })) });
+}
+
 async function handleScriptVerify(request, env, { id }, ctx) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
@@ -1554,6 +1696,7 @@ async function handleScriptVerify(request, env, { id }, ctx) {
 
   await env.DB.prepare(`UPDATE scripts SET verified = ? WHERE id = ?`)
     .bind(verified ? 1 : 0, row.id).run();
+  await adminLog(env, verified ? "Verified" : "Unverified", row.title);
 
   const after = modLog(env,
     verified ? "Script verified" : "Verification removed",
@@ -2598,9 +2741,21 @@ async function handleAdminOverview(request, env) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
 
-  const one = async (sql) => Number((await env.DB.prepare(sql).first())?.n || 0);
+  await ensureAdminSchema(env);
+  const one = async (sql, ...b) => Number((await env.DB.prepare(sql).bind(...b).first().catch(() => null))?.n || 0);
+  const now = Math.floor(Date.now() / 1000);
   return ok({
     data: {
+      verifiedScripts: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 0 AND verified = 1`),
+      labeled: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 0 AND labels <> '[]' AND labels <> ''`),
+      risky: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 0 AND (labels LIKE '%"risky"%' OR labels LIKE '%"banrisk"%' OR labels LIKE '%"patched"%')`),
+      flagged: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 0 AND status <> 'approved'`),
+      unlocksToday: await one(`SELECT COUNT(*) AS n FROM unlock_events WHERE at > ?`, now - 86400),
+      unlocksWeek: await one(`SELECT COUNT(*) AS n FROM unlock_events WHERE at > ?`, now - 7 * 86400),
+      newScriptsWeek: await one(`SELECT COUNT(*) AS n FROM scripts WHERE created_at > ?`,
+        new Date((now - 7 * 86400) * 1000).toISOString()),
+      newUsersWeek: await one(`SELECT COUNT(*) AS n FROM users WHERE created_at > ?`,
+        new Date((now - 7 * 86400) * 1000).toISOString()),
       users: await one(`SELECT COUNT(*) AS n FROM users`),
       banned: await one(`SELECT COUNT(*) AS n FROM users WHERE banned = 1`),
       scripts: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 0`),
@@ -2654,13 +2809,14 @@ async function handleAdminUserBan(request, env, { id }, ctx) {
   // unban anyone, because the only way back in is the admin panel.
   if (admin.id && id === admin.id) return bad(400, "You can't suspend the account you're signed in as.");
 
-  const row = await env.DB.prepare(`SELECT id FROM users WHERE id = ?`).bind(id).first();
+  const row = await env.DB.prepare(`SELECT id, username FROM users WHERE id = ?`).bind(id).first();
   if (!row) return bad(404, "No such account.");
 
   const body = await request.json().catch(() => ({}));
   const banned = body.banned === false ? 0 : 1;
 
   await env.DB.prepare(`UPDATE users SET banned = ? WHERE id = ?`).bind(banned, id).run();
+  await adminLog(env, banned ? "Account suspended" : "Suspension lifted", `@${row.username}`);
   if (banned) await env.DB.prepare(`DELETE FROM sessions WHERE user_id = ?`).bind(id).run();
 
   // Suspending takes an author's scripts off the site, so it has to take them
@@ -2710,6 +2866,7 @@ async function handleAdminUserDelete(request, env, { id }, ctx) {
   // Their unlock history is kept. It records what happened, not who they were,
   // and deleting it would silently rewrite every earnings total on the site.
   await env.DB.prepare(`DELETE FROM users WHERE id = ?`).bind(id).run();
+  await adminLog(env, "Account deleted", `@${row.username}`);
 
   // Their scripts just went with them (ON DELETE CASCADE), but their Discord
   // posts did not — `script_posts` has no foreign key. Sweep them now rather
@@ -2724,36 +2881,73 @@ async function handleAdminUserDelete(request, env, { id }, ctx) {
 async function handleAdminScripts(request, env) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
+  await ensureAdminSchema(env);
 
   const url = new URL(request.url);
   const q = String(url.searchParams.get("q") || "").trim().toLowerCase().slice(0, 60);
   const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 100));
+  const filter = String(url.searchParams.get("f") || "all");
+  const sort = String(url.searchParams.get("sort") || "new");
 
-  const where = q ? `WHERE LOWER(s.title) LIKE ? OR LOWER(u.username) LIKE ?` : "";
-  const binds = q ? [`%${q}%`, `%${q}%`] : [];
+  const conds = [];
+  const binds = [];
+  if (q) {
+    conds.push(`(LOWER(s.title) LIKE ? OR LOWER(u.username) LIKE ? OR LOWER(s.game) LIKE ?)`);
+    binds.push(`%${q}%`, `%${q}%`, `%${q}%`);
+  }
+  const FILTERS = {
+    live: `s.removed = 0`,
+    verified: `s.verified = 1`,
+    unverified: `s.verified = 0 AND s.removed = 0`,
+    labeled: `s.labels <> '[]' AND s.labels <> ''`,
+    risky: `(s.labels LIKE '%"risky"%' OR s.labels LIKE '%"banrisk"%' OR s.labels LIKE '%"patched"%')`,
+    reported: `EXISTS (SELECT 1 FROM reports r WHERE r.script_id = s.id)`,
+    flagged: `s.status <> 'approved' AND s.removed = 0`,
+    removed: `s.removed = 1`,
+  };
+  if (FILTERS[filter]) conds.push(FILTERS[filter]);
+  // Labels can be filtered one at a time too: ?f=label:patched
+  if (filter.startsWith("label:") && ADMIN_LABEL_IDS.includes(filter.slice(6))) {
+    conds.push(`s.labels LIKE ?`);
+    binds.push(`%"${filter.slice(6)}"%`);
+  }
+  const ORDER = {
+    new: `s.created_at DESC`,
+    old: `s.created_at ASC`,
+    views: `s.views DESC, s.created_at DESC`,
+    copies: `s.copies DESC, s.created_at DESC`,
+    reports: `reports DESC, s.created_at DESC`,
+    title: `LOWER(s.title) ASC`,
+  };
+  const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
   // Unlike the public listing this includes removed scripts — seeing what was
   // taken down, and putting it back, is most of the point of the panel.
   const { results } = await env.DB.prepare(
-    `SELECT s.id, s.title, s.game, s.views, s.copies, s.removed, s.created_at,
-            s.verified, s.lua, s.status, s.check_note,
+    `SELECT s.id, s.title, s.game, s.category, s.views, s.copies, s.removed, s.created_at,
+            s.verified, s.lua, s.status, s.check_note, s.labels, s.admin_note, s.keyless,
             u.username AS author, u.id AS author_id,
             (SELECT COUNT(*) FROM reports r WHERE r.script_id = s.id) AS reports
        FROM scripts s JOIN users u ON u.id = s.author_id
        ${where}
-      ORDER BY s.created_at DESC
+      ORDER BY ${ORDER[sort] || ORDER.new}
       LIMIT ?`
   ).bind(...binds, limit).all();
 
   return ok({
     data: (results || []).map((r) => ({
       id: r.id,
+      slug: String(r.id).replace(/^s_/, ""),
       title: r.title,
       game: r.game,
+      category: r.category,
+      keyless: Boolean(r.keyless),
       author: r.author,
       authorId: r.author_id,
       verified: Boolean(r.verified),
       lua: Boolean(r.lua),
+      labels: parseLabels(r.labels),
+      staffNote: r.admin_note || "",
       state: r.status,
       // Why the checker was unsure. Without this the panel can say a script is
       // flagged but not what for, which is not enough to decide anything on.
@@ -2807,6 +3001,10 @@ async function handleAdminScriptState(request, env, { id }, ctx) {
 
   await env.DB.prepare(`UPDATE scripts SET removed = ?, status = ? WHERE id = ?`)
     .bind(removed, status, id).run();
+  if (Boolean(removed) !== Boolean(row.removed))
+    await adminLog(env, removed ? "Taken down" : "Restored", row.title, `by @${row.author}`);
+  else if (status !== row.status)
+    await adminLog(env, status === "approved" ? "Flag cleared" : `Status: ${status}`, row.title);
 
   const live = !removed && status === "approved";
   const shaped = { ...row, removed, status };
@@ -2853,6 +3051,7 @@ async function handleAdminScriptCounters(request, env, { id }) {
 
   await env.DB.prepare(`UPDATE scripts SET views = ?, copies = ? WHERE id = ?`)
     .bind(views, copies, id).run();
+  await adminLog(env, "Counters set", id, `views ${views}, copies ${copies}`);
   return ok({ data: { id, views, copies } });
 }
 
@@ -2887,7 +3086,11 @@ async function handleAdminReportDismiss(request, env, { id }) {
   const admin = await requireAdmin(request, env);
   if (admin instanceof Response) return admin;
 
+  const rep = await env.DB.prepare(
+    `SELECT r.reason, s.title FROM reports r LEFT JOIN scripts s ON s.id = r.script_id WHERE r.id = ?`)
+    .bind(id).first().catch(() => null);
   await env.DB.prepare(`DELETE FROM reports WHERE id = ?`).bind(id).run();
+  if (rep) await adminLog(env, "Report dismissed", rep.title || "", rep.reason || "");
   return ok({ data: { id, dismissed: true } });
 }
 
@@ -5438,6 +5641,7 @@ const PATTERNS = [
   ["GET", /^\/api\/creators\/([^/]{1,80})$/, handleCreator],
   ["GET", /^\/api\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorGet],
   ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/verify$/, handleScriptVerify],
+  ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/labels$/, handleAdminScriptLabels],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})\/state$/, handleAdminExecutorState],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
@@ -5476,6 +5680,7 @@ const ROUTES = {
   "GET  /api/admin/users": handleAdminUsers,
   "GET  /api/admin/scripts": handleAdminScripts,
   "GET  /api/admin/reports": handleAdminReports,
+  "GET  /api/admin/log": handleAdminLog,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,
