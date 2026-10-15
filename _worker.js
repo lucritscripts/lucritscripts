@@ -2015,65 +2015,272 @@ async function handleUnlockStart(request, env) {
   }
 
   const loot = lootSettings(env);
-  const thumb = lootThumbnail(env, script);
   try {
-    // Kept well under the edge's own patience. A 15s wait here meant the
-    // platform gave up first and returned its own HTML 502, which no amount of
-    // try/catch in this function could turn into a useful message.
-    const res = await fetch(LOOTLABS_API + "/content_locker", {
-      method: "POST",
-      headers: { Authorization: "Bearer " + env.LOOTLABS_TOKEN, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        // LootLabs caps the title at 30 characters and rejects longer ones.
-        title: String(script.title).slice(0, 30),
-        url: `${site}/?unlocked=${encodeURIComponent(script.id)}&click=${clickId}`,
-        tier_id: loot.tier,
-        number_of_tasks: loot.tasks,
-        theme: loot.theme,
-        // Showing the script's own artwork on the locker tells the visitor
-        // they are still in the right place mid-sponsor-step, which is worth
-        // real completions on a three-task flow.
-        ...(thumb ? { thumbnail: thumb } : {}),
-      }),
-      signal: AbortSignal.timeout(8000),
-    });
-
-    const raw = await res.text();
-    let data = {};
-    try { data = JSON.parse(raw); } catch { /* provider sent something else */ }
-
-    // LootLabs' docs show `message` as an object, but the live API returns it
-    // as a single-element ARRAY:
-    //   {"type":"created","message":[{"short":"...","loot_url":"..."}]}
-    // Reading data.message.loot_url gives undefined on an array, so this fell
-    // into the failure path every time while LootLabs had actually succeeded —
-    // it created a locker link on every click and we threw it away. Accept
-    // both shapes so a future doc-shaped response keeps working too.
-    const envelope = Array.isArray(data?.message) ? data.message[0] : data?.message;
-    const base = envelope?.loot_url || data?.loot_url || "";
-    if (!base) {
-      // Say what the provider actually replied. Debugging this blind cost an
-      // hour once; the token is never echoed, only their answer.
-      console.warn("lootlabs rejected", res.status, raw.slice(0, 300));
+    const made = await lootLocker(env, script, `${site}/?unlocked=${encodeURIComponent(script.id)}&click=${clickId}`);
+    if (made.error) {
       return bad(502, "The sponsor step is unavailable right now.", {
-        providerStatus: res.status,
-        providerSaid: raw.slice(0, 200),
+        providerStatus: made.error.status,
+        providerSaid: made.error.said,
       });
     }
-
-    // THE PART THAT MAKES VERIFICATION POSSIBLE.
-    //
-    // LootLabs' postback tells us `click_id`, and that value comes from a
-    // `puid` parameter attached to the link the visitor followed. Without
-    // this, the postback arrives with no way to say WHICH unlock completed,
-    // so every claim would fail its check and nobody could get a script —
-    // the paywall would fail closed rather than open.
-    const url = base + (base.includes("?") ? "&" : "?") + "puid=" + encodeURIComponent(clickId);
-
-    return ok({ data: { clickId, url, configured: true } });
+    return ok({ data: { clickId, url: withPuid(made.base, clickId), configured: true } });
   } catch {
     return bad(502, "Couldn't reach the sponsor step. Try again.");
   }
+}
+
+/**
+ * THE PART THAT MAKES VERIFICATION POSSIBLE.
+ *
+ * LootLabs' postback tells us `click_id`, and that value comes from a `puid`
+ * parameter attached to the link the visitor followed — ANY LootLabs link,
+ * whether made through the API or by hand in their dashboard. Without it the
+ * postback arrives with no way to say WHICH unlock completed.
+ */
+function withPuid(base, clickId) {
+  return base + (base.includes("?") ? "&" : "?") + "puid=" + encodeURIComponent(clickId);
+}
+
+/**
+ * One LootLabs content locker through their API, returning to `returnUrl`.
+ * Resolves to `{ base }` (the loot link, before `puid`) or `{ error }`.
+ */
+async function lootLocker(env, script, returnUrl, label = "") {
+  const loot = lootSettings(env);
+  const thumb = lootThumbnail(env, script);
+  // Kept well under the edge's own patience. A 15s wait here meant the
+  // platform gave up first and returned its own HTML 502, which no amount of
+  // try/catch could turn into a useful message.
+  const res = await fetch(LOOTLABS_API + "/content_locker", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + env.LOOTLABS_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      // LootLabs caps the title at 30 characters and rejects longer ones.
+      // With a step label the title reads "Step 1/2 · <script>", cut to fit.
+      title: (label ? `${label} · ${script.title}` : String(script.title)).slice(0, 30),
+      url: returnUrl,
+      tier_id: loot.tier,
+      number_of_tasks: loot.tasks,
+      theme: loot.theme,
+      // The script's own artwork on the locker tells the visitor they are
+      // still in the right place mid-sponsor-step.
+      ...(thumb ? { thumbnail: thumb } : {}),
+    }),
+    signal: AbortSignal.timeout(8000),
+  });
+
+  const raw = await res.text();
+  let data = {};
+  try { data = JSON.parse(raw); } catch { /* provider sent something else */ }
+
+  // LootLabs' docs show `message` as an object, but the live API returns it
+  // as a single-element ARRAY:
+  //   {"type":"created","message":[{"short":"...","loot_url":"..."}]}
+  // Accept both shapes so a future doc-shaped response keeps working too.
+  const envelope = Array.isArray(data?.message) ? data.message[0] : data?.message;
+  const base = envelope?.loot_url || data?.loot_url || "";
+  if (!base) {
+    // Say what the provider actually replied; the token is never echoed.
+    console.warn("lootlabs rejected", res.status, raw.slice(0, 300));
+    return { error: { status: res.status, said: raw.slice(0, 200) } };
+  }
+  return { base };
+}
+
+/* ============================================================
+   Two-step unlock (LootLabs), /unlock/lootlabs
+   ============================================================
+
+   The Script Maniac Hub way, with real anti-bypass:
+
+     script page → "Unlock with LootLabs" → /unlock/lootlabs  (Step 1 of 2)
+       → LootLabs → back to /unlock/lootlabs                   (Step 2 of 2)
+       → LootLabs → back to /unlock/lootlabs → the script, open.
+
+   Each step is a fresh click id carried to LootLabs as `puid`; LootLabs'
+   postback marks it done when the visitor really finishes. A step only
+   advances when ITS click came back done, so landing on /unlock/lootlabs by
+   typing the address (or replaying the page) gets nothing — the SMH
+   referrer check could be faked; a postback can't.
+
+   Links: if LOOTLABS_LINKS is set (comma-separated loot links made by hand in
+   the LootLabs dashboard, destination https://lucritscripts.site/unlock/lootlabs),
+   step N uses link N — no API call. Otherwise each step gets a locker from the
+   API that returns to the same page. The flow itself lives in the `cache`
+   table under `flow:<id>`, so there is no schema change.
+*/
+
+const FLOW_STEPS = 2;
+const FLOW_TTL_SEC = 2 * 3600;
+
+function flowLinks(env) {
+  return String(env.LOOTLABS_LINKS || "").split(/[\s,]+/).map((x) => x.trim())
+    .filter((x) => /^https:\/\/[^\s]+$/i.test(x));
+}
+
+async function flowLoad(env, id) {
+  if (!/^[a-f0-9]{32}$/.test(String(id || ""))) return null;
+  return cacheGet(env, "flow:" + id);
+}
+const flowSave = (env, id, flow) => cachePut(env, "flow:" + id, flow, FLOW_TTL_SEC);
+
+function flowView(id, flow, script) {
+  return {
+    flowId: id, step: flow.step, total: flow.total, provider: flow.p,
+    // Whether a step is out with LootLabs right now (so the page knows to
+    // check on arrival rather than offer the button again).
+    out: Boolean(flow.click),
+    script: script ? {
+      id: script.id, title: script.title, author: script.author || "",
+      slug: String(script.id).replace(/^s_/, ""), thumbnail: thumbPublic(script),
+    } : null,
+  };
+}
+
+async function flowScript(env, id) {
+  // The thumbnail as a short marker rather than the whole data: URL — the
+  // page only needs its /api/thumbs address, never the bytes.
+  return env.DB.prepare(
+    `SELECT s.id, s.title, s.author_id, u.username AS author,
+            CASE WHEN s.thumbnail LIKE 'data:%'
+                 THEN 'thumb:' || length(s.thumbnail) || ':' || substr(s.thumbnail, -40)
+                 ELSE s.thumbnail END AS thumbnail
+       FROM scripts s JOIN users u ON u.id = s.author_id
+      WHERE s.id = ? AND s.removed = 0 AND u.banned = 0`).bind(id).first();
+}
+
+/** POST /api/unlock/flow { scriptId, provider } — begin at step 1. */
+async function handleFlowStart(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `flow:${ip}`, 30, 600)))
+    return bad(429, "Too many unlocks from this connection. Try again shortly.");
+  if (!env.LOOTLABS_TOKEN && !flowLinks(env).length)
+    return bad(503, "LootLabs isn't switched on yet.");
+
+  const { scriptId } = await request.json().catch(() => ({}));
+  const script = await flowScript(env, String(scriptId || ""));
+  if (!script) return bad(404, "That script doesn't exist.");
+
+  const user = await currentUser(request, env);
+  const blocked = await discordBlock(env, user);
+  if (blocked) return bad(403, blocked.error, { discord: blocked.discord });
+
+  const id = randomHex(16);
+  const flow = { s: script.id, p: "lootlabs", step: 1, total: FLOW_STEPS, click: "", at: nowSec() };
+  await flowSave(env, id, flow);
+  return ok({ data: flowView(id, flow, script) });
+}
+
+/** GET /api/unlock/flow?id= — where a flow is up to. */
+async function handleFlowGet(request, env) {
+  const id = new URL(request.url).searchParams.get("id");
+  const flow = await flowLoad(env, id);
+  if (!flow) return bad(404, "That unlock has expired. Start again from the script.");
+  return ok({ data: flowView(id, flow, await flowScript(env, flow.s)) });
+}
+
+/** POST /api/unlock/flow/go { flowId } — the link for the current step. */
+async function handleFlowGo(request, env) {
+  const { flowId } = await request.json().catch(() => ({}));
+  const flow = await flowLoad(env, flowId);
+  if (!flow) return bad(404, "That unlock has expired. Start again from the script.");
+  const script = await flowScript(env, flow.s);
+  if (!script) return bad(404, "That script doesn't exist.");
+
+  // A new click per attempt: a step abandoned half-way and retried must not
+  // be satisfied by anything but its own completion.
+  const clickId = randomHex(16);
+  const now = nowSec();
+  await env.DB.prepare(
+    `INSERT INTO unlock_clicks (click_id, script_id, subject, provider, done, at, expires)
+     VALUES (?, ?, ?, 'lootlabs', 0, ?, ?)`
+  ).bind(clickId, script.id, "flow:" + flowId, now, now + CLICK_TTL_SEC).run();
+  if (flow.click) await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ? AND done = 0`).bind(flow.click).run();
+  flow.click = clickId;
+  await flowSave(env, flowId, flow);
+
+  const site = env.SITE_URL || new URL(request.url).origin;
+  const links = flowLinks(env);
+  try {
+    let base = links.length ? links[Math.min(flow.step, links.length) - 1] : "";
+    if (!base) {
+      // Its own LootLabs locker for each step — Step 1/2, then Step 2/2.
+      const made = await lootLocker(env, script, `${site}/unlock/lootlabs`, `Step ${flow.step}/${flow.total}`);
+      if (made.error) return bad(502, "The sponsor step is unavailable right now.",
+        { providerStatus: made.error.status, providerSaid: made.error.said });
+      base = made.base;
+    }
+    return ok({ data: { url: withPuid(base, clickId), step: flow.step, total: flow.total } });
+  } catch {
+    return bad(502, "Couldn't reach LootLabs. Try again.");
+  }
+}
+
+/**
+ * POST /api/unlock/flow/check { flowId } — back from LootLabs.
+ *
+ * Advances one step only if this step's click came back done. The postback
+ * can trail the visitor by a few seconds, so wait a little, then answer
+ * `pending` and let the page keep asking (same as the one-step claim).
+ */
+async function handleFlowCheck(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `flowcheck:${ip}`, 60, 600)))
+    return bad(429, "Too many attempts. Try again shortly.");
+
+  const { flowId } = await request.json().catch(() => ({}));
+  const flow = await flowLoad(env, flowId);
+  if (!flow) return bad(404, "That unlock has expired. Start again from the script.");
+  if (!flow.click) return bad(400, `Press the button to start step ${flow.step}.`, { step: flow.step });
+
+  const read = () => env.DB.prepare(`SELECT done FROM unlock_clicks WHERE click_id = ? AND expires > ?`)
+    .bind(flow.click, nowSec()).first();
+  let click = await read();
+  for (let i = 0; click && !click.done && i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 1000));
+    click = await read();
+  }
+  if (!click) {
+    flow.click = "";
+    await flowSave(env, flowId, flow);
+    return bad(400, `Step ${flow.step} expired. Press the button to do it again.`, { step: flow.step });
+  }
+  if (!click.done) return bad(409, "Waiting for LootLabs to confirm this step…", { pending: true, step: flow.step });
+
+  // This step is real. Spend its click so it can't count twice.
+  await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(flow.click).run();
+  flow.click = "";
+  flow.step += 1;
+
+  if (flow.step <= flow.total) {
+    await flowSave(env, flowId, flow);
+    const script = await flowScript(env, flow.s);
+    return ok({ data: { ...flowView(flowId, flow, script), advanced: true } });
+  }
+
+  // All steps done: the same grant and event the one-step claim writes.
+  const script = await env.DB.prepare(`SELECT id, author_id, title FROM scripts WHERE id = ? AND removed = 0`)
+    .bind(flow.s).first();
+  if (!script) return bad(404, "That script doesn't exist.");
+  const user = await currentUser(request, env);
+  const subject = await grantSubject(request, env, user);
+  const now = nowSec();
+  await env.DB.prepare(
+    `INSERT INTO grants (subject, script_id, provider, verified, at, expires)
+     VALUES (?, ?, 'lootlabs', 1, ?, ?)
+     ON CONFLICT(subject, script_id) DO UPDATE SET
+       verified = MAX(grants.verified, excluded.verified),
+       at = excluded.at,
+       expires = excluded.expires`
+  ).bind(subject, script.id, now, now + grantMinutes(env) * 60).run();
+  await env.DB.prepare(
+    `INSERT INTO unlock_events (id, script_id, author_id, subject, provider, verified, at)
+     VALUES (?, ?, ?, ?, 'lootlabs', 1, ?)`
+  ).bind("e_" + randomHex(8), script.id, script.author_id, subject, now).run();
+  await env.DB.prepare(`DELETE FROM cache WHERE k = ?`).bind("flow:" + flowId).run().catch(() => {});
+
+  const full = await flowScript(env, script.id);
+  return ok({ data: { done: true, unlockedFor: grantMinutes(env) * 60, ...flowView(flowId, { ...flow, step: flow.total }, full) } });
 }
 
 /** Called by the provider's servers, never by a browser. */
@@ -5259,6 +5466,10 @@ const ROUTES = {
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,
   "POST /api/unlock/claim": handleUnlockClaim,
+  "POST /api/unlock/flow": handleFlowStart,
+  "GET  /api/unlock/flow": handleFlowGet,
+  "POST /api/unlock/flow/go": handleFlowGo,
+  "POST /api/unlock/flow/check": handleFlowCheck,
   "POST /api/auth/salt": handleSalt,
   "POST /api/auth/signup": handleSignUp,
   "POST /api/auth/signin": handleSignIn,
@@ -5312,6 +5523,7 @@ const APP_ROUTES = [
   /^\/creations\/[^/]+\/[^/]+\/?$/,
   /^\/dashboard(\/[^/]+)?\/?$/,
   /^\/executors(\/[^/]+)?\/?$/,
+  /^\/unlock\/[a-z]+\/?$/,
 ];
 
 /** Headers GitHub Pages could never send us. */
