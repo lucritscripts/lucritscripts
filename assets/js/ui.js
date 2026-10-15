@@ -512,6 +512,10 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
             Publish a Script
           </button>
+          <a class="btn btn--key" href="/getkey" data-getkey>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M16 7l3 3M14 9l2 2"/></svg>
+            Get Key
+          </a>
           <button class="btn btn--ai" data-generate>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/></svg>
             Create a Script with AI
