@@ -321,7 +321,8 @@ const router = createRouter({
     if (provider !== "lootlabs") { router.go("/", { replace: true }); return; }
     closeRoutedPages("unlock");
     const scriptId = new URLSearchParams(location.search).get("s") || "";
-    if (scriptId) history.replaceState(null, "", "/unlock/lootlabs");
+    // ?s= from the script page, ?step= from the LootLabs links: read, then tidy.
+    if (location.search) history.replaceState(null, "", "/unlock/lootlabs");
     setTitle("Unlock");
     unlockPage.open({ scriptId });
   },
