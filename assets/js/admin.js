@@ -15,6 +15,7 @@
 
 import { esc, fmt, toast, createOverlay } from "./pages.js";
 import { statusBadges, labelBadge, ADMIN_LABELS } from "./data/scripts.js";
+import { listKeys, deleteKey, unlockKey, deleteMany, isExpired } from "./keysadmin.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -83,6 +84,12 @@ export function createAdminPage({ onChanged } = {}) {
   let editing = null;        // script id whose label editor is open
   const selected = new Set();
   let scriptRows = [];       // last list drawn, for bulk actions
+
+  // Keys tab state (keys live in Firebase, not D1 — see keysadmin.js).
+  let keyView = "active";    // active | expired
+  let keyQuery = "";
+  let keyRows = [];
+  let keyTimer = 0;
 
   const FILTERS = [
     ["all", "All"], ["live", "Live"], ["verified", "Verified"], ["unverified", "Not verified"],
@@ -163,6 +170,7 @@ export function createAdminPage({ onChanged } = {}) {
       tab === "users" ? await get(`/api/admin/users?limit=100${q}`)
       : tab === "scripts" ? await get(`/api/admin/scripts?limit=200${q}&f=${encodeURIComponent(filter)}&sort=${encodeURIComponent(sort)}`)
       : tab === "activity" ? await get("/api/admin/log")
+      : tab === "keys" ? await listKeys().then((data) => ({ ok: true, data }), (e) => ({ ok: false, error: e.message }))
       : tab === "executors" ? await get("/api/admin/executors")
       : tab === "queue" ? await get("/api/admin/discord/queue")
       : await get("/api/admin/reports");
@@ -195,12 +203,12 @@ export function createAdminPage({ onChanged } = {}) {
 
       <nav class="tabs" role="tablist">
         ${[["users", "Accounts"], ["scripts", "Scripts"], ["executors", "Executors"],
-           ["queue", "Discord queue"], ["reports", "Reports"], ["activity", "Activity"]]
+           ["queue", "Discord queue"], ["reports", "Reports"], ["keys", "Keys"], ["activity", "Activity"]]
           .map(([id, label]) => `<button class="tab${tab === id ? " is-on" : ""}"
             data-admintab="${id}" role="tab">${label}</button>`).join("")}
       </nav>
 
-      ${tab === "reports" || tab === "executors" || tab === "queue" || tab === "activity" ? "" : `
+      ${tab === "reports" || tab === "executors" || tab === "queue" || tab === "activity" || tab === "keys" ? "" : `
         <div class="library__search" style="margin:14px 0">
           <input class="library__input" type="search" data-adminq
                  placeholder="${tab === "users" ? "Search name or email" : "Search title, author or game"}"
@@ -215,10 +223,19 @@ export function createAdminPage({ onChanged } = {}) {
         : tab === "executors" ? executorsPanel(rows.data)
         : tab === "queue" ? queuePanel(rows.data, rows.configured)
         : tab === "activity" ? activityPanel(rows.data)
+        : tab === "keys" ? keysPanel(rows.data)
         : !rows.data.length ? `<p class="muted">Nothing here${tab === "scripts" && filter !== "all" ? " for this filter" : ""}.</p>`
         : tab === "users" ? usersTable(rows.data)
         : tab === "scripts" ? scriptsTable(rows.data)
         : reportsTable(rows.data)}`;
+
+    // The Keys tab refreshes itself every 10 s (like the old key cleaner) —
+    // just the table, so typing in its search box isn't interrupted.
+    clearInterval(keyTimer);
+    if (tab === "keys" && rows.ok) keyTimer = setInterval(() => {
+      if (!sheet.isOpen || tab !== "keys") return clearInterval(keyTimer);
+      refreshKeys();
+    }, 10000);
 
     // Typing into the search box must not steal focus back on every repaint.
     const box = $("[data-adminq]", sheet.body);
@@ -392,6 +409,107 @@ export function createAdminPage({ onChanged } = {}) {
       <p class="muted">A script stays on the site until it is taken down here, or its
          author is suspended. Nothing else hides one.</p>`;
   }
+
+  /* ------------------------------------------------------------- keys */
+
+  const LEFT = (ms) => {
+    if (ms <= 0) return "expired";
+    const m = Math.floor(ms / 60000);
+    return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m left` : `${m}m left`;
+  };
+  const PINGED = (ms) => typeof ms === "number" && ms > 0 ? AGO(Math.floor(ms / 1000)) : "—";
+
+  function keyRowsHtml() {
+    const now = Date.now();
+    const q = keyQuery.trim().toUpperCase();
+    const list = keyRows
+      .filter((k) => (keyView === "expired") === isExpired(k, now))
+      .filter((k) => !q || k.id.toUpperCase().includes(q) || String(k.userId).includes(q) || String(k.boundTo).includes(q))
+      .sort((a, b) => keyView === "expired"
+        ? (b.expiresAt || 0) - (a.expiresAt || 0)
+        : (Number(b.inUse) - Number(a.inUse)) || ((b.lastPing || 0) - (a.lastPing || 0)) || ((b.expiresAt || 0) - (a.expiresAt || 0)));
+    if (!list.length) {
+      return `<tr><td colspan="${keyView === "expired" ? 4 : 7}" class="muted" style="text-align:center;padding:18px">
+        ${q ? "No keys match that search." : keyView === "expired" ? "✓ No expired keys." : "No active keys right now."}</td></tr>`;
+    }
+    return list.map((k) => keyView === "expired" ? `
+      <tr data-key="${esc(k.id)}">
+        <td><code class="adm__key">${esc(k.id)}</code></td>
+        <td class="muted">${typeof k.expiresAt === "number" ? esc(new Date(k.expiresAt).toLocaleString()) : "no expiry set"}</td>
+        <td class="muted">${k.valid === false ? "revoked" : "expired"}</td>
+        <td class="adm__acts"><button class="btn btn--ghost btn--xs btn--danger" data-keyact="delete">Delete</button></td>
+      </tr>` : `
+      <tr data-key="${esc(k.id)}">
+        <td><code class="adm__key">${esc(k.id)}</code>
+          <button class="adm__copy" data-keyact="copy" title="Copy key" aria-label="Copy key">⧉</button></td>
+        <td title="${esc(new Date(k.expiresAt).toLocaleString())}">${esc(LEFT(k.expiresAt - now))}</td>
+        <td>${k.inUse ? `<span class="chip chip--ok">in use</span>` : `<span class="muted">free</span>`}</td>
+        <td class="muted">${esc(k.sessionId || "—")}</td>
+        <td class="muted">${esc(k.userId || "—")}${k.boundTo && k.boundTo !== k.userId ? `<br><span title="boundTo">bound: ${esc(k.boundTo)}</span>` : ""}</td>
+        <td class="muted">${esc(PINGED(k.lastPing))}</td>
+        <td class="adm__acts">
+          <button class="btn btn--ghost btn--xs" data-keyact="unlock" ${k.inUse || k.sessionId || k.userId ? "" : "disabled"}>🔓 Unlock</button>
+          <button class="btn btn--ghost btn--xs btn--danger" data-keyact="delete">Delete</button>
+        </td>
+      </tr>`).join("");
+  }
+
+  function keyCounts() {
+    const now = Date.now();
+    const expired = keyRows.filter((k) => isExpired(k, now)).length;
+    const active = keyRows.length - expired;
+    const inUse = keyRows.filter((k) => !isExpired(k, now) && k.inUse).length;
+    return { active, expired, inUse };
+  }
+
+  function keysPanel(rows) {
+    keyRows = rows;
+    const c = keyCounts();
+    return `
+      <div class="stats" data-keystats style="margin-bottom:14px">
+        ${tile("Active keys", c.active)}
+        ${tile("In use now", c.inUse)}
+        ${tile("Expired", c.expired)}
+      </div>
+      <div class="adm__bar">
+        <div class="adm__pills" role="group" aria-label="Which keys">
+          <button class="adm__pill${keyView === "active" ? " is-on" : ""}" data-keyview="active">Active keys</button>
+          <button class="adm__pill${keyView === "expired" ? " is-on" : ""}" data-keyview="expired">Expired keys</button>
+          <button class="btn btn--ghost btn--xs" data-keyact="refresh">↻ Refresh</button>
+        </div>
+        ${keyView === "expired"
+          ? `<button class="btn btn--xs btn--danger" data-keyact="deleteexpired" ${c.expired ? "" : "disabled"}>🧹 Delete all expired (${fmt(c.expired)})</button>`
+          : ""}
+      </div>
+      <div class="library__search" style="margin:0 0 12px">
+        <input class="library__input" type="search" data-keyq placeholder="Search a key or Roblox user id" value="${esc(keyQuery)}">
+      </div>
+      <table class="rows">
+        <thead><tr>${keyView === "expired"
+          ? `<th>Key</th><th>Expired</th><th>Status</th><th></th>`
+          : `<th>Key</th><th>Expires</th><th>In use</th><th>Session</th><th>User</th><th>Last ping</th><th></th>`}</tr></thead>
+        <tbody data-keysbody>${keyRowsHtml()}</tbody>
+      </table>
+      <p class="muted">Keys from <a href="/getkey" target="_blank" rel="noopener">/getkey</a>, read live from Firebase
+        (smh-keysystem) and refreshed every 10 seconds. <b>Unlock</b> frees a key that's stuck "in use" so it can be
+        used again; <b>Delete</b> kills it — the loader will reject it straight away.</p>`;
+  }
+
+  async function refreshKeys() {
+    try { keyRows = await listKeys(); } catch { return; }
+    const body = $("[data-keysbody]", sheet.body);
+    const stats = $("[data-keystats]", sheet.body);
+    if (!body) return;
+    body.innerHTML = keyRowsHtml();
+    const c = keyCounts();
+    if (stats) stats.innerHTML = tile("Active keys", c.active) + tile("In use now", c.inUse) + tile("Expired", c.expired);
+    const del = $('[data-keyact="deleteexpired"]', sheet.body);
+    if (del) { del.textContent = `🧹 Delete all expired (${fmt(c.expired)})`; del.disabled = !c.expired; }
+  }
+
+  // Record key actions in the Activity tab (best effort — Firebase did the work).
+  const logKey = (action, target, detail = "") =>
+    send("/api/admin/log", "POST", { action, target, detail }).catch(() => {});
 
   function activityPanel(rows) {
     if (!rows.length) return `<div class="empty"><p><b>No activity yet.</b> Verifies, labels, takedowns,
@@ -616,6 +734,12 @@ export function createAdminPage({ onChanged } = {}) {
   }
 
   sheet.body.addEventListener("input", (e) => {
+    if (e.target.closest("[data-keyq]")) {
+      keyQuery = e.target.value;
+      const body = $("[data-keysbody]", sheet.body);
+      if (body) body.innerHTML = keyRowsHtml();
+      return;
+    }
     if (!e.target.closest("[data-adminq]")) return;
     query = e.target.value;
     clearTimeout(searchTimer);
@@ -710,6 +834,52 @@ export function createAdminPage({ onChanged } = {}) {
       await send("/api/admin/lock");
       toast("Locked");
       paint();
+      return;
+    }
+
+    const kv = e.target.closest("[data-keyview]");
+    if (kv) { keyView = kv.dataset.keyview; panel(); return; }
+
+    const kb = e.target.closest("[data-keyact]");
+    if (kb) {
+      const kact = kb.dataset.keyact;
+      const keyId = kb.closest("[data-key]")?.dataset.key;
+      if (kact === "refresh") { kb.disabled = true; await refreshKeys(); kb.disabled = false; return; }
+      if (kact === "copy") {
+        try { await navigator.clipboard.writeText(keyId); toast("Copied " + keyId); }
+        catch { prompt("Key:", keyId); }
+        return;
+      }
+      if (kact === "delete") {
+        const active = !isExpired(keyRows.find((k) => k.id === keyId) || {});
+        if (active && !confirm(`Delete ${keyId}?\n\nIt's still active — whoever is using it will be kicked out by the loader.`)) return;
+        kb.disabled = true; kb.textContent = "Deleting…";
+        try {
+          await deleteKey(keyId);
+          logKey(active ? "Key deleted (active)" : "Key deleted", keyId);
+          toast("Deleted " + keyId);
+        } catch (err) { toast(err.message || "Couldn't delete that key", "warn"); }
+        return refreshKeys();
+      }
+      if (kact === "unlock") {
+        kb.disabled = true; kb.textContent = "Unlocking…";
+        try {
+          await unlockKey(keyId);
+          logKey("Key unlocked", keyId, "cleared inUse, sessionId, userId, lastPing");
+          toast("Unlocked " + keyId);
+        } catch (err) { toast(err.message || "Couldn't unlock that key", "warn"); }
+        return refreshKeys();
+      }
+      if (kact === "deleteexpired") {
+        const ids = keyRows.filter((k) => isExpired(k)).map((k) => k.id);
+        if (!ids.length) return;
+        if (!confirm(`Delete all ${ids.length} expired key${ids.length === 1 ? "" : "s"}?`)) return;
+        kb.disabled = true;
+        const res = await deleteMany(ids, (d, n) => { kb.textContent = `Deleting… ${d}/${n}`; });
+        logKey("Expired keys cleaned", `${res.done} key${res.done === 1 ? "" : "s"}`, res.failed ? `${res.failed} failed` : "");
+        toast(res.failed ? `Deleted ${res.done}, ${res.failed} failed` : `Deleted ${res.done} expired key${res.done === 1 ? "" : "s"}`, res.failed ? "warn" : "ok");
+        return refreshKeys();
+      }
       return;
     }
 

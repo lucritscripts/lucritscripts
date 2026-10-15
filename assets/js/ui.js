@@ -15,6 +15,14 @@ import { libraryOnline, fetchScripts, fetchBoard } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 import { pathForCreator } from "./router.js";
 
+
+/** A /getkey key still saved in this browser (same localStorage keys getkey.html uses). */
+function haveKey() {
+  try {
+    return Boolean(localStorage.getItem("smh_key")) && Number(localStorage.getItem("smh_keyTime")) > Date.now();
+  } catch { return false; }
+}
+
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 
@@ -514,7 +522,7 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
           </button>
           <a class="btn btn--key" href="/getkey" data-getkey>
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="M10.8 12.2 20 3M16 7l3 3M14 9l2 2"/></svg>
-            Get Key
+            ${haveKey() ? "Your Key" : "Get Key"}
           </a>
           <button class="btn btn--ai" data-generate>
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3Z"/></svg>
