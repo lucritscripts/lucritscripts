@@ -2778,3 +2778,52 @@ html.reduced-motion .chapter__stage { transition: none; }
   .hero__cta .btn--discord { order: 5; }
   .hero__cta [data-auth="account"] { display: none; }
 }
+
+/* =====================================================================
+   Two-step unlock page (/unlock/lootlabs)
+   ===================================================================== */
+#unlock .sheet__panel { width: min(560px, 100%); padding: clamp(22px, 4vw, 36px); }
+.ufl { display: grid; gap: 22px; text-align: center; }
+.ufl__head { display: flex; gap: 14px; align-items: center; text-align: left; padding-right: 48px; }
+.ufl__thumb {
+  width: 92px; aspect-ratio: 16 / 9; object-fit: cover; flex: none;
+  border-radius: 10px; border: 1px solid var(--line-2); background: #070a12;
+}
+.ufl__eyebrow { font-family: var(--mono); font-size: 0.66rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--ink-3); }
+.ufl__title { font-size: 1.3rem; font-weight: 680; letter-spacing: -0.02em; color: var(--ink); overflow-wrap: anywhere; }
+.ufl__by { font-size: 0.82rem; color: var(--ink-3); margin-top: 2px; }
+
+.ufl__steps { list-style: none; display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0; padding: 0; }
+.ufl__steps li:not(.ufl__bar) { display: grid; justify-items: center; gap: 6px; }
+.ufl__steps li span {
+  width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+  font-weight: 700; color: var(--ink-3);
+  border: 2px solid var(--line-2); background: rgba(8, 12, 22, 0.9);
+  transition: all 0.3s var(--ease);
+}
+.ufl__steps li b { font-size: 0.74rem; font-weight: 560; color: var(--ink-3); letter-spacing: 0.04em; }
+.ufl__steps li.is-now span { color: #fff; border-color: var(--cyan); box-shadow: 0 0 0 4px color-mix(in srgb, var(--cyan) 18%, transparent), 0 0 22px -4px var(--cyan); }
+.ufl__steps li.is-now b { color: var(--ink); }
+.ufl__steps li.is-done span { color: #04140b; background: var(--good); border-color: var(--good); }
+.ufl__steps li.is-done b { color: var(--good); }
+.ufl__bar { width: clamp(40px, 12vw, 90px); height: 2px; border-radius: 2px; background: var(--line-2); margin-bottom: 24px; }
+
+.ufl__main { display: grid; gap: 14px; justify-items: center; padding: 22px 18px; border: 1px solid var(--line-2); border-radius: var(--r-lg); background: rgba(8, 12, 22, 0.9); }
+.ufl__kicker { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--cyan); }
+.ufl__msg { color: var(--ink-2); line-height: 1.55; max-width: 42ch; }
+.ufl__msg--ok { color: var(--good); font-weight: 600; }
+.ufl__msg--warn { color: var(--gold); }
+.ufl__go { min-width: min(100%, 260px); min-height: 50px; font-size: 1rem; justify-content: center; }
+.ufl__note { font-size: 0.78rem; color: var(--ink-3); max-width: 44ch; line-height: 1.5; }
+.ufl__acts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+.ufl__spin {
+  width: 34px; height: 34px; border-radius: 50%;
+  border: 3px solid var(--line-2); border-top-color: var(--cyan);
+  animation: ufl-spin 0.9s linear infinite;
+}
+@keyframes ufl-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .ufl__spin { animation-duration: 2.4s; } }
+@media (max-width: 520px) {
+  .ufl__go { width: 100%; }
+  .ufl__thumb { width: 76px; }
+}
