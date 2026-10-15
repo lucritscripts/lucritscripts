@@ -10,8 +10,9 @@
     Get Key — the Script Maniac Hub key system, on lucritscripts.site.
 
     Same Firebase project (smh-keysystem), same Firestore "keys" collection,
-    same document shape { valid, expiresAt, inUse, boundTo, lastPing }, same
-    "SMH-" key format and 8-hour expiry — so the Roblox loader that already
+    same document shape { valid, expiresAt, inUse, boundTo, lastPing } and
+    8-hour expiry. Keys start with "LUCRIT-" (was "SMH-", changed 15 Oct 2026);
+    lastPing is written every 30 seconds while the page is open — so the Roblox loader that already
     checks those keys keeps working unchanged.
 
     The three old pages are one page here, switched by ?step=:
@@ -529,7 +530,7 @@
       finishBtn.textContent = "Creating Key...";
 
       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-      let key = "SMH-";
+      let key = "LUCRIT-";
       const rnd = new Uint32Array(16);
       crypto.getRandomValues(rnd);
       for (let i = 0; i < 16; i++) {
@@ -610,7 +611,8 @@
       setInterval(updateTimerUI, 1000);
       setInterval(periodicKeyValidation, 60000);
 
-      // ✅ Periodic Firestore ping to update lastPing
+      // ✅ Periodic Firestore ping to update lastPing — every 30 seconds
+      // (was every second; 30s keeps Firestore writes well inside the free tier).
       setInterval(async () => {
         const key = localStorage.getItem(keyStorage);
         if (!key) return;
@@ -623,7 +625,7 @@
         } catch (e) {
           console.error("Failed to update lastPing:", e);
         }
-      }, 1000);
+      }, 30000);
     }
 
     main();
