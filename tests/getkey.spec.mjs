@@ -65,10 +65,15 @@ const msg = (p) => p.locator("#messageText").textContent();
 console.log("\nCheckpoint one");
 let { ctx, page } = await newPage();
 await page.goto(`${AT}/getkey`);
-await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "CheckPoint One");
-check("starts at CheckPoint One", (await msg(page)) === "CheckPoint One");
+await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "Checkpoint One");
+check("starts at Checkpoint One", (await msg(page)) === "Checkpoint One");
 check("Firebase initialised with the smh-keysystem config",
   await page.evaluate(() => window.__fbConfig?.projectId === "smh-keysystem" && !!window.__fbConfig?.appId));
+const snap = () => page.evaluate(() => document.getElementById("bg").toDataURL());
+const f1 = await snap(); await page.waitForTimeout(600); const f2 = await snap();
+check("background is animating", f1 !== f2);
+check("Lucrit look: logo + Inter font", await page.locator(".brand img").count() === 1
+  && /Inter/.test(await page.evaluate(() => getComputedStyle(document.body).fontFamily)));
 await page.locator("#finishBtn").click();
 await page.waitForURL(/loot-link\.com/);
 check("Get Key → LootLabs key step 1", page.url() === "https://loot-link.com/s?9YxZvLfL", page.url());
@@ -116,9 +121,24 @@ await page.locator("#keyActiveSection").waitFor({ state: "visible" });
 check("shows the existing key instead of starting again", (await page.locator("#keyBox").textContent()).trim() === key);
 await page.evaluate((k) => { const s = JSON.parse(localStorage.getItem("__fs_test")); s["keys/" + k].expiresAt = Date.now() - 1; localStorage.setItem("__fs_test", JSON.stringify(s)); }, key);
 await page.reload();
-await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "CheckPoint One");
-check("an expired key sends you back to checkpoint one", (await msg(page)) === "CheckPoint One");
+await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "Checkpoint One");
+check("an expired key sends you back to checkpoint one", (await msg(page)) === "Checkpoint One");
 await ctx.close();
+
+console.log("\nReduced motion");
+{
+  const rm = await browser.newContext({ reducedMotion: "reduce" });
+  await rm.route("https://www.gstatic.com/firebasejs/**/firebase-app.js", (r) => r.fulfill({ contentType: "text/javascript", body: FAKE_APP }));
+  await rm.route("https://www.gstatic.com/firebasejs/**/firebase-firestore.js", (r) => r.fulfill({ contentType: "text/javascript", body: FAKE_FS }));
+  await rm.route(/\/getkey(\?.*)?$/, (r) => r.fulfill({ contentType: "text/html", body: PAGE }));
+  const rp = await rm.newPage();
+  await rp.goto(`${AT}/getkey`); await rp.waitForTimeout(400);
+  const a = await rp.evaluate(() => document.getElementById("bg").toDataURL());
+  await rp.waitForTimeout(600);
+  const b = await rp.evaluate(() => document.getElementById("bg").toDataURL());
+  check("still frame when the visitor turned motion off", a === b && a.length > 1000);
+  await rm.close();
+}
 
 console.log("\nHome screen button");
 const home = await browser.newContext({ viewport: { width: 1366, height: 860 } });
