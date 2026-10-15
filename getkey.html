@@ -33,265 +33,163 @@
     img-src 'self' data:;
     frame-src https://smh-keysystem.firebaseapp.com;
     base-uri 'none'; form-action 'none'">
-  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
   <style>
-    /* ==== Base Styles ==== */
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
+    /* Lucrit Scripts look — same tokens as assets/css/app.css. */
+    :root {
+      --bg: #05060a; --ink: #eef3fb; --ink-2: #a8b6cd; --ink-3: #6f7f99;
+      --line: rgba(140, 175, 225, 0.14); --line-2: rgba(140, 175, 225, 0.28);
+      --blue: #3d9bff; --cyan: #48e5ff; --violet: #9a6bff; --gold: #ffc857; --good: #35d07f;
+      --panel: rgba(10, 14, 25, 0.78);
+      --r: 16px; --r-lg: 22px;
+      --font: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      background: var(--bg); color: var(--ink); font-family: var(--font);
+      -webkit-font-smoothing: antialiased; overflow-x: hidden;
+      display: flex; flex-direction: column; min-height: 100vh; min-height: 100dvh;
     }
 
-    html, body {
-      height: 100%;
-      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      background-color: #0a0a0a;
-      color: #00e0ff;
-      user-select: none;
-      transition: background 0.4s ease, color 0.4s ease;
+    /* ---- moving background ---- */
+    #bg { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; display: block; }
+    .glow {
+      position: fixed; inset: 0; z-index: 0; pointer-events: none;
+      background:
+        radial-gradient(60% 45% at 50% 38%, rgba(61, 155, 255, 0.16), transparent 70%),
+        radial-gradient(40% 35% at 78% 20%, rgba(154, 107, 255, 0.10), transparent 70%),
+        radial-gradient(35% 30% at 18% 70%, rgba(72, 229, 255, 0.08), transparent 70%);
+      animation: breathe 9s ease-in-out infinite alternate;
     }
+    @keyframes breathe { from { opacity: 0.75; } to { opacity: 1; } }
 
-    /* ==== Light Mode ==== */
-    body.light-mode {
-      background-color: #ffffff;
-      color: #000000;
+    /* ---- top bar ---- */
+    .top {
+      position: relative; z-index: 2;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px clamp(16px, 4vw, 40px);
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(to bottom, rgba(5, 6, 10, 0.85), rgba(5, 6, 10, 0.4));
+      backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
     }
+    .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 700; letter-spacing: -0.01em; }
+    .brand img { height: 30px; width: auto; }
+    .brand b { color: var(--blue); font-weight: 700; }
+    .top a.back {
+      font-size: 0.82rem; color: var(--ink-2); text-decoration: none;
+      padding: 8px 15px; border-radius: 999px; border: 1px solid var(--line-2);
+      background: rgba(160, 200, 255, 0.05); transition: all 0.2s var(--ease);
+    }
+    .top a.back:hover { color: var(--ink); border-color: var(--cyan); }
 
-    /* ==== Container ==== */
+    /* ---- the card ---- */
+    main { position: relative; z-index: 1; flex: 1; display: grid; place-items: center; padding: clamp(24px, 6vh, 64px) 16px; }
     .container {
-      width: 90%;
-      max-width: 600px;
-      background: linear-gradient(135deg, #050505, #1a1a1a);
-      border: 3px solid #003366;
-      border-radius: 20px;
-      padding: 3rem 2rem;
-      text-align: center;
-      box-shadow:
-        0 0 20px rgba(0, 255, 255, 0.2),
-        inset 0 0 12px rgba(0, 255, 255, 0.05);
-      transition: all 0.3s ease-in-out;
+      width: 100%; max-width: 520px; text-align: center;
+      padding: clamp(26px, 5vw, 40px) clamp(20px, 5vw, 38px);
+      border-radius: var(--r-lg); border: 1px solid var(--line-2);
+      background: var(--panel);
+      backdrop-filter: blur(16px) saturate(1.2); -webkit-backdrop-filter: blur(16px) saturate(1.2);
+      box-shadow: 0 30px 80px -20px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(72, 229, 255, 0.04) inset,
+                  0 0 60px -20px rgba(61, 155, 255, 0.35);
+      animation: rise 0.7s var(--ease) both;
     }
+    @keyframes rise { from { opacity: 0; transform: translateY(14px) scale(0.985); } to { opacity: 1; transform: none; } }
 
-    body.light-mode .container {
-      background: #ffffff;
-      color: #000000;
-      border: 2px solid #cccccc;
-      box-shadow: 0 0 10px rgba(0, 0, 0, 0.06);
-    }
-
-    /* ==== Headings & Text ==== */
+    .eyebrow { font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.22em; text-transform: uppercase; color: var(--cyan); }
     h1 {
-      font-size: 2rem;
-      margin-bottom: 1rem;
-      color: #00eaff;
-      text-shadow: 0 0 10px rgba(0, 255, 255, 0.4);
+      margin: 10px 0 22px; font-size: clamp(1.7rem, 5.5vw, 2.3rem); font-weight: 800; letter-spacing: -0.035em; line-height: 1.05;
     }
+    h1 span { background: linear-gradient(90deg, var(--blue), var(--cyan)); -webkit-background-clip: text; background-clip: text; color: transparent; }
 
-    body.light-mode h1 {
-      color: #000000;
-      text-shadow: none;
+    /* ---- steps (same as the unlock page) ---- */
+    .steps { list-style: none; display: flex; align-items: center; justify-content: center; gap: 10px; margin: 0 0 22px; }
+    .steps li[data-cp] { display: grid; justify-items: center; gap: 6px; }
+    .steps li span {
+      width: 40px; height: 40px; border-radius: 50%; display: grid; place-items: center;
+      font-weight: 700; color: var(--ink-3); border: 2px solid var(--line-2); background: rgba(8, 12, 22, 0.9);
+      transition: all 0.35s var(--ease);
     }
+    .steps li b { font-size: 0.72rem; font-weight: 560; color: var(--ink-3); letter-spacing: 0.04em; }
+    .steps li.is-now span { color: #fff; border-color: var(--cyan); box-shadow: 0 0 0 4px rgba(72, 229, 255, 0.16), 0 0 22px -4px var(--cyan); animation: pulse 2.2s ease-in-out infinite; }
+    .steps li.is-now b { color: var(--ink); }
+    .steps li.is-done span { color: #04140b; background: var(--good); border-color: var(--good); }
+    .steps li.is-done b { color: var(--good); }
+    .steps .bar { width: clamp(28px, 9vw, 64px); height: 2px; border-radius: 2px; background: var(--line-2); margin-bottom: 24px; }
+    @keyframes pulse { 50% { box-shadow: 0 0 0 7px rgba(72, 229, 255, 0.08), 0 0 28px -2px var(--cyan); } }
 
-    p {
-      font-size: 1rem;
-      line-height: 1.6;
-      color: #d0f6ff;
+    .box {
+      display: grid; gap: 14px; justify-items: center;
+      padding: 22px 18px; border: 1px solid var(--line-2); border-radius: var(--r-lg);
+      background: rgba(6, 9, 17, 0.75);
     }
-
-    body.light-mode p {
-      color: #000000;
+    #messageText {
+      font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--cyan);
     }
+    #captchaContainer { width: 100%; display: grid; justify-items: center; }
+    .note { color: var(--ink-2); font-size: 0.9rem; line-height: 1.55; max-width: 40ch; }
 
-    /* ==== Checkpoint progress ==== */
-    .steps {
-      display: flex;
-      justify-content: center;
-      gap: 10px;
-      margin: 0 0 1.25rem;
-      list-style: none;
-    }
-    .steps li {
-      font-family: 'Share Tech Mono', monospace;
-      font-size: 0.85rem;
-      padding: 0.3rem 0.8rem;
-      border-radius: 999px;
-      border: 1px solid #00eaff44;
-      color: #6fb8c4;
-    }
-    .steps li.is-now { border-color: #00eaff; color: #00eaff; box-shadow: 0 0 10px #00eaff55; }
-    .steps li.is-done { border-color: #35d07f; color: #35d07f; }
-    body.light-mode .steps li { color: #555; border-color: #ccc; }
-    body.light-mode .steps li.is-now { color: #000; border-color: #000; box-shadow: none; }
-
-    #messageText { margin-bottom: 1.25rem; font-size: 1.15rem; font-weight: 600; }
-
-    /* ==== Buttons ==== */
+    /* ---- buttons (same as .btn--primary) ---- */
     button {
-      display: inline-block;
-      background: linear-gradient(145deg, #00bcd4, #0097a7);
-      color: #ffffff;
-      padding: 0.9rem 2rem;
-      font-size: 1rem;
-      font-weight: 600;
-      border: none;
-      border-radius: 14px;
-      cursor: pointer;
-      box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
-      transition: all 0.3s ease-in-out;
+      font: inherit; cursor: pointer;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      min-width: min(100%, 260px); min-height: 50px; padding: 12px 26px; border-radius: 999px;
+      font-size: 1rem; font-weight: 600; color: #fff; border: 1px solid transparent;
+      background: linear-gradient(135deg, var(--blue), #2a7fe0);
+      box-shadow: 0 8px 30px rgba(61, 155, 255, 0.32);
+      transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease), background 0.2s var(--ease);
+      position: relative; overflow: hidden;
     }
-
-    button:hover {
-      background: #00838f;
-      box-shadow: 0 0 25px #00eaffaa;
-      transform: translateY(-3px);
+    button::after {   /* a light sweep across the button */
+      content: ""; position: absolute; inset: 0; transform: translateX(-120%);
+      background: linear-gradient(100deg, transparent 30%, rgba(255, 255, 255, 0.25) 50%, transparent 70%);
+      animation: sweep 3.6s ease-in-out infinite;
     }
-
+    @keyframes sweep { 0%, 55% { transform: translateX(-120%); } 100% { transform: translateX(120%); } }
+    button:hover { transform: translateY(-2px); box-shadow: 0 12px 38px rgba(61, 155, 255, 0.46); background: linear-gradient(135deg, #4fa8ff, #3387e8); }
+    button:active { transform: translateY(0); }
     button:disabled { opacity: 0.7; cursor: wait; transform: none; }
-
     #copyBtn {
-      margin-top: 0.75rem;
+      margin-top: 4px; min-height: 44px; font-size: 0.9rem;
+      background: rgba(160, 200, 255, 0.06); border-color: var(--line-2); color: var(--ink); box-shadow: none;
     }
+    #copyBtn::after { display: none; }
+    #copyBtn:hover { border-color: var(--cyan); color: #fff; background: rgba(72, 229, 255, 0.1); }
 
-    /* ==== Key Display Box ==== */
+    /* ---- the key ---- */
+    #keyActiveSection { width: 100%; display: grid; gap: 10px; justify-items: center; }
+    #keyActiveSection p { color: var(--ink-2); font-size: 0.9rem; }
+    #keyActiveSection p strong { color: var(--good); font-weight: 600; }
     #keyBox {
-      background-color: #101820;
-      color: #00eaff;
-      font-family: 'Courier New', monospace;
-      font-size: 1rem;
-      padding: 1.25rem;
-      border: 2px solid #00eaff88;
-      border-radius: 14px;
-      box-shadow: inset 0 0 20px #00eaff33;
-      margin-top: 1rem;
-      word-break: break-word;
-      user-select: all;
+      width: 100%; padding: 16px 18px; border-radius: var(--r);
+      font-family: var(--mono); font-size: clamp(0.95rem, 3.6vw, 1.15rem); font-weight: 600; letter-spacing: 0.06em;
+      color: #fff; background: rgba(4, 8, 16, 0.9);
+      border: 1px solid rgba(72, 229, 255, 0.45);
+      box-shadow: 0 0 0 4px rgba(72, 229, 255, 0.07), 0 0 30px -8px var(--cyan), inset 0 0 24px rgba(72, 229, 255, 0.06);
+      word-break: break-all; user-select: all; cursor: text;
     }
+    #keyTimer { color: var(--gold); font-weight: 700; font-variant-numeric: tabular-nums; }
 
-    body.light-mode #keyBox {
-      background-color: #f7f7f7;
-      color: #000000;
-      border: 2px solid #cccccc;
-      box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.05);
+    #countdown {
+      margin-top: 18px; font-size: 0.82rem; color: var(--ink-3); font-variant-numeric: tabular-nums;
+      display: inline-flex; align-items: center; gap: 8px;
     }
+    #countdown::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--good); box-shadow: 0 0 10px var(--good); }
 
-    /* ==== Timer Text ==== */
-    #countdown,
-    #keyTimer {
-      margin-top: 1.25rem;
-      font-size: 1rem;
-      font-weight: bold;
-      color: #ffdd57;
-    }
-
-    body.light-mode #countdown,
-    body.light-mode #keyTimer {
-      color: #222222;
-    }
-
-    /* ==== Theme Toggle Button ==== */
-    #darkToggle {
-      position: fixed;
-      top: 1rem;
-      right: 1rem;
-      padding: 0.5rem 1rem;
-      font-size: 0.95rem;
-      border: 2px solid #00eaff;
-      background: transparent;
-      color: #00eaff;
-      border-radius: 30px;
-      cursor: pointer;
-      box-shadow: 0 0 8px #00eaff88;
-      transition: all 0.3s ease;
-    }
-
-    #darkToggle:hover {
-      background-color: #00eaff;
-      color: #000;
-      box-shadow: 0 0 16px #00eaff;
-    }
-
-    body.light-mode #darkToggle {
-      border-color: #000000;
-      color: #000000;
-      box-shadow: 0 0 6px #999;
-    }
-
-    body.light-mode #darkToggle:hover {
-      background-color: #000000;
-      color: #ffffff;
-      box-shadow: 0 0 10px #000000;
-    }
-
-    /* ==== Back to the site ==== */
-    #backLink {
-      position: fixed;
-      top: 1rem;
-      left: 1rem;
-      padding: 0.5rem 1rem;
-      font-size: 0.95rem;
-      color: #00eaff;
-      text-decoration: none;
-      border: 2px solid #00eaff55;
-      border-radius: 30px;
-    }
-    #backLink:hover { border-color: #00eaff; box-shadow: 0 0 10px #00eaff66; }
-    body.light-mode #backLink { color: #000; border-color: #ccc; }
-
-    .note { margin-top: 1rem; font-size: 0.85rem; color: #6fb8c4; }
-    body.light-mode .note { color: #555; }
-
-    /* ==== Responsive Layout ==== */
-    @media (max-width: 768px) {
-      .container {
-        padding: 2.5rem 1.5rem;
-      }
-
-      h1 {
-        font-size: 1.8rem;
-      }
-
-      button {
-        padding: 0.8rem 1.5rem;
-        font-size: 0.95rem;
-      }
-
-      #keyBox {
-        font-size: 0.95rem;
-      }
-    }
+    .foot { position: relative; z-index: 1; text-align: center; padding: 0 16px 22px; font-size: 0.75rem; color: var(--ink-3); }
+    .foot a { color: var(--ink-2); }
 
     @media (max-width: 480px) {
-      .container {
-        padding: 2rem 1rem;
-      }
-
-      h1 {
-        font-size: 1.5rem;
-      }
-
-      p {
-        font-size: 0.95rem;
-      }
-
-      button {
-        width: 100%;
-        padding: 0.75rem;
-      }
-
-      #darkToggle, #backLink {
-        top: 0.75rem;
-        font-size: 0.85rem;
-        padding: 0.4rem 0.8rem;
-      }
-      #darkToggle { right: 0.75rem; }
-      #backLink { left: 0.75rem; }
-
-      #keyBox {
-        font-size: 0.9rem;
-      }
+      .brand span.word { display: none; }
+      .steps li b { font-size: 0.66rem; }
+      button { width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation: none !important; transition: none !important; }
     }
   </style>
 
@@ -351,31 +249,51 @@
   </script>
 </head>
 <body>
-  <a id="backLink" href="/">← Lucrit Scripts</a>
-  <button id="darkToggle">Light Mode</button>
-  <div class="container">
-    <h1>Lucrit Scripts KeySystem</h1>
-    <ol class="steps" id="steps" aria-label="Progress">
-      <li data-cp="0">Checkpoint 1</li>
-      <li data-cp="1">Checkpoint 2</li>
-      <li data-cp="2">Key</li>
-    </ol>
-    <p id="messageText">CheckPoint One</p>
+  <canvas id="bg" aria-hidden="true"></canvas>
+  <div class="glow" aria-hidden="true"></div>
 
-    <div id="captchaContainer">
-      <button id="finishBtn">Get Key</button>
+  <header class="top">
+    <a class="brand" href="/" aria-label="Lucrit Scripts home">
+      <img src="/assets/img/mark.png" alt="">
+      <span class="word">Lucrit<b>Script</b></span>
+    </a>
+    <a class="back" id="backLink" href="/">← Back to scripts</a>
+  </header>
+
+  <main>
+    <div class="container">
+      <p class="eyebrow">Key system</p>
+      <h1>Get your <span>Lucrit</span> key</h1>
+      <ol class="steps" id="steps" aria-label="Progress">
+        <li data-cp="0"><span>1</span><b>Checkpoint 1</b></li>
+        <li class="bar" aria-hidden="true"></li>
+        <li data-cp="1"><span>2</span><b>Checkpoint 2</b></li>
+        <li class="bar" aria-hidden="true"></li>
+        <li data-cp="2"><span>🔑</span><b>Key</b></li>
+      </ol>
+
+      <div class="box">
+        <p id="messageText">Checkpoint One</p>
+
+        <div id="captchaContainer">
+          <button id="finishBtn">Get Key</button>
+        </div>
+
+        <div id="keyActiveSection" style="display:none;">
+          <p><strong>✓ You have already created a key.</strong></p>
+          <div id="keyBox"></div>
+          <button id="copyBtn">Copy Key</button>
+          <p>Key is still active: <span id="keyTimer">Loading...</span></p>
+        </div>
+
+        <p class="note" id="stepNote"></p>
+      </div>
+
+      <div id="countdown">Loading timer...</div>
     </div>
+  </main>
 
-    <div id="keyActiveSection" style="display:none;">
-      <p><strong>You have already created a key.</strong></p>
-      <p>Key is still active: <span id="keyTimer">Loading...</span></p>
-      <div id="keyBox"></div>
-      <button id="copyBtn">Copy Key</button>
-    </div>
-
-    <div id="countdown">Loading timer...</div>
-    <p class="note" id="stepNote"></p>
-  </div>
+  <p class="foot">Keys last 8 hours · <a href="/">lucritscripts.site</a></p>
 
   <script type="module">
     import {
@@ -396,7 +314,6 @@
     const keyTimeStorage = 'smh_keyTime';
     const sessionStart = 'smh_sessionStart';
 
-    const darkToggle = document.getElementById('darkToggle');
     const countdown = document.getElementById('countdown');
     const finishBtn = document.getElementById('finishBtn');
     const copyBtn = document.getElementById('copyBtn');
@@ -415,19 +332,6 @@
     // For example, after player login, fetch or input their UserId here:
     const currentRobloxUserId = "12345678";
 
-    function updateDarkToggleText() {
-      darkToggle.textContent = document.body.classList.contains('light-mode') ? 'Dark Mode' : 'Light Mode';
-    }
-    darkToggle.onclick = () => {
-      document.body.classList.toggle('light-mode');
-      localStorage.setItem('smh_darkMode', document.body.classList.contains('light-mode') ? '1' : '0');
-      updateDarkToggleText();
-    };
-    if (localStorage.getItem('smh_darkMode') === '1') {
-      document.body.classList.add('light-mode');
-    }
-    updateDarkToggleText();
-
     if (!localStorage.getItem(sessionStart)) {
       localStorage.setItem(sessionStart, Date.now().toString());
     }
@@ -442,9 +346,11 @@
     }
 
     function paintSteps(current) {
-      document.querySelectorAll('#steps li').forEach((li) => {
+      document.querySelectorAll('#steps li[data-cp]').forEach((li) => {
         const n = Number(li.dataset.cp);
         li.className = n < current ? 'is-done' : n === current ? 'is-now' : '';
+        const dot = li.querySelector('span');
+        if (dot) dot.textContent = n < current ? '✓' : (n === 2 ? '🔑' : String(n + 1));
       });
     }
 
@@ -467,7 +373,7 @@
       finishBtn.disabled = false;
       paintSteps(STEP);
       if (STEP === 0) {
-        messageText.textContent = 'CheckPoint One';
+        messageText.textContent = 'Checkpoint One';
         finishBtn.textContent = 'Get Key';
         stepNote.textContent = 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.';
         finishBtn.onclick = () => { window.location.href = STEP_LINKS[0]; };
@@ -629,6 +535,151 @@
     }
 
     main();
+  </script>
+  <!-- Moving background: a grid floor scrolling toward you, glowing cubes
+       drifting up and turning, and twinkling dust — the home screen's look,
+       drawn on a 2D canvas so it costs almost nothing. Still frame for
+       prefers-reduced-motion; paused while the tab is hidden. -->
+  <script>
+  (function () {
+    var cv = document.getElementById("bg");
+    if (!cv || !cv.getContext) return;
+    var cx = cv.getContext("2d");
+    var reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var W = 0, H = 0, dpr = 1, t = 0, last = 0, raf = 0;
+    var mx = 0, my = 0, px = 0, py = 0;           // mouse target / eased
+    var cubes = [], dust = [];
+    var COLORS = [[61,155,255],[72,229,255],[154,107,255]];
+
+    function rand(a, b) { return a + Math.random() * (b - a); }
+    function makeCube(fresh) {
+      return {
+        x: rand(-9, 9), y: fresh ? rand(-6, 6) : rand(7, 9), z: rand(7, 24),
+        s: rand(0.25, 0.85), rx: rand(0, 6.28), ry: rand(0, 6.28),
+        vrx: rand(-0.5, 0.5), vry: rand(-0.6, 0.6), vy: rand(0.25, 0.7),
+        c: COLORS[(Math.random() * COLORS.length) | 0]
+      };
+    }
+    function resize() {
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      W = innerWidth; H = innerHeight;
+      cv.width = W * dpr; cv.height = H * dpr;
+      cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      var n = W < 700 ? 12 : 22;
+      cubes = []; for (var i = 0; i < n; i++) cubes.push(makeCube(true));
+      dust = []; for (var j = 0; j < (W < 700 ? 40 : 90); j++)
+        dust.push({ x: Math.random(), y: Math.random(), r: rand(0.4, 1.6), p: rand(0, 6.28), s: rand(0.4, 1.4) });
+    }
+
+    // 3D → screen. Camera at origin looking down +z; f = focal length.
+    function proj(x, y, z) {
+      var f = Math.min(W, H) * 0.9;
+      var cxp = W / 2 + px * 30, cyp = H * 0.46 + py * 20;
+      return [cxp + (x - px * 0.6) * f / z, cyp + (y - py * 0.4) * f / z];
+    }
+
+    var V = [[-1,-1,-1],[1,-1,-1],[1,1,-1],[-1,1,-1],[-1,-1,1],[1,-1,1],[1,1,1],[-1,1,1]];
+    var F = [[0,1,2,3],[4,5,6,7],[0,1,5,4],[2,3,7,6],[1,2,6,5],[0,3,7,4]];
+
+    function drawCube(c) {
+      var cosx = Math.cos(c.rx), sinx = Math.sin(c.rx), cosy = Math.cos(c.ry), siny = Math.sin(c.ry);
+      var pts = [], cam = [];
+      for (var i = 0; i < 8; i++) {
+        var x = V[i][0] * c.s, y = V[i][1] * c.s, z = V[i][2] * c.s;
+        var y1 = y * cosx - z * sinx, z1 = y * sinx + z * cosx;
+        var x2 = x * cosy + z1 * siny, z2 = -x * siny + z1 * cosy;
+        var wx = x2 + c.x, wy = y1 + c.y, wz = z2 + c.z;
+        cam.push([wx, wy, wz]); pts.push(proj(wx, wy, wz));
+      }
+      var fade = Math.max(0, Math.min(1, (24 - c.z) / 16)) * Math.max(0, Math.min(1, (c.y + 8) / 3));
+      // Glass cubes: every face, far ones first, so nothing depends on winding order.
+      var faces = [];
+      for (var k = 0; k < 6; k++) {
+        var f = F[k], zsum = 0;
+        for (var u = 0; u < 4; u++) zsum += cam[f[u]][2];
+        var A = cam[f[0]], B = cam[f[1]], D = cam[f[3]];
+        var ux = B[0]-A[0], uy = B[1]-A[1], uz = B[2]-A[2], vx = D[0]-A[0], vy = D[1]-A[1], vz = D[2]-A[2];
+        var nx = uy*vz-uz*vy, ny = uz*vx-ux*vz, nz = ux*vy-uy*vx;
+        var light = 0.3 + 0.7 * Math.abs(ny / (Math.hypot(nx, ny, nz) || 1));
+        faces.push([f, light, zsum]);
+      }
+      faces.sort(function (p, q) { return q[2] - p[2]; });
+      for (var m = 0; m < faces.length; m++) {
+        var ff = faces[m][0], L = faces[m][1];
+        cx.beginPath();
+        cx.moveTo(pts[ff[0]][0], pts[ff[0]][1]);
+        for (var q = 1; q < 4; q++) cx.lineTo(pts[ff[q]][0], pts[ff[q]][1]);
+        cx.closePath();
+        cx.fillStyle = "rgba(" + c.c[0] + "," + c.c[1] + "," + c.c[2] + "," + (0.04 + 0.12 * L) * fade + ")";
+        cx.fill();
+        cx.strokeStyle = "rgba(" + c.c[0] + "," + c.c[1] + "," + c.c[2] + "," + 0.55 * fade + ")";
+        cx.lineWidth = 1;
+        cx.stroke();
+      }
+    }
+
+    function drawGrid() {
+      var horizon = H * 0.6 + py * 10, vx = W / 2 + px * 30;
+      var g = cx.createLinearGradient(0, horizon, 0, H);
+      g.addColorStop(0, "rgba(61,155,255,0)");
+      g.addColorStop(1, "rgba(61,155,255,0.35)");
+      cx.strokeStyle = g; cx.lineWidth = 1;
+      cx.beginPath();
+      for (var i = -14; i <= 14; i++) {               // lines running to the vanishing point
+        cx.moveTo(vx + i * 18, horizon);
+        cx.lineTo(vx + i * W * 0.16, H + 40);
+      }
+      var off = (t * 0.35) % 1;                        // rows sliding toward you
+      for (var r = 0; r < 14; r++) {
+        var zz = (r + 1 - off);
+        var y = horizon + (H - horizon) * (1 / zz) * 0.9;
+        if (y > horizon && y < H + 2) { cx.moveTo(0, y); cx.lineTo(W, y); }
+      }
+      cx.stroke();
+      // soft horizon line
+      var hg = cx.createLinearGradient(0, 0, W, 0);
+      hg.addColorStop(0, "rgba(72,229,255,0)"); hg.addColorStop(0.5, "rgba(72,229,255,0.35)"); hg.addColorStop(1, "rgba(72,229,255,0)");
+      cx.strokeStyle = hg; cx.beginPath(); cx.moveTo(0, horizon); cx.lineTo(W, horizon); cx.stroke();
+    }
+
+    function frame(now) {
+      var dt = last ? Math.min(0.05, (now - last) / 1000) : 0.016;
+      last = now; t += dt;
+      px += (mx - px) * 0.04; py += (my - py) * 0.04;
+      cx.clearRect(0, 0, W, H);
+
+      for (var i = 0; i < dust.length; i++) {          // twinkling dust
+        var d = dust[i];
+        var a = 0.25 + 0.35 * Math.sin(t * d.s + d.p);
+        cx.fillStyle = "rgba(207,232,255," + Math.max(0, a) + ")";
+        cx.beginPath();
+        cx.arc(((d.x * W) + px * 8 * d.r) % W, (d.y * H - t * 6 * d.r + H) % H, d.r, 0, 6.283);
+        cx.fill();
+      }
+      drawGrid();
+      cubes.sort(function (a, b) { return b.z - a.z; });  // far first
+      for (var k = 0; k < cubes.length; k++) {
+        var c = cubes[k];
+        c.rx += c.vrx * dt; c.ry += c.vry * dt;
+        c.y -= c.vy * dt;                                // drift upward (screen y grows down)
+        if (c.y < -9) cubes[k] = makeCube(false);        // respawn below the screen
+        drawCube(c);
+      }
+      if (!reduce) raf = requestAnimationFrame(frame);
+    }
+
+    addEventListener("resize", resize);
+    addEventListener("pointermove", function (e) {
+      mx = (e.clientX / W - 0.5) * 2; my = (e.clientY / H - 0.5) * 2;
+    }, { passive: true });
+    document.addEventListener("visibilitychange", function () {
+      if (reduce) return;
+      if (document.hidden) { cancelAnimationFrame(raf); raf = 0; }
+      else if (!raf) { last = 0; raf = requestAnimationFrame(frame); }
+    });
+    resize();
+    raf = requestAnimationFrame(frame);
+  })();
   </script>
 </body>
 </html>
