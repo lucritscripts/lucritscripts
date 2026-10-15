@@ -48,7 +48,7 @@ export function freshEnv(worker, extra = {}) {
 export async function serve(worker, env, port) {
   const APP_ROUTES = [
     /^\/admin\/?$/, /^\/creators\/[^/]+\/?$/, /^\/creations\/[^/]+\/[^/]+\/?$/,
-    /^\/dashboard(\/[^/]+)?\/?$/, /^\/executors(\/[^/]+)?\/?$/,
+    /^\/dashboard(\/[^/]+)?\/?$/, /^\/executors(\/[^/]+)?\/?$/, /^\/unlock\/[a-z]+\/?$/,
   ];
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, "https://lucrit.test");
