@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import { chromium } from "playwright";
 import worker from "../_worker.js";
-import { CHROME, ROOT, freshEnv, serve, counter } from "./harness.mjs";
+import { CHROME, ROOT, freshEnv, serve, counter, person } from "./harness.mjs";
 
 const PORT = 8181;
 const AT = `http://localhost:${PORT}`;
@@ -46,6 +46,10 @@ export async function setDoc(ref, data, opts){ const s = load(); const k = ref.c
 
 async function newPage() {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  return { ctx, page: await routes(ctx) };
+}
+async function routes(ctx, seedStore = null) {
+  if (seedStore) await ctx.addInitScript((s) => { if (!localStorage.getItem("__fs_test")) localStorage.setItem("__fs_test", s); }, seedStore);
   await ctx.route("https://www.gstatic.com/firebasejs/**/firebase-app.js", (r) =>
     r.fulfill({ contentType: "text/javascript", body: FAKE_APP }));
   await ctx.route("https://www.gstatic.com/firebasejs/**/firebase-firestore.js", (r) =>
@@ -58,7 +62,7 @@ async function newPage() {
     r.fulfill({ contentType: "text/html", body: "<title>lootlabs</title>" }));
   const page = await ctx.newPage();
   page.on("pageerror", (e) => errors.push(e.message));
-  return { ctx, page };
+  return page;
 }
 const msg = (p) => p.locator("#messageText").textContent();
 
@@ -138,6 +142,62 @@ console.log("\nReduced motion");
   const b = await rp.evaluate(() => document.getElementById("bg").toDataURL());
   check("still frame when the visitor turned motion off", a === b && a.length > 1000);
   await rm.close();
+}
+
+console.log("\nYour key on every device (signed in)");
+{
+  const acct = await person(browser, AT, "Keyholder");
+  const a = await routes(acct.ctx);
+  await a.goto(`${AT}/getkey?step=1`, { referer: "https://lootdest.org/" });
+  await a.locator("#finishBtn").waitFor();
+  await a.goto(`${AT}/getkey?step=2`, { referer: "https://lootdest.org/" });
+  await a.locator("#finishBtn", { hasText: "Get Your Key" }).waitFor();
+  await a.locator("#finishBtn").click();
+  await a.locator("#keyActiveSection").waitFor({ state: "visible" });
+  const k1 = (await a.locator("#keyBox").textContent()).trim();
+  await a.waitForTimeout(600);
+  const saved = env.DB._raw.prepare("SELECT v FROM cache WHERE k LIKE 'getkey:%'").all().map((r) => JSON.parse(r.v));
+  check("the new key is saved on the account", saved.length === 1 && saved[0].key === k1, JSON.stringify(saved));
+  const fsStore = await a.evaluate(() => localStorage.getItem("__fs_test"));
+
+  // Another device: same account, empty browser (the Firestore fake is seeded
+  // with the same data, standing in for the real shared Firebase).
+  const devB = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  await devB.addCookies(await acct.ctx.cookies());
+  const b = await routes(devB, fsStore);
+  await b.goto(`${AT}/getkey`);
+  await b.locator("#keyActiveSection").waitFor({ state: "visible" });
+  check("another device shows the same key", (await b.locator("#keyBox").textContent()).trim() === k1);
+  check("…and says it came from the account", /Restored from your Lucrit account/.test(await b.locator("#stepNote").textContent()));
+  await b.goto(AT);
+  await b.locator(".hero__cta a[data-getkey]").waitFor();
+  check("home button now says Your Key", /Your Key/.test(await b.locator(".hero__cta a[data-getkey]").textContent()));
+  await devB.close();
+
+  // The key was deleted in Firebase (e.g. from the admin Keys tab): no loop, back to checkpoint one.
+  const devC = await browser.newContext();
+  await devC.addCookies(await acct.ctx.cookies());
+  const c = await routes(devC, "{}");
+  await c.goto(`${AT}/getkey`);
+  await c.waitForTimeout(1500);
+  check("a key gone from Firebase isn't restored (and the page doesn't loop)",
+    (await msg(c)) === "Checkpoint One" && c.url() === `${AT}/getkey` && await c.locator("#keyActiveSection").isHidden());
+  await devC.close();
+  await acct.ctx.close();
+
+  // Signed out on a new device: nothing to restore, and a hint to sign in.
+  const anon = await newPage();
+  await anon.page.goto(`${AT}/getkey`);
+  await anon.page.locator("#stepNote a", { hasText: "Sign in" }).waitFor();
+  check("signed-out visitors get a 'sign in to keep your key' hint", true);
+  await anon.ctx.close();
+
+  const api = async (method, body, cookie) => (await worker.fetch(new Request("https://lucrit.test/api/getkey/mine", {
+    method, headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  }), env, { waitUntil() {} }));
+  check("saving needs an account (401)", (await api("POST", { key: k1, expiresAt: Date.now() + 3600e3 })).status === 401);
+  check("signed-out GET just says no key", (await (await api("GET")).json()).data === null);
 }
 
 console.log("\nHome screen button");
