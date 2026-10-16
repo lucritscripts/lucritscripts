@@ -88,12 +88,26 @@ check("narrower than the old 258px minimum", cards.every((c) => c.w < 258),
 check("descriptions clamp to two lines", cards.every((c) => c.descLines <= 2),
   JSON.stringify(cards.map((c) => c.descLines)));
 
-console.log("\nPhones get one roomy column");
+// 16 Oct 2026: "for the mobile version make the scripts cards smaller, they're
+// too big" — one full-width card per screen became two compact ones per row.
+console.log("\nPhones get two compact cards per row");
 await me.page.setViewportSize({ width: 390, height: 844 });
-await me.page.waitForTimeout(500);
+await me.page.waitForTimeout(600);
 const phone = await me.page.evaluate(() =>
   getComputedStyle(document.querySelector(".results__grid")).gridTemplateColumns.split(" ").length);
-check("one column at phone width", phone === 1, String(phone));
+check("two columns at phone width", phone === 2, String(phone));
+const small = await me.page.evaluate(() =>
+  [...document.querySelectorAll(".results__grid .card")].map((card) => {
+    const c = card.getBoundingClientRect();
+    const b = card.querySelector('[data-act="get"]').getBoundingClientRect();
+    return { w: c.width, h: c.height, top: b.top - c.top, bottom: b.bottom - c.top, bw: b.width,
+      desc: getComputedStyle(card.querySelector(".card__desc")).display };
+  }));
+check("cards are short (under 280px tall)", small.every((c) => c.h < 280), JSON.stringify(small.map((c) => Math.round(c.h))));
+check("no card is wider than half the screen", small.every((c) => c.w < 195), JSON.stringify(small.map((c) => Math.round(c.w))));
+check("Get Script still sits fully inside every card", small.every((c) => c.top >= 0 && c.bottom <= c.h + 0.5));
+check("…and spans the card so it's easy to tap", small.every((c) => c.bw > c.w * 0.75));
+check("description hidden on phones (it's on the script page)", small.every((c) => c.desc === "none"));
 
 await me.ctx.close();
 await browser.close();
