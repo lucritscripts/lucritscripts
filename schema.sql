@@ -172,6 +172,9 @@ CREATE TABLE IF NOT EXISTS admin_log (
   detail TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS scripts_status ON scripts(status);
+CREATE INDEX IF NOT EXISTS scripts_live_new    ON scripts(removed, created_at);
+CREATE INDEX IF NOT EXISTS scripts_live_views  ON scripts(removed, views);
+CREATE INDEX IF NOT EXISTS scripts_live_copies ON scripts(removed, copies);
 CREATE INDEX IF NOT EXISTS scripts_author ON scripts(author_id);
 CREATE INDEX IF NOT EXISTS scripts_live ON scripts(removed, created_at);
 CREATE INDEX IF NOT EXISTS scripts_category ON scripts(removed, category);

@@ -1113,11 +1113,53 @@ function grantOpens(env, grant) {
   return Boolean(grant.verified) || unlockProviders(env).length === 0;
 }
 
+/* ------------------------------------------------- listing at scale ── */
+
+/**
+ * The site is expected to hold thousands of scripts, so the browser no longer
+ * gets "the whole library" and searches it locally. Search, the game filter,
+ * category, sort and paging all happen here, and every listing says how many
+ * rows matched in total so "Show 20 more" knows when to stop.
+ */
+
+/** Same algorithm as gameId() in assets/js/games.js — keep them identical. */
+function gameIdOf(name) {
+  return String(name || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "") || "unknown";
+}
+
+/** Search words: lowercase letters/digits only, so they are safe in LIKE. */
+function searchWords(q) {
+  return String(q || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim()
+    .split(" ").filter(Boolean).slice(0, 6).map((w) => w.slice(0, 40));
+}
+
+const LIST_SORTS = {
+  new: "s.created_at DESC",
+  views: "s.views DESC, s.copies DESC, s.created_at DESC",
+  copies: "s.copies DESC, s.views DESC, s.created_at DESC",
+  likes: "likes DESC, s.views DESC, s.created_at DESC",
+};
+
+/** Every spelling of a game as stored, for one game id. */
+async function gameNamesFor(env, id) {
+  const { results } = await env.DB.prepare(
+    `SELECT DISTINCT LOWER(TRIM(game)) AS g FROM scripts WHERE removed = 0`).all();
+  return (results || []).map((r) => r.g).filter((g) => gameIdOf(g) === id);
+}
+
 async function handleScriptList(request, env) {
   const url = new URL(request.url);
-  const category = String(url.searchParams.get("category") || "").slice(0, 40);
-  const author = String(url.searchParams.get("author") || "").slice(0, 40);
-  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get("limit")) || 200));
+  const p = url.searchParams;
+  const category = String(p.get("category") || "").slice(0, 40);
+  const author = String(p.get("author") || "").slice(0, 40);
+  const game = gameIdOf(String(p.get("game") || "").slice(0, 120));
+  const words = searchWords(p.get("q"));
+  const sortKey = String(p.get("sort") || "");
+  const limit = Math.min(200, Math.max(1, Number(p.get("limit")) || 200));
+  const offset = Math.min(100000, Math.max(0, Math.floor(Number(p.get("offset")) || 0)));
 
   // A published script stays on the site until it is deleted or its author is
   // suspended. Those are the only two things that take one down.
@@ -1140,14 +1182,45 @@ async function handleScriptList(request, env) {
   if (category) { where.push("s.category = ?"); binds.push(category); }
   if (author) { where.push("s.author_id = ?"); binds.push(author); }
 
-  const { results } = await env.DB.prepare(
-    `SELECT ${await scriptCols(env)},
-            (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
-       FROM scripts s JOIN users u ON u.id = s.author_id
-      WHERE ${where.join(" AND ")}
-      ORDER BY s.created_at DESC
-      LIMIT ?`
-  ).bind(...binds, limit).all();
+  if (p.get("game")) {
+    const names = await gameNamesFor(env, game);
+    if (!names.length) return ok({ data: [], total: 0 });
+    where.push(`LOWER(TRIM(s.game)) IN (${names.map(() => "?").join(",")})`);
+    binds.push(...names);
+  }
+
+  // Every word has to appear somewhere a person would search by. LIKE is
+  // case-insensitive for ASCII, and the words carry no % or _ (see above).
+  for (const w of words) {
+    where.push(`(s.title LIKE ? OR s.game LIKE ? OR s.descr LIKE ? OR s.tags LIKE ?
+                 OR s.category LIKE ? OR u.username LIKE ?)`);
+    const like = `%${w}%`;
+    binds.push(like, like, like, like, like, like);
+  }
+
+  // A search with no explicit sort puts title hits first — that is what
+  // somebody typing a name meant — then the most viewed.
+  let order = LIST_SORTS[sortKey] || LIST_SORTS.new;
+  const orderBinds = [];
+  if (words.length && !LIST_SORTS[sortKey]) {
+    order = `CASE WHEN s.title LIKE ? THEN 0 ELSE 1 END, s.views DESC, s.created_at DESC`;
+    orderBinds.push(`%${words.join("%")}%`);
+  }
+
+  const whereSql = where.join(" AND ");
+  const [{ results }, counted] = await Promise.all([
+    env.DB.prepare(
+      `SELECT ${await scriptCols(env)},
+              (SELECT COUNT(*) FROM likes l WHERE l.script_id = s.id) AS likes
+         FROM scripts s JOIN users u ON u.id = s.author_id
+        WHERE ${whereSql}
+        ORDER BY ${order}
+        LIMIT ? OFFSET ?`
+    ).bind(...binds, ...orderBinds, limit, offset).all(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM scripts s JOIN users u ON u.id = s.author_id WHERE ${whereSql}`
+    ).bind(...binds).first(),
+  ]);
 
   // Which of these this visitor currently holds, and for how long.
   //
@@ -1168,6 +1241,8 @@ async function handleScriptList(request, env) {
   }
 
   return ok({
+    total: Number(counted?.n || 0),
+    offset,
     data: (results || []).map((r) => {
       const own = user && user.id === r.author_id;
       const left = held.get(r.id);
@@ -1178,6 +1253,46 @@ async function handleScriptList(request, env) {
       });
     }),
   });
+}
+
+/**
+ * GET /api/scripts/summary — site totals plus every game that has scripts.
+ *
+ * What the homepage's numbers and the game library are drawn from, so neither
+ * has to download the scripts themselves. One grouped query; spellings of the
+ * same game ("Blox Fruits" / "blox-fruits") are merged by game id afterwards.
+ */
+async function handleScriptSummary(request, env) {
+  const { results } = await env.DB.prepare(
+    `SELECT TRIM(s.game) AS game, COUNT(*) AS n, SUM(s.views) AS views,
+            SUM(s.copies) AS copies, MAX(s.views) AS top, s.id AS id,
+            CASE WHEN s.thumbnail LIKE 'data:%'
+                 THEN 'thumb:' || length(s.thumbnail) || ':' || substr(s.thumbnail, -40)
+                 ELSE s.thumbnail END AS thumbnail
+       FROM scripts s JOIN users u ON u.id = s.author_id
+      WHERE s.removed = 0 AND u.banned = 0
+      GROUP BY LOWER(TRIM(s.game))`
+  ).all();
+
+  const games = new Map();
+  let total = 0, views = 0, copies = 0;
+  for (const r of results || []) {
+    total += r.n || 0; views += r.views || 0; copies += r.copies || 0;
+    const id = gameIdOf(r.game);
+    const g = games.get(id);
+    if (!g) {
+      games.set(id, { id, name: r.game, scripts: r.n || 0, views: r.views || 0,
+        top: r.top || 0, thumbnail: thumbPublic(r) || "" });
+    } else {
+      g.scripts += r.n || 0; g.views += r.views || 0;
+      if ((r.top || 0) > g.top) { g.top = r.top || 0; g.thumbnail = thumbPublic(r) || g.thumbnail; g.name = r.game; }
+    }
+  }
+
+  const list = [...games.values()]
+    .sort((a, b) => b.scripts - a.scripts || b.views - a.views)
+    .map(({ top, ...g }) => g);
+  return ok({ total, views, copies, data: list });
 }
 
 async function handleScriptGet(request, env, { id }) {
@@ -1610,6 +1725,13 @@ function ensureAdminSchema(env) {
          target TEXT NOT NULL DEFAULT '',
          detail TEXT NOT NULL DEFAULT ''
        )`).run();
+    // Paging indexes for the library at scale (migrations/2026-10-library-scale.sql).
+    // Best-effort: a missing index is slower, never wrong, so it can't fail a page.
+    for (const sql of [
+      `CREATE INDEX IF NOT EXISTS scripts_live_new    ON scripts(removed, created_at)`,
+      `CREATE INDEX IF NOT EXISTS scripts_live_views  ON scripts(removed, views)`,
+      `CREATE INDEX IF NOT EXISTS scripts_live_copies ON scripts(removed, copies)`,
+    ]) { try { await env.DB.prepare(sql).run(); } catch { /* ignore */ } }
   })();
   adminSchemaDone.set(key, p);
   p.catch(() => adminSchemaDone.delete(key));   // a failed attempt is retried next time
@@ -5792,6 +5914,7 @@ const PATTERNS = [
 
 const ROUTES = {
   "GET  /api/scripts": handleScriptList,
+  "GET  /api/scripts/summary": handleScriptSummary,
   "GET  /api/auth/discord/start": handleDiscordStart,
   "GET  /api/auth/discord/callback": handleDiscordCallback,
   "GET  /api/discord": handleDiscordStats,
