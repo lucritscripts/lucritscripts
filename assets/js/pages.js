@@ -1193,10 +1193,12 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
         <p class="gate__note">Once sponsors are live, unlocking pays the person who wrote this.</p>`;
     } else {
       body = `
-        <p>${live.includes("lootlabs") && live.length === 1
-          ? "Complete two quick LootLabs steps to unlock the code."
-          : live.includes("lootlabs")
-            ? "LootLabs: two quick steps. Linkvertise: one. Either one unlocks the code."
+        <p>${live.length > 1
+          ? (account.linkvertiseSteps
+              ? "Two quick steps with LootLabs or Linkvertise — either one unlocks the code."
+              : "LootLabs: two quick steps. Linkvertise: one. Either one unlocks the code.")
+          : live.includes("lootlabs") || account.linkvertiseSteps
+            ? `Complete two quick ${live.includes("lootlabs") ? "LootLabs" : "Linkvertise"} steps to unlock the code.`
             : "Complete one short sponsor step to unlock the code."} It pays the person who wrote it.</p>
         <div class="gate__actions">
           ${live.map((id, i) => `
@@ -1468,6 +1470,9 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
     // the old Script Maniac Hub key system worked: step 1, back here, step 2,
     // back here, script. Each step is checked with LootLabs' postback.
     if (act === "lootlabs" && onStartFlow) { onStartFlow(current, "lootlabs"); return; }
+    // Linkvertise works the same way now (/unlock/linkvertise) when the
+    // server can run it in two steps (dynamic links + anti-bypass).
+    if (act === "linkvertise" && onStartFlow && account.linkvertiseSteps) { onStartFlow(current, "linkvertise"); return; }
 
     if (act === "free" || account.unlockProviders.includes(act)) {
       if (busy) return;

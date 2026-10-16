@@ -318,13 +318,13 @@ const router = createRouter({
    * out which; the ?s= is dropped from the address bar once read.
    */
   unlock({ provider }) {
-    if (provider !== "lootlabs") { router.go("/", { replace: true }); return; }
+    if (provider !== "lootlabs" && provider !== "linkvertise") { router.go("/", { replace: true }); return; }
     closeRoutedPages("unlock");
     const scriptId = new URLSearchParams(location.search).get("s") || "";
-    // ?s= from the script page, ?step= from the LootLabs links: read, then tidy.
-    if (location.search) history.replaceState(null, "", "/unlock/lootlabs");
+    // ?s= from the script page, ?step= from the sponsor links: read, then tidy.
+    if (location.search) history.replaceState(null, "", `/unlock/${provider}`);
     setTitle("Unlock");
-    unlockPage.open({ scriptId });
+    unlockPage.open({ scriptId, provider });
   },
 
   // A path the app does not own reached the shell somehow. Draw the home page

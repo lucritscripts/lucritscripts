@@ -341,6 +341,7 @@ export const account = {
    * offering a button that quietly hands the script over for nothing.
    */
   get unlockProviders() { return backend.config?.unlockProviders || []; },
+  get linkvertiseSteps() { return Boolean(backend.config?.linkvertiseSteps); },
 
   /** How many minutes an unlock lasts before the sponsor step repeats. */
   get unlockMinutes() { return backend.config?.unlockMinutes || 5; },

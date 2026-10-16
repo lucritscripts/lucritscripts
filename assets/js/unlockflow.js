@@ -28,7 +28,7 @@ function loadLootTag() {
   document.head.appendChild(s);
 }
 
-const NAMES = { lootlabs: "LootLabs" };
+const NAMES = { lootlabs: "LootLabs", linkvertise: "Linkvertise" };
 
 export function createUnlockFlowPage({ onDone, onExit } = {}) {
   const sheet = createOverlay({ id: "unlock", label: "Unlock script" });
@@ -38,6 +38,7 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
   let state = "loading";  // loading | ready | going | checking | waiting | done | error | none
   let message = "";
   let run = 0;            // bumps on every open, so a stale check loop stops
+  let provider = "lootlabs";   // which sponsor this page is running: /unlock/<provider>
 
   function stepsHtml() {
     const total = flow?.total || 2;
@@ -53,7 +54,7 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
 
   function render() {
     const s = flow?.script;
-    const name = NAMES[flow?.provider || "lootlabs"] || "LootLabs";
+    const name = NAMES[flow?.provider || provider] || "LootLabs";
     const img = s?.thumbnail ? esc(safeImageSrc(s.thumbnail)) : "";
     const step = flow?.step || 1;
     const total = flow?.total || 2;
@@ -113,10 +114,10 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
   }
 
   async function begin(scriptId) {
-    const res = await startFlow(scriptId, "lootlabs");
+    const res = await startFlow(scriptId, provider);
     if (!res.ok) { state = "error"; message = res.error || "Couldn't start the unlock."; flow = null; render(); return null; }
     flow = res.data;
-    rememberFlow({ flowId: flow.flowId, scriptId, at: Date.now() });
+    rememberFlow({ flowId: flow.flowId, scriptId, provider, at: Date.now() });
     return flow;
   }
 
@@ -136,7 +137,7 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
       state = "ready";
       message = "";
       toast(res.pending
-        ? "LootLabs hasn't confirmed that step. If you finished it, give it a moment and try again."
+        ? `${NAMES[provider]} hasn't confirmed that step. If you finished it, give it a moment and try again.`
         : (res.error || "That step wasn't completed."), "warn");
       render();
       return;
@@ -175,7 +176,7 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
       const res = await goFlow(flow.flowId);
       if (!res.ok) {
         state = "ready"; render();
-        toast(res.error || "Couldn't reach LootLabs. Try again.", "warn");
+        toast(res.error || `Couldn't reach ${NAMES[provider]}. Try again.`, "warn");
         return;
       }
       location.href = res.data.url;
@@ -187,13 +188,16 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
      * @param scriptId  set when arriving from a script page (?s=…); absent when
      *                  LootLabs sends the visitor back to the bare address.
      */
-    async open({ scriptId = "" } = {}) {
+    async open({ scriptId = "", provider: via = "lootlabs" } = {}) {
       const myRun = ++run;
+      provider = via === "linkvertise" ? "linkvertise" : "lootlabs";
       flow = null; state = "loading"; message = "";
       sheet.open(); render();
-      loadLootTag();
+      if (provider === "lootlabs") loadLootTag();
 
-      const saved = savedFlow();
+      const saved0 = savedFlow();
+      // A flow for the other sponsor doesn't carry over to this page.
+      const saved = saved0 && (saved0.provider || "lootlabs") === provider ? saved0 : null;
       const fresh = saved && Date.now() - (saved.at || 0) < 2 * 3600 * 1000;
 
       // Coming from a script page: carry on with that script's flow if one is
