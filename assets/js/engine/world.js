@@ -15,8 +15,9 @@ export const JOURNEY = 920;
 export const BANDS = {
   hero:      [0.000, 0.087],
   universe:  [0.087, 0.196],
-  search:    [0.196, 0.293],
-  vault:     [0.293, 0.457],
+  // The vault section was removed (Oct 2026); search takes over its stretch
+  // of the journey so the camera path itself is unchanged.
+  search:    [0.196, 0.457],
   categories:[0.457, 0.652],
   featured:  [0.652, 0.761],
   community: [0.761, 0.870],
@@ -1210,9 +1211,12 @@ export class World {
     // rendered well below CSS resolution and upscaled by the compositor. Fill
     // rate is what kills mobile GPUs; at 0.7x the scene costs ~1/4 of 1.35x.
     this.mobile = !!opts.mobile;
+    // Desktop used to render at up to 2x CSS pixels on high-DPI screens. The
+    // scene is depth-of-field blurred and bloomed, so the extra pixels were
+    // invisible — and they were most of what made computers lag (Oct 2026).
     this.dpr = this.mobile
       ? 0.7
-      : Math.min(window.devicePixelRatio || 1, this.quality === "high" ? 2 : 1.35);
+      : Math.min(window.devicePixelRatio || 1, 1) * (this.quality === "high" ? 1 : 0.85);
 
     this.progress = 0;
     this.pointer = { x: 0, y: 0 };
