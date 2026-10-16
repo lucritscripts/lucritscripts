@@ -116,7 +116,8 @@ console.log("\nDesktop");
   check("the wheel moves the page", a > 0, String(a));
 
   // Section dots.
-  check("section dots for all nine sections", await page.locator(".sectiondots button").count() === 9);
+  check("section dots for all eight sections (the vault is gone)", await page.locator(".sectiondots button").count() === 8);
+  check("no vault section", await page.locator("#ch-vault").count() === 0);
   await page.locator('.sectiondots [data-jump="submit"]').click();
   await page.waitForTimeout(2800);
   const pub = await page.evaluate(() => ({
@@ -160,29 +161,59 @@ console.log("\nDesktop");
 console.log("\nSearch results page with a button, not an inner scroll box");
 {
   // Publishing is capped at 10 an hour per account, so two accounts.
-  for (const [who, n] of [["PagerA", 8], ["PagerB", 8]]) {
+  for (const [who, n, game] of [["PagerA", 9, "Blox Fruits"], ["PagerB", 9, "Blox Fruits"], ["PagerC", 9, "Da Hood"]]) {
   const me = await person(browser, AT, who);
   for (let i = 0; i < n; i++) {
-    await me.page.evaluate(async (i) => fetch("/api/scripts", {
+    await me.page.evaluate(async ({ i, who, game }) => fetch("/api/scripts", {
       method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Script " + i, game: "Blox Fruits", category: "combat", keyless: true, tags: ["T"],
+      body: JSON.stringify({ title: (game === "Da Hood" ? "Hood Tool " : "Script ") + who + i, game, category: "combat", keyless: true, tags: ["T"],
         captcha: true, thumbnail: "https://tr.rbxcdn.com/x" + i,
         desc: "Auto farms levels and bosses for you with a simple menu. ".repeat(12),
         code: 'loadstring(game:HttpGet("https://raw.githubusercontent.com/a/b/main/c.lua"))()' }),
-    }), i);
+    }), { i, who, game });
   }
+  env.DB._raw.prepare("DELETE FROM ratelimits").run();
   await me.ctx.close();
   }
   const { ctx, page } = await open({ viewport: { width: 1280, height: 860 } });
   await page.evaluate(() => document.getElementById("ch-search").scrollIntoView());
   await page.waitForTimeout(1500);
-  const n1 = await page.locator("#search-mount .results__grid .card").count();
-  check("first page shows 12", n1 === 12, String(n1));
-  check("with a 'Show more' button", /Show 4 more/.test(await page.locator("[data-more-results]").textContent()));
+  const cardsIn = () => page.locator("#search-mount .results__grid .card").count();
+  const n1 = await cardsIn();
+  check("first page shows 20", n1 === 20, String(n1));
+  check("count line says 20 of 27", /Showing 20 of 27/.test(await page.locator("#search-mount .library__count").textContent()));
+  check("with a 'Show more' button", /Show 7 more/.test(await page.locator("[data-more-results]").textContent()));
   await page.locator("[data-more-results]").click();
-  await page.waitForTimeout(300);
-  check("which shows the rest", await page.locator("#search-mount .results__grid .card").count() === 16);
+  for (let i = 0; i < 20 && (await cardsIn()) < 27; i++) await page.waitForTimeout(150);
+  check("which shows the rest", await cardsIn() === 27);
   check("and goes away when there's nothing left", await page.locator("[data-more-results]").count() === 0);
+
+  // The server does the searching, so anything is findable — not just what
+  // the first page happened to load.
+  await page.fill("#search-mount .library__input", "hood tool pagerc3");
+  for (let i = 0; i < 30 && (await cardsIn()) !== 1; i++) await page.waitForTimeout(150);
+  check("search finds one exact script", await cardsIn() === 1);
+  check("…the right one", /Hood Tool PagerC3/.test(await page.locator("#search-mount .results__grid .card__title").first().textContent()));
+  await page.fill("#search-mount .library__input", "");
+  for (let i = 0; i < 30 && (await cardsIn()) !== 20; i++) await page.waitForTimeout(150);
+
+  await page.selectOption("#search-mount [data-gamepick]", "da-hood");
+  for (let i = 0; i < 30 && (await cardsIn()) !== 9; i++) await page.waitForTimeout(150);
+  check("game filter is answered by the server", await cardsIn() === 9);
+  check("the game menu counts come from the server",
+    /Blox Fruits \(18\)/.test(await page.locator("#search-mount [data-gamepick]").innerHTML()));
+
+  const api = await page.evaluate(async () => {
+    const a = await (await fetch("/api/scripts?limit=5&offset=5&sort=new")).json();
+    const s = await (await fetch("/api/scripts/summary")).json();
+    const g = await (await fetch("/api/scripts?game=blox-fruits&limit=1")).json();
+    return { n: a.data.length, total: a.total, sum: s.total, games: s.data.map((x) => x.id + ":" + x.scripts).join(","), g: g.total };
+  });
+  check("API pages with offset + total", api.n === 5 && api.total >= 27, JSON.stringify(api));
+  check("summary has per-game counts", /blox-fruits:18/.test(api.games) && /da-hood:9/.test(api.games), api.games);
+  check("game filter total", api.g === 18, String(api.g));
+  const idx = env.DB._raw.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'scripts_live_%'").all().map((r) => r.name);
+  check("paging indexes created by the worker itself", idx.length === 3, idx.join(","));
   await ctx.close();
 }
 

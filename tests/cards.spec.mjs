@@ -103,7 +103,7 @@ const small = await me.page.evaluate(() =>
     return { w: c.width, h: c.height, top: b.top - c.top, bottom: b.bottom - c.top, bw: b.width,
       desc: getComputedStyle(card.querySelector(".card__desc")).display };
   }));
-check("cards are short (under 280px tall)", small.every((c) => c.h < 280), JSON.stringify(small.map((c) => Math.round(c.h))));
+check("cards are short (under 245px tall)", small.every((c) => c.h < 245), JSON.stringify(small.map((c) => Math.round(c.h))));
 check("no card is wider than half the screen", small.every((c) => c.w < 195), JSON.stringify(small.map((c) => Math.round(c.w))));
 check("Get Script still sits fully inside every card", small.every((c) => c.top >= 0 && c.bottom <= c.h + 0.5));
 check("…and spans the card so it's easy to tap", small.every((c) => c.bw > c.w * 0.75));
