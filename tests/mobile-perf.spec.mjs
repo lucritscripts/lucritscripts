@@ -16,7 +16,7 @@
 //   - the canvas doesn't resize (and reallocate its render targets) when the
 //     address bar slides away;
 //   - nothing is drawn while a full-screen sheet covers the canvas;
-//   - desktop is untouched.
+//   - desktop is capped at 30 fps / 1x, trickles when unfocused, never freezes.
 import { chromium } from "playwright";
 import worker from "../_worker.js";
 import { CHROME, freshEnv, serve, counter } from "./harness.mjs";
@@ -164,16 +164,31 @@ console.log("\nWeak phone: watchdog steps down until scrolling is smooth");
 
 /* ----------------------------------------------------------- desktop */
 
-console.log("\nDesktop is untouched");
+console.log("\nDesktop: on a budget too (it used to draw at full refresh, up to 2x res)");
 {
   const { ctx, page, errors } = await open({ viewport: { width: 1280, height: 800 } });
   const c = await canvasInfo(page);
   check("desktop is not treated as a phone", c.mobile === false);
-  check("desktop renders at full resolution", c.w === c.cw * 1, `${c.w}/${c.cw}`);
+  check("desktop renders at no more than 1x CSS pixels", c.w > 0 && c.w <= c.cw, `${c.w}/${c.cw}`);
+  const lite = () => page.evaluate(() => "lite" in document.documentElement.dataset);
   const hits = await blurred(page);
-  check("desktop keeps its frosted glass", hits.length > 0, String(hits.length));
+  check("frosted glass is on unless the watchdog stepped down",
+    (await lite()) ? hits.length === 0 : hits.length > 0, `${hits.length} / lite=${await lite()}`);
+
+  const fps = (await framesOver(page, 2000)) / 2;
+  check("desktop world is capped at ~30 fps", fps <= 32, fps.toFixed(1));
+  check("desktop world is still animating", fps >= 1, fps.toFixed(1));
+
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  const bg = (await framesOver(page, 2500)) / 2.5;
+  check("unfocused window drops to a trickle (~8 fps)", bg <= 10 && bg >= 1, bg.toFixed(1));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+
   await page.waitForTimeout(3500);
-  check("desktop never steps down", (await canvasInfo(page)).fx === "0");
+  const after = await canvasInfo(page);
+  check("desktop never freezes (no rung past 2)", Number(after.fx) <= 2, after.fx);
+  check("…and keeps animating", (await framesOver(page, 1500)) >= 1);
+  if (Number(after.fx) >= 1) check("a stepped-down desktop drops the frosted glass", (await blurred(page)).length === 0);
   check("no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
