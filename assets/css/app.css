@@ -2929,3 +2929,37 @@ html.reduced-motion .chapter__stage { transition: none; }
 .btn--danger { color: #ff8a95; border-color: rgba(255, 77, 94, 0.45); }
 .btn--danger:hover { color: #fff; background: rgba(255, 77, 94, 0.18); border-color: var(--red); }
 .btn--danger:disabled, .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+
+/* =====================================================================
+   Phones: compact script cards (16 Oct 2026 — "make the scripts cards
+   smaller, they're too big"). Two per row instead of one full-width card
+   per screen. The description is dropped here — it's on the script's own
+   page — and the meta row keeps just author + views. The Get Script button
+   goes full width so it's still an easy thumb target.
+   ===================================================================== */
+@media (max-width: 560px) {
+  .results__grid, .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  /* Swipe rows show two cards at a time instead of one big one. */
+  .vault__grid, .featured__grid { grid-auto-columns: 46%; gap: 9px; }
+
+  .card { border-radius: 14px; }
+  .card__thumb { aspect-ratio: 16 / 10; }
+  .card__body { padding: 9px 10px 10px; gap: 4px; }
+  .card__top { gap: 4px; }
+  .card .chip { font-size: 0.54rem; padding: 2px 6px; letter-spacing: 0.06em; }
+  .card .badge { font-size: 0.54rem; padding: 2px 6px; }
+  .card .badge--lua, .card .badge--unverified { display: none; }
+  .card__title, .card--lg .card__title {
+    font-size: 0.84rem; line-height: 1.25; letter-spacing: -0.015em;
+    display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+  .card__game { font-size: 0.68rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .card__desc, .card__tags { display: none; }
+  .card__meta { font-size: 0.64rem; gap: 5px; white-space: nowrap; overflow: hidden; }
+  .card__meta > :nth-child(n + 4) { display: none; }   /* author · views */
+  .card__meta .by { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .card__actions { margin-top: 4px; gap: 6px; }
+  .card__actions .btn { flex: 1 1 100%; padding: 7px 8px; font-size: 0.74rem; min-height: 32px; }
+  .card__heart { width: 30px; height: 30px; top: 7px; right: 7px; }
+  .card__heart svg { width: 14px; height: 14px; }
+}
