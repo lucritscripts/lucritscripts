@@ -49,8 +49,34 @@ export async function libraryOnline() {
 }
 
 export async function fetchScripts() {
-  const res = await call("/api/scripts");
+  const res = await call("/api/scripts?limit=100");
   return res.ok ? res.data : [];
+}
+
+/**
+ * One page of the library, searched and sorted on the server.
+ *
+ * The site holds thousands of scripts, so nothing downloads all of them any
+ * more. `total` is how many matched, so a "Show 20 more" knows when to stop.
+ * Null on failure — the caller says "couldn't load" rather than "none".
+ */
+export async function searchLibrary({ q = "", game = "", category = "", author = "", sort = "", offset = 0, limit = 20 } = {}) {
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (game) p.set("game", game);
+  if (category) p.set("category", category);
+  if (author) p.set("author", author);
+  if (sort) p.set("sort", sort);
+  if (offset) p.set("offset", String(offset));
+  p.set("limit", String(limit));
+  const res = await call(`/api/scripts?${p}`);
+  return res.ok ? { data: res.data || [], total: Number(res.total ?? (res.data || []).length) } : null;
+}
+
+/** Site totals and every game with scripts: `{ total, views, data: [games] }`. */
+export async function fetchSummary() {
+  const res = await call("/api/scripts/summary");
+  return res.ok ? { total: res.total || 0, views: res.views || 0, games: res.data || [] } : null;
 }
 
 export async function fetchScript(id) {

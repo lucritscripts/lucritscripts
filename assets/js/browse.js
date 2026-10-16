@@ -8,8 +8,7 @@
 // work: the hash is kept in step, so #library and #game=<id> are shareable.
 
 import { createOverlay, esc, fmt } from "./pages.js";
-import { allGames, findGame, scriptsForGame, searchGames, gameArt, gameId } from "./games.js";
-import { totals as scriptTotals } from "./stats.js";
+import { allGames, findGame, searchGames, gameArt, gameId } from "./games.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -143,34 +142,50 @@ export function createGameLibrary({ getLibrary, onOpenGame, onPublish }) {
 /* ---------------------------------------------------------- game page */
 
 const SORTS = [
-  { id: "popular", label: "Most viewed" },
-  { id: "liked", label: "Most liked" },
-  { id: "rated", label: "Best rated" },
-  { id: "newest", label: "Newest" },
+  { id: "views", label: "Most viewed" },
+  { id: "likes", label: "Most liked" },
+  { id: "copies", label: "Most unlocked" },
+  { id: "new", label: "Newest" },
 ];
 
-/** Everything published for one game. */
-export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup }) {
+/**
+ * Everything published for one game — asked of the server 20 at a time, so a
+ * game with hundreds of scripts opens as fast as one with three.
+ */
+export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup, createScriptList, findScript }) {
   const overlay = createOverlay({ id: "game-page", label: "Game", wide: true });
   let current = null;
-  let sort = "popular";
-
-  function sortScripts(list) {
-    const t = (s) => scriptTotals(s.id);
-    const by = {
-      popular: (a, b) => t(b).views - t(a).views || t(b).copies - t(a).copies,
-      liked: (a, b) => t(b).likes - t(a).likes,
-      rated: (a, b) => (b.rating || 0) - (a.rating || 0) || t(b).likes - t(a).likes,
-      newest: (a, b) => String(b.added).localeCompare(String(a.added)),
-    }[sort];
-    return list.slice().sort(by);
-  }
+  let sort = "views";
+  const list = createScriptList({
+    params: () => ({ game: current, sort }),
+    onPaint: () => { if (overlay.isOpen) render(); },
+  });
 
   function render() {
     if (!current) return;
     const lib = getLibrary();
     const game = findGame(lib, current) || { id: current, name: current, scripts: 0, views: 0, likes: 0, thumbnail: "" };
-    const scripts = sortScripts(scriptsForGame(lib, current));
+    const n = list.loaded ? list.total : game.scripts;
+    const left = list.left();
+
+    let body;
+    if (list.items.length) {
+      body = `<div class="results__grid">${list.items.map((s) => cardMarkup(s)).join("")}</div>
+        ${left ? `<button class="btn btn--ghost results__more" type="button" data-game-more${list.loading ? " disabled" : ""}>
+          ${list.loading ? "Loading…" : `Show ${fmt(Math.min(20, left))} more <span class="results__left">(${fmt(left)} left)</span>`}
+        </button>` : ""}`;
+    } else if (!list.loaded || list.loading) {
+      body = `<p class="library__count">Loading scripts…</p>`;
+    } else if (list.failed) {
+      body = `<div class="empty empty--lg"><strong>Couldn't load these scripts.</strong>
+        <button class="btn btn--primary btn--sm" type="button" data-game-retry>Try again</button></div>`;
+    } else {
+      body = `<div class="empty empty--lg">
+             <strong>No scripts for ${esc(game.name)} yet.</strong>
+             <span>Publish the first one and every player searching this game finds your work at the top.</span>
+             <button class="btn btn--primary btn--sm" data-act="publish">Publish a script</button>
+           </div>`;
+    }
 
     overlay.body.innerHTML = `
       <div class="gamehead">
@@ -179,17 +194,15 @@ export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup
           <span class="sheet__eyebrow">Game</span>
           <h2>${esc(game.name)}</h2>
           <p class="gamehead__meta">
-            <span><b>${fmt(scripts.length)}</b> script${scripts.length === 1 ? "" : "s"}</span>
+            <span><b>${fmt(n)}</b> script${n === 1 ? "" : "s"}</span>
             <span class="dot" aria-hidden="true"></span>
             <span><b>${fmt(game.views)}</b> views</span>
-            <span class="dot" aria-hidden="true"></span>
-            <span><b>${fmt(game.likes)}</b> like${game.likes === 1 ? "" : "s"}</span>
           </p>
         </div>
         <button class="btn btn--ghost btn--sm gamehead__back" type="button" data-back>All games</button>
       </div>
 
-      ${scripts.length > 1 ? `
+      ${n > 1 ? `
         <div class="library__controls">
           <label class="sort">
             <span class="sort__label">Sort</span>
@@ -199,17 +212,11 @@ export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup
           </label>
         </div>` : ""}
 
-      ${scripts.length
-        ? `<div class="results__grid">${scripts.map((s) => cardMarkup(s)).join("")}</div>`
-        : `<div class="empty empty--lg">
-             <strong>No scripts for ${esc(game.name)} yet.</strong>
-             <span>Publish the first one and every player searching this game finds your work at the top.</span>
-             <button class="btn btn--primary btn--sm" data-act="publish">Publish a script</button>
-           </div>`}`;
+      ${body}`;
 
     $(".sort__select", overlay.body)?.addEventListener("change", (e) => {
       sort = e.target.value;
-      render();
+      list.reset();
     });
   }
 
@@ -217,19 +224,24 @@ export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup
     if (e.target.closest("[data-close]")) { setHash(""); return; }
     if (e.target.closest("[data-back]")) { overlay.close(); document.dispatchEvent(new CustomEvent("lucrit:library")); return; }
     if (e.target.closest('[data-act="publish"]')) { overlay.close(); onPublish?.(); return; }
+    if (e.target.closest("[data-game-more]")) { list.more(); return; }
+    if (e.target.closest("[data-game-retry]")) { list.reset(); return; }
 
     const card = e.target.closest(".card");
     if (!card) return;
-    const script = getLibrary().find((s) => s.id === card.dataset.id);
+    const script = findScript(card.dataset.id);
     if (script) onOpenScript?.(script);
   });
 
   return {
     open(id) {
-      current = gameId(id) === id ? id : gameId(id);
-      sort = "popular";
+      const next = gameId(id) === id ? id : gameId(id);
+      const same = next === current && list.loaded;
+      current = next;
+      if (!same) { sort = "views"; list.items = []; list.loaded = false; }
       overlay.open();
       render();
+      if (!same) list.reset();
       setHash(`game=${current}`);
     },
     close: () => { overlay.close(); setHash(""); },
@@ -244,6 +256,7 @@ export function createGamePage({ getLibrary, onOpenScript, onPublish, cardMarkup
      */
     hide: () => overlay.close(),
     refresh() { if (overlay.isOpen) render(); },
+    reload() { if (current) list.reset(); },
     get isOpen() { return overlay.isOpen; },
     get game() { return current; },
   };

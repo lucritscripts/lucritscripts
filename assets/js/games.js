@@ -30,6 +30,23 @@ const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").tr
  * order — so the visible tiles fill with real content as the site grows and
  * fall back to recognisable names while it is still empty.
  */
+/**
+ * Per-game counts from the server (/api/scripts/summary).
+ *
+ * The browser only holds a page of scripts now, so counting the local cache
+ * would undercount every game once the site is big. When the server has
+ * answered, its numbers win; the local cache only adds games it doesn't know
+ * yet (something published a moment ago, before the summary refreshes).
+ */
+let serverGames = null;
+const gameListeners = new Set();
+export function onGamesChange(fn) { gameListeners.add(fn); return () => gameListeners.delete(fn); }
+export function setServerGames(list) {
+  serverGames = Array.isArray(list) ? list : null;
+  for (const fn of gameListeners) fn();
+}
+export function hasServerGames() { return Boolean(serverGames); }
+
 export function allGames(library = []) {
   const byId = new Map();
 
@@ -40,10 +57,25 @@ export function allGames(library = []) {
     });
   });
 
+  const known = new Set();
+  for (const sg of serverGames || []) {
+    const id = gameId(sg.id || sg.name);
+    known.add(id);
+    const g = byId.get(id) || {
+      id, name: sg.name, rank: POPULAR_GAMES.length + byId.size, curated: false,
+      scripts: 0, views: 0, likes: 0, thumbnail: "",
+    };
+    g.scripts = sg.scripts || 0;
+    g.views = sg.views || 0;
+    g.thumbnail = sg.thumbnail || g.thumbnail;
+    byId.set(id, g);
+  }
+
   for (const s of library) {
     const name = String(s.game || "").trim();
     if (!name) continue;
     const id = gameId(name);
+    if (known.has(id)) continue;
 
     if (!byId.has(id)) {
       byId.set(id, {
@@ -55,8 +87,8 @@ export function allGames(library = []) {
     const g = byId.get(id);
     const t = scriptTotals(s.id);
     g.scripts += 1;
-    g.views += t.views;
-    g.likes += t.likes;
+    g.views += s.views ?? t.views;
+    g.likes += s.likes ?? t.likes;
     if (!g.thumbnail && s.thumbnail) g.thumbnail = s.thumbnail;
   }
 

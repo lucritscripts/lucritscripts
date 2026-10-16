@@ -5,8 +5,10 @@ import { SmoothScroll } from "./engine/scroll.js";
 import {
   createLibraryPanel, buildChapters, buildChrome, createChoreography,
   CHAPTERS, library, onLibraryChange, removeScript, refreshLibrary, cardMarkup,
+  createScriptList, findScript, onScriptsMutated, scriptsMutated, queryScripts,
 } from "./ui.js";
 import { createGameLibrary, createGamePage } from "./browse.js";
+import { onGamesChange } from "./games.js";
 import {
   createAuth, createDashboard, createInfoPage, createScriptPage, toast,
 } from "./pages.js";
@@ -102,9 +104,35 @@ const scriptPage = createScriptPage({
 // suggestions once it does.
 onLibraryChange(() => scriptPage.refresh());
 
+/**
+ * Your own scripts, asked for by author.
+ *
+ * The cached library is only the newest page of the site, so filtering it for
+ * "mine" would drop anything you published a while ago once the site is big.
+ * The dashboard and My Scripts read this instead (plus anything in the cache,
+ * which covers a publish from a moment ago).
+ */
+let myScripts = [];
+async function loadMyScripts() {
+  const me = account.session?.id;
+  if (!me) { myScripts = []; return; }
+  const res = await queryScripts({ author: me, sort: "new", limit: 200 }).catch(() => null);
+  if (!res || account.session?.id !== me) return;
+  myScripts = res.data;
+  dashboard.refresh();
+  mine.refresh();
+}
+function publishedBy(user) {
+  if (!user) return [];
+  const out = new Map();
+  for (const s of library) if (s.authorId === user.id) out.set(s.id, s);
+  if (user.id === account.session?.id) for (const s of myScripts) if (!out.has(s.id)) out.set(s.id, s);
+  return [...out.values()];
+}
+
 const dashboard = createDashboard({
   onRequireAuth: () => auth.open("signup"),
-  getPublishes: (user) => library.filter((s) => s.authorId === user.id),
+  getPublishes: (user) => publishedBy(user),
   onOpenScript: (s) => openScript(s),
   onDeleteScript: async (s) => {
     // Remove it where it actually lives, then from the cached list. Doing only
@@ -113,7 +141,7 @@ const dashboard = createDashboard({
     if (res.ok || res.absent) removeScript(s.id);
     else toast(res.error || "Couldn't delete that", "warn");
   },
-  getScript: (id) => library.find((s) => s.id === id),
+  getScript: (id) => findScript(id),
   onOpenDraft: (id) => generator.openDraft(getDraft(account.session?.id, id)),
   onGenerate: () => generator.open(),
   onUnheart: (id) => toggleSaved(account.session?.id, id),
@@ -177,7 +205,7 @@ const adminPage = createAdminPage({
   // An admin action can take a script down, put one back, or delete an account
   // along with everything it published. The cached library knows none of that,
   // so it is refetched rather than patched.
-  onChanged: () => { refreshLibrary(); },
+  onChanged: () => { refreshLibrary(); scriptsMutated(); },
 });
 
 /**
@@ -259,7 +287,7 @@ const router = createRouter({
   async creation({ creator, slug }) {
     closeRoutedPages("creation");
     const id = "s_" + String(slug).replace(/^s_/, "");
-    const known = library.find((x) => x.id === id);
+    const known = findScript(id);
 
     setTitle(known ? known.title : "Script");
     const script = known ? (scriptPage.open(known), known) : await scriptPage.openById(id);
@@ -381,14 +409,14 @@ const generator = createGenerator({
 /* ------------------------------------------------------------ my scripts */
 
 const mine = createMyScripts({
-  getPublished: (user) => library.filter((s) => s.authorId === user.id),
+  getPublished: (user) => publishedBy(user),
   onContinue: (id) => generator.openDraft(getDraft(account.session?.id, id)),
   onPublishDraft: (id) => {
     const draft = getDraft(account.session?.id, id);
     if (draft) sendToPublishForm(draft);
   },
   onOpenScript: (id) => {
-    const s = library.find((x) => x.id === id);
+    const s = findScript(id);
     if (s) openScript(s);
   },
   onGenerate: () => generator.open(),
@@ -402,7 +430,11 @@ const gamePage = createGamePage({
   onOpenScript: (s) => openScript(s),
   onPublish: () => jumpTo("submit"),
   cardMarkup,
+  createScriptList,
+  findScript,
 });
+onScriptsMutated(() => gamePage.reload());
+onGamesChange(() => { gameLibrary.refresh(); gamePage.refresh(); });
 
 const gameLibrary = createGameLibrary({
   getLibrary: () => library,
@@ -502,6 +534,8 @@ function repaintShelf() {
   creatorPage.refresh();
 }
 account.onChange(repaintShelf);
+account.onChange(() => { loadMyScripts(); });
+onScriptsMutated(() => { loadMyScripts(); });
 onVaultChange(repaintShelf);
 
 // Dashboard's "publish a script" shortcut.
@@ -563,19 +597,32 @@ if (caps.mobile) {
   }, { passive: true });
 }
 
-// Phones draw the backdrop on a budget and step it down if the device still
-// can't keep up. Each rung is cheaper than the last; the final rung freezes
-// the world on its current frame so scrolling stays smooth on the weakest
-// phones. Desktop has a single uncapped rung.
+// The backdrop is drawn on a budget everywhere, and steps down if the machine
+// still can't keep up. Each rung is cheaper than the last.
+//
+// Phones: the final rung freezes the world on its current frame so scrolling
+// stays smooth on the weakest phones.
+//
+// Desktop (Oct 2026, "it's making my computer lag"): it used to draw at the
+// monitor's full refresh rate — 144 times a second on a gaming screen — at up
+// to 2x resolution, for a soft blurred background. Now it is capped at 30 fps,
+// drops to 8 fps while the window isn't focused, and if frames still land late
+// it lowers the resolution and turns off the frosted glass (html[data-lite]).
+// It never freezes on desktop.
 const RUNGS = caps.mobile
   ? [{ scale: 0.7, fps: 30 }, { scale: 0.5, fps: 24 }, { scale: 0.5, fps: 0 }]
-  : [{ scale: 0, fps: 0 }];
+  : [{ scale: 0, fps: 30 }, { scale: 0.75, fps: 30, lite: true }, { scale: 0.6, fps: 24, lite: true }];
+const BACKGROUND_FPS = 8;
 let rung = 0;
 const root = document.documentElement;
 root.dataset.fx = "0";
 let drawn = false;
 
-// Frame-time watchdog (phones only): how far apart renders actually land.
+let focused = document.hasFocus ? document.hasFocus() : true;
+window.addEventListener("focus", () => { focused = true; });
+window.addEventListener("blur", () => { focused = false; });
+
+// Frame-time watchdog: how far apart renders actually land.
 const WARMUP_MS = 2500;
 const SAMPLE = 45;
 let gaps = [];
@@ -586,31 +633,33 @@ function stepDown() {
   if (rung >= RUNGS.length - 1) return;
   rung += 1;
   root.dataset.fx = String(rung);
+  if (RUNGS[rung].lite) root.dataset.lite = "";
   // Resizing clears the canvas; redraw at once so the swap never flashes.
   if (world && RUNGS[rung].scale) { world.setScale(RUNGS[rung].scale); world.render(0); }
   gaps = [];
 }
 
-function watch(now) {
-  if (!caps.mobile || rung >= RUNGS.length - 1) return;
+function watch(now, target) {
+  if (rung >= RUNGS.length - 1) return;
   const gap = now - lastDraw;
   lastDraw = now;
-  // Long gaps are pauses (sheet open, tab hidden, first frame), not slowness.
-  if (gap > 400 || now - startedAt < WARMUP_MS) return;
+  // Long gaps are pauses (sheet open, tab hidden, first frame), not slowness;
+  // and the unfocused trickle isn't a measure of anything.
+  if (gap > 400 || now - startedAt < WARMUP_MS || target !== RUNGS[rung].fps) { gaps = []; return; }
   gaps.push(gap);
   if (gaps.length < SAMPLE) return;
   const avg = gaps.reduce((x, y) => x + y, 0) / gaps.length;
   gaps = [];
   // Overloaded when renders arrive at well under the rung's target rate.
-  if (avg > (1000 / RUNGS[rung].fps) * 1.5) stepDown();
+  if (avg > (1000 / target) * 1.5) stepDown();
 }
 
 function frame(now) {
   requestAnimationFrame(frame);
   if (hidden) { last = now; return; }
 
-  const { fps } = RUNGS[rung];
-  const frozen = caps.mobile && fps === 0;
+  const frozen = caps.mobile && RUNGS[rung].fps === 0;
+  const fps = !caps.mobile && !focused ? BACKGROUND_FPS : RUNGS[rung].fps;
   if (fps && now - last < 1000 / fps - 2) return;
 
   const dt = Math.min(0.05, (now - last) / 1000);
@@ -640,7 +689,7 @@ function frame(now) {
   // 3D world and the DOM chapters stay locked together at any page height.
   world.setProgress(choreography.toCameraProgress(smoothed));
   world.render(dt);
-  watch(now);
+  watch(now, fps);
 }
 
 requestAnimationFrame(frame);
@@ -719,8 +768,9 @@ refreshLibrary()
     // real URL on arrival, so anything already shared keeps landing right.
     const deep = /#script=([\w-]+)/.exec(location.hash);
     if (deep) {
-      const s = library.find((x) => x.id === deep[1]);
+      const s = findScript(deep[1]);
       if (s) openScript(s);
+      else scriptPage.openById(deep[1]);
     }
   })
   .catch(() => { /* offline or static hosting — the site still works */ });

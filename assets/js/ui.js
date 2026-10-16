@@ -10,8 +10,9 @@ import { esc, fmt, toast, createLeaderboard } from "./pages.js";
 import { totals as scriptTotals, onStatsChange } from "./stats.js";
 import {
   tileGames, searchGames, searchScripts, gameArt, allGames, gameId, findGame,
+  setServerGames, onGamesChange,
 } from "./games.js";
-import { libraryOnline, fetchScripts, fetchBoard } from "./library-api.js";
+import { libraryOnline, fetchScripts, fetchBoard, searchLibrary, fetchSummary } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 import { pathForCreator } from "./router.js";
 
@@ -81,14 +82,19 @@ export async function refreshLibrary() {
 
 export function addScript(script) {
   library.unshift(script);
+  rememberScripts([script]);
   libraryChanged();
+  scriptsMutated();
 }
 
 export function removeScript(id) {
   const i = library.findIndex((s) => s.id === id);
-  if (i < 0) return false;
-  library.splice(i, 1);
+  const had = i >= 0 || seen.has(id);
+  if (i >= 0) library.splice(i, 1);
+  seen.delete(id);
+  if (!had) return false;
   libraryChanged();
+  scriptsMutated();
   return true;
 }
 
@@ -195,6 +201,148 @@ function attachTilt(root, strength = 8) {
   });
 }
 
+/* ------------------------------------------------------- server paging */
+
+/**
+ * The site is built for thousands of scripts, so nothing lists "all of them"
+ * any more. Every grid asks for one page (20) of exactly what it shows —
+ * search, game, category, sort — and the server says how many matched in
+ * total. `library` above stays a small cache of the newest scripts for the
+ * things that only need a sample (suggestions, the assistant).
+ *
+ * Scripts that arrive through a page are remembered here, so a click on any
+ * card can find the object it was drawn from.
+ */
+export const PAGE_SIZE = 20;
+const seen = new Map();
+
+export function rememberScripts(list = []) {
+  for (const s of list) {
+    if (!s || !s.id) continue;
+    seen.set(s.id, s);
+    if ("unlockedFor" in s) noteWindow(s.id, s.unlockedFor);
+  }
+}
+
+/** Any script this page has shown, from whichever list showed it. */
+export function findScript(id) {
+  return library.find((s) => s.id === id) || seen.get(id) || null;
+}
+
+// Published, edited or deleted from this tab: every list starts over and the
+// totals are asked for again. (A plain cache refresh only repaints.)
+const mutationListeners = new Set();
+export function onScriptsMutated(fn) { mutationListeners.add(fn); return () => mutationListeners.delete(fn); }
+export function scriptsMutated() {
+  refreshSummary();
+  for (const fn of mutationListeners) fn();
+}
+
+/** Site totals from the server; null until it answers (or on static hosting). */
+let summary = null;
+const summaryListeners = new Set();
+export function onSummary(fn) { summaryListeners.add(fn); return () => summaryListeners.delete(fn); }
+export function siteSummary() { return summary; }
+let summaryInFlight = null;
+export function refreshSummary() {
+  if (summaryInFlight) return summaryInFlight;
+  summaryInFlight = (async () => {
+    try {
+      if (!(await libraryOnline())) return null;
+      const next = await fetchSummary();
+      if (next) {
+        summary = next;
+        setServerGames(next.games);
+        for (const fn of summaryListeners) fn(summary);
+      }
+      return summary;
+    } finally { summaryInFlight = null; }
+  })();
+  return summaryInFlight;
+}
+
+/** The same query run against the local cache — static hosting has no API. */
+function localQuery({ q = "", game = "", category = "", author = "", sort = "", offset = 0, limit = PAGE_SIZE }) {
+  let list = q ? searchScripts(library, q, 1e6) : library.slice();
+  if (game) list = list.filter((s) => gameId(s.game) === game);
+  if (category) list = list.filter((s) => s.category === category);
+  if (author) list = list.filter((s) => s.authorId === author);
+  const n = (s, k) => s[k] ?? scriptTotals(s.id)[k] ?? 0;
+  const by = {
+    views: (a, b) => n(b, "views") - n(a, "views"),
+    copies: (a, b) => n(b, "copies") - n(a, "copies") || n(b, "views") - n(a, "views"),
+    likes: (a, b) => n(b, "likes") - n(a, "likes"),
+    new: (a, b) => String(b.added || "").localeCompare(String(a.added || "")),
+  }[sort];
+  if (by) list = list.slice().sort(by);
+  return { data: list.slice(offset, offset + limit), total: list.length };
+}
+
+export async function queryScripts(params) {
+  if (await libraryOnline()) return searchLibrary(params);
+  return localQuery(params);
+}
+
+/**
+ * One paged list of scripts. `params()` says what it shows; `reset()` starts
+ * again from page one, `more()` appends the next page. Responses that arrive
+ * after the question changed are dropped, so fast typing can't paint an old
+ * search over a new one.
+ */
+export function createScriptList({ params, onPaint, pageSize = PAGE_SIZE }) {
+  const list = { items: [], total: 0, loading: false, failed: false, loaded: false };
+  let seq = 0;
+
+  async function load(append) {
+    const mine = ++seq;
+    list.loading = true;
+    list.failed = false;
+    onPaint?.(list);
+    const offset = append ? list.items.length : 0;
+    let res = null;
+    try { res = await queryScripts({ ...params(), offset, limit: pageSize }); } catch { res = null; }
+    if (mine !== seq) return;
+    list.loading = false;
+    list.loaded = true;
+    if (!res) { list.failed = true; if (!append) { list.items = []; list.total = 0; } }
+    else {
+      rememberScripts(res.data);
+      list.items = append ? list.items.concat(res.data) : res.data;
+      list.total = Math.max(res.total, list.items.length);
+    }
+    onPaint?.(list);
+  }
+
+  list.reset = () => load(false);
+  list.more = () => { if (!list.loading && list.items.length < list.total) load(true); };
+  list.left = () => Math.max(0, list.total - list.items.length);
+  return list;
+}
+
+/** "Show 20 more" for a list, or nothing when it is all on screen. */
+function moreMarkup(list, attr = "data-more-results") {
+  const left = list.left();
+  if (!left) return "";
+  return `<button class="btn btn--ghost results__more" type="button" ${attr}${list.loading ? " disabled" : ""}>
+      ${list.loading ? "Loading…" : `Show ${fmt(Math.min(PAGE_SIZE, left))} more <span class="results__left">(${fmt(left)} left)</span>`}
+    </button>`;
+}
+
+const SKELETON = `<div class="results__grid results__grid--loading">${
+  '<div class="card card--skeleton" aria-hidden="true"></div>'.repeat(4)}</div>`;
+
+const LIST_SORTS = [
+  { id: "", label: "Newest", search: "Best match" },
+  { id: "views", label: "Most viewed" },
+  { id: "copies", label: "Most unlocked" },
+  { id: "likes", label: "Most liked" },
+];
+
+function sortOptions(current, searching = false) {
+  return LIST_SORTS.map((s) =>
+    `<option value="${s.id}"${s.id === current ? " selected" : ""}>${esc(searching && s.search ? s.search : s.label)}</option>`).join("");
+}
+
 /* ============================================================
    Search
    ============================================================ */
@@ -202,9 +350,10 @@ function attachTilt(root, strength = 8) {
 /**
  * Find a script.
  *
- * This used to open on a wall of game tiles, most of them reading "No scripts
- * yet" — a directory of absence. People come here for scripts, so scripts are
- * what it shows; the game is a filter above them, not a gate in front of them.
+ * Shows the newest 20 and nothing more until asked: with thousands of scripts
+ * on the site, the rest are found by searching, picking a game, or "Show 20
+ * more". Every one of those is answered by the server, so a search reaches a
+ * script published two years ago just as well as one from this morning.
  *
  * There is no category filter here on purpose: every card already wears its
  * category, which is enough to scan by. Category still narrows the list when
@@ -212,7 +361,7 @@ function attachTilt(root, strength = 8) {
  * count line then offers a way back out.
  */
 export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLibrary }) {
-  const state = { query: "", cat: "", game: "", limit: 12 };
+  const state = { query: "", cat: "", game: "", sort: "" };
   const root = el("div", { class: "library", id });
 
   root.innerHTML = `
@@ -231,6 +380,10 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
         <span class="sr-only">Filter by game</span>
         <select class="library__game" data-gamepick></select>
       </label>
+      <label class="library__sortpick">
+        <span class="sr-only">Sort scripts</span>
+        <select class="library__sort" data-sortpick></select>
+      </label>
       <button class="btn btn--ghost btn--xs library__all" type="button" data-more>Browse all games</button>
     </div>
 
@@ -240,8 +393,14 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
   const input = $(".library__input", root);
   const clear = $(".library__clear", root);
   const gamePick = $("[data-gamepick]", root);
+  const sortPick = $("[data-sortpick]", root);
   const results = $(".library__results", root);
   const count = $(".library__count", root);
+
+  const list = createScriptList({
+    params: () => ({ q: state.query.trim(), game: state.game, category: state.cat, sort: state.sort }),
+    onPaint: () => paint(),
+  });
 
   /* ------------------------------------------------------------ views */
 
@@ -260,36 +419,38 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
     const option = (g) =>
       `<option value="${esc(g.id)}"${g.id === state.game ? " selected" : ""}>` +
-      `${esc(g.name)}${g.scripts ? ` (${g.scripts})` : ""}</option>`;
+      `${esc(g.name)}${g.scripts ? ` (${fmt(g.scripts)})` : ""}</option>`;
 
     gamePick.innerHTML = `
       <option value=""${state.game ? "" : " selected"}>All games</option>
       ${withScripts.length ? `<optgroup label="Has scripts">${withScripts.map(option).join("")}</optgroup>` : ""}
       ${empty.length ? `<optgroup label="Nothing published yet">${empty.map(option).join("")}</optgroup>` : ""}`;
+    sortPick.innerHTML = sortOptions(state.sort, Boolean(state.query.trim()));
   }
 
-  /** Everything currently published, narrowed by whatever filters are on. */
-  function filtered() {
-    return library.filter((s) =>
-      (!state.game || gameId(s.game) === state.game) &&
-      (!state.cat || s.category === state.cat));
+  function grid() {
+    if (!list.items.length) return "";
+    return `<div class="results__grid">${list.items.map((s) => cardMarkup(s)).join("")}</div>` + moreMarkup(list);
   }
 
   function scriptsView() {
-    const list = filtered();
     const cat = state.cat ? categoryOf(state.cat) : null;
     const game = state.game ? findGame(library, state.game) : null;
+    const n = list.total;
 
-    const bits = [`${list.length} script${list.length === 1 ? "" : "s"}`];
+    const bits = [list.items.length && list.items.length < n
+      ? `Showing ${fmt(list.items.length)} of ${fmt(n)} scripts`
+      : `${fmt(n)} script${n === 1 ? "" : "s"}`];
     if (cat) bits.push(`in ${cat.label}`);
     if (game) bits.push(`for ${game.name}`);
 
-    count.innerHTML = `${esc(bits.join(" "))}` +
+    count.innerHTML = (list.loaded ? esc(bits.join(" ")) : "Loading scripts…") +
       (cat || game ? ` <button class="library__undo" type="button" data-clear-filters>clear</button>` : "");
 
-    if (list.length) {
-      results.innerHTML = `<div class="results__grid">${list.slice(0, state.limit).map((s) => cardMarkup(s)).join("")}</div>`
-        + moreButton(list.length);
+    if (list.items.length) { results.innerHTML = grid(); return; }
+    if (!list.loaded || list.loading) { results.innerHTML = SKELETON; return; }
+    if (list.failed) {
+      results.innerHTML = emptyState("Couldn't load scripts.", "Check your connection and try again.", true);
       return;
     }
 
@@ -315,12 +476,14 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
   function searchView() {
     const q = state.query.trim();
-    const games = searchGames(library, q, 12);
-    const scripts = searchScripts(library, q);
+    const games = state.game ? [] : searchGames(library, q, 12);
+    const n = list.total;
 
-    count.textContent = `${games.length} game${games.length === 1 ? "" : "s"} · ${scripts.length} script${scripts.length === 1 ? "" : "s"}`;
+    count.textContent = list.loaded
+      ? `${games.length} game${games.length === 1 ? "" : "s"} · ${fmt(n)} script${n === 1 ? "" : "s"}`
+      : "Searching…";
 
-    if (!games.length && !scripts.length) {
+    if (list.loaded && !list.loading && !games.length && !list.items.length) {
       results.innerHTML = emptyState(
         `Nothing matched “${esc(q)}”.`,
         "Search covers every game on the site and every published script — try a shorter word."
@@ -332,57 +495,52 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
       ${games.length ? `
         <h3 class="results__head">Games</h3>
         <div class="games games--compact">${games.map(gameTileMarkup).join("")}</div>` : ""}
-      ${scripts.length ? `
+      ${list.items.length ? `
         <h3 class="results__head">Scripts</h3>
-        <div class="results__grid">${scripts.slice(0, state.limit).map((s) => cardMarkup(s)).join("")}</div>
-        ${moreButton(scripts.length)}` : ""}`;
+        ${grid()}` : (list.loading || !list.loaded ? SKELETON : "")}`;
   }
 
-  /*
-   * The results used to sit in their own small scrolling box. On a phone that
-   * box swallowed the swipe — you scrolled the list, hit its end, and the page
-   * wouldn't move. Results now flow with the page, a page at a time.
-   */
-  function moreButton(total) {
-    const left = total - state.limit;
-    return left > 0
-      ? `<button class="btn btn--ghost results__more" type="button" data-more-results>
-           Show ${Math.min(RESULTS_PAGE, left)} more <span class="results__left">(${left} left)</span>
-         </button>`
-      : "";
-  }
-
-  let viewKey = "";
-  function render() {
+  function paint() {
     clear.hidden = !state.query;
-    paintGameMenu();
-
-    // A new search or filter starts back at the first page.
-    const key = `${state.query.trim()}|${state.game}|${state.cat}`;
-    if (key !== viewKey) { viewKey = key; state.limit = RESULTS_PAGE; }
-
     if (state.query.trim()) searchView();
     else scriptsView();
   }
 
-  function emptyState(title, line) {
+  /** Something about the question changed: new menu, page one. */
+  function render() {
+    paintGameMenu();
+    paint();
+  }
+  function restart() { render(); list.reset(); }
+
+  function emptyState(title, line, retry = false) {
     return `
       <div class="empty empty--lg">
         <strong>${title}</strong>
         <span>${line}</span>
-        <button class="btn btn--primary btn--sm" data-act="publish">Publish a script</button>
+        ${retry
+          ? `<button class="btn btn--primary btn--sm" type="button" data-retry>Try again</button>`
+          : `<button class="btn btn--primary btn--sm" data-act="publish">Publish a script</button>`}
       </div>`;
   }
 
   /* ---------------------------------------------------------- events */
 
-  input.addEventListener("input", () => { state.query = input.value; render(); });
+  // Typing waits for a pause before asking the server; a filter is instant.
+  let typing = 0;
+  input.addEventListener("input", () => {
+    state.query = input.value;
+    clear.hidden = !state.query;
+    clearTimeout(typing);
+    typing = setTimeout(restart, 250);
+  });
 
   clear.addEventListener("click", () => {
     input.value = "";
     state.query = "";
     input.focus();
-    render();
+    clearTimeout(typing);
+    restart();
   });
 
   gamePick.addEventListener("change", () => {
@@ -390,20 +548,19 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
     // A search would hide the very list the picker just filtered.
     state.query = "";
     input.value = "";
-    render();
+    restart();
   });
 
+  sortPick.addEventListener("change", () => { state.sort = sortPick.value; restart(); });
+
   root.addEventListener("click", (e) => {
-    if (e.target.closest("[data-more-results]")) {
-      state.limit += RESULTS_PAGE;
-      if (state.query.trim()) searchView(); else scriptsView();
-      return;
-    }
+    if (e.target.closest("[data-more-results]")) { list.more(); return; }
+    if (e.target.closest("[data-retry]")) { list.reset(); return; }
     if (e.target.closest("[data-more]")) { onOpenLibrary?.(); return; }
     if (e.target.closest("[data-clear-filters]")) {
       state.cat = "";
       state.game = "";
-      render();
+      restart();
       return;
     }
     if (e.target.closest('[data-act="publish"]')) { onPublish?.(); return; }
@@ -413,33 +570,35 @@ export function createLibraryPanel({ id, onOpen, onPublish, onOpenGame, onOpenLi
 
     const card = e.target.closest(".card");
     if (card) {
-      const script = library.find((s) => s.id === card.dataset.id);
+      const script = findScript(card.dataset.id);
       if (script) onOpen?.(script);
     }
   });
 
   attachTilt(results, 6);
-  onLibraryChange(render);
-  onStatsChange(() => { if (!state.query) render(); });
-  render();
+  onLibraryChange(paint);
+  onGamesChange(render);
+  onScriptsMutated(restart);
+  onStatsChange(() => { if (!state.query) paint(); });
+  restart();
 
   return {
     node: root,
     focus: () => input.focus(),
-    search(q) { state.cat = ""; state.query = q; input.value = q; render(); },
+    search(q) { state.cat = ""; state.query = q; input.value = q; restart(); },
     setCategory(cat) {
       state.query = "";
       input.value = "";
       state.cat = cat || "";
-      render();
+      restart();
     },
     setGame(gameKey) {
       state.query = "";
       input.value = "";
       state.game = gameKey || "";
-      render();
+      restart();
     },
-    refresh: render,
+    refresh: paint,
   };
 }
 
@@ -468,7 +627,6 @@ export const CHAPTERS = [
   { key: "hero",       label: "Origin",     len: 170 },
   { key: "universe",   label: "The Library",len: 213 },
   { key: "search",     label: "Search",     len: 190 },
-  { key: "vault",      label: "The Vault",  len: 321 },
   { key: "categories", label: "Worlds",     len: 381 },
   { key: "featured",   label: "Trending",   len: 213 },
   { key: "community",  label: "Community",  len: 213 },
@@ -557,22 +715,13 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         </header>
       </div>`),
 
-    chapter("vault", "04 / The Vault", CHAPTERS[3].len, `
-      <div class="panel">
-        <header class="panel__head">
-          <h2>The vault</h2>
-          <p>Every module, open and readable. No paste-and-pray.</p>
-        </header>
-        <div class="vault__grid" data-grid="vault"></div>
-      </div>`),
-
-    chapter("categories", "05 / Worlds", CHAPTERS[4].len, `
+    chapter("categories", "04 / Worlds", CHAPTERS[3].len, `
       <div class="worlds">
         <div class="worlds__rail" role="tablist" aria-label="Script categories"></div>
         <div class="worlds__stage"></div>
       </div>`),
 
-    chapter("featured", "06 / Trending", CHAPTERS[5].len, `
+    chapter("featured", "05 / Trending", CHAPTERS[4].len, `
       <div class="panel">
         <header class="panel__head">
           <h2>Trending this week</h2>
@@ -581,7 +730,7 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         <div class="featured__grid" data-grid="featured"></div>
       </div>`),
 
-    chapter("community", "07 / Community", CHAPTERS[6].len, `
+    chapter("community", "06 / Community", CHAPTERS[5].len, `
       <div class="panel panel--wide">
         <header class="panel__head">
           <h2>The leaderboard</h2>
@@ -590,10 +739,10 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         <div id="board-mount"></div>
       </div>`),
 
-    chapter("submit", "08 / Publish", CHAPTERS[7].len, `
+    chapter("submit", "07 / Publish", CHAPTERS[6].len, `
       <div class="panel panel--wide" id="publish-mount"></div>`),
 
-    chapter("finale", "09 / Begin", CHAPTERS[8].len, `
+    chapter("finale", "08 / Begin", CHAPTERS[7].len, `
       <div class="finale">
         <h2 class="finale__title">Build something great.</h2>
         <p class="finale__sub">Your next Roblox game starts here.</p>
@@ -644,41 +793,46 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
   const publish = publishForm || null;
   if (publish) $("#publish-mount", content).appendChild(publish.node);
 
-  /* ---- grids + stats react to the library ---- */
-  function paintGrids() {
+  /* ---- stats: the server's totals, not a count of what this tab holds ---- */
+  function paintStats() {
     const stats = $("[data-stats]", content);
-    const total = library.length;
-    const views = library.reduce((a, s) => a + (s.views || 0), 0);
+    const sum = siteSummary();
+    const total = sum ? sum.total : library.length;
+    const views = sum ? sum.views : library.reduce((a, s) => a + (s.views || 0), 0);
     stats.innerHTML = `
-      <div><strong>${total}</strong><span>scripts</span></div>
+      <div><strong>${fmt(total)}</strong><span>scripts</span></div>
       <div><strong>${CATEGORIES.length}</strong><span>categories</span></div>
       <div><strong>${fmt(views)}</strong><span>views</span></div>`;
-
-    const vault = $('[data-grid="vault"]', content);
-    const featured = $('[data-grid="featured"]', content);
-
-    const emptyBlock = (title, line) => `
-      <div class="empty empty--lg">
-        <strong>${title}</strong>
-        <span>${line}</span>
-        <button class="btn btn--primary btn--sm" data-jump="submit">Publish a script</button>
-      </div>`;
-
-    const top = library.slice().sort((a, b) => b.copies - a.copies);
-    vault.innerHTML = top.length
-      ? top.slice(0, 8).map((s) => cardMarkup(s)).join("")
-      : emptyBlock("Nothing in the vault yet.", "Published scripts land here, newest and most-unlocked first.");
-
-    featured.innerHTML = top.length
-      ? top.slice(0, 6).map((s) => cardMarkup(s, { large: true })).join("")
-      : emptyBlock("No trending scripts yet.", "Once scripts start getting unlocked, the most popular show up here.");
   }
 
-  onLibraryChange(paintGrids);
-  paintGrids();
+  const emptyBlock = (title, line) => `
+    <div class="empty empty--lg">
+      <strong>${title}</strong>
+      <span>${line}</span>
+      <button class="btn btn--primary btn--sm" data-jump="submit">Publish a script</button>
+    </div>`;
 
-  attachTilt($('[data-grid="vault"]', content), 9);
-  attachTilt($('[data-grid="featured"]', content), 7);
+  /* ---- trending: the most-unlocked six, asked of the server ---- */
+  const featured = $('[data-grid="featured"]', content);
+  const trending = createScriptList({ params: () => ({ sort: "copies" }), pageSize: 6, onPaint: paintTrending });
+  function paintTrending() {
+    featured.innerHTML = trending.items.length
+      ? trending.items.map((s) => cardMarkup(s, { large: true })).join("")
+      : trending.loaded && !trending.loading
+        ? emptyBlock("No trending scripts yet.", "Once scripts start getting unlocked, the most popular show up here.")
+        : "";
+  }
+
+  function paintGrids() { paintStats(); paintTrending(); }
+
+  onLibraryChange(paintGrids);
+  onSummary(paintStats);
+  onScriptsMutated(() => trending.reset());
+  paintStats();
+  trending.reset();
+  refreshSummary();
+
+  attachTilt(featured, 7);
 
   /* ---- interactions ---- */
   content.addEventListener("click", (e) => {
@@ -697,7 +851,7 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
 
     const card = e.target.closest(".card");
     if (card && !e.target.closest(".library__results")) {
-      const s = library.find((x) => x.id === card.dataset.id);
+      const s = findScript(card.dataset.id);
       if (s) onOpenScript(s);
     }
   });
@@ -861,7 +1015,6 @@ export function buildChrome({ onJump, onSearch, onDashboard, onAuth, onLibrary, 
    ============================================================ */
 
 const FLOW = true;
-const RESULTS_PAGE = 12;   // sections flow down the page; see buildChapters
 
 export function createChoreography({ chrome, onCategoryIndex }) {
   const sections = $$(".chapter").map((node) => ({
