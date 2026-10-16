@@ -65,11 +65,17 @@ async function routes(ctx, seedStore = null) {
   return page;
 }
 const msg = (p) => p.locator("#messageText").textContent();
+// The page's CSP has no 'unsafe-eval', which waitForFunction can trip; poll instead.
+async function until(p, fn, ms = 15000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { if (await p.evaluate(fn).catch(() => false)) return; await p.waitForTimeout(150); }
+  throw new Error("timed out: " + fn.toString().slice(0, 90));
+}
 
 console.log("\nCheckpoint one");
 let { ctx, page } = await newPage();
 await page.goto(`${AT}/getkey`);
-await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "Checkpoint One");
+await until(page, () => document.querySelector("#messageText")?.textContent === "Checkpoint One");
 check("starts at Checkpoint One", (await msg(page)) === "Checkpoint One");
 check("Firebase initialised with the smh-keysystem config",
   await page.evaluate(() => window.__fbConfig?.projectId === "smh-keysystem" && !!window.__fbConfig?.appId));
@@ -94,7 +100,7 @@ await fresh.ctx.close();
 
 console.log("\nBack from LootLabs step 1");
 await page.goto(`${AT}/getkey?step=1`, { referer: "https://lootdest.org/" });
-await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "Final Checkpoint");
+await until(page, () => document.querySelector("#messageText")?.textContent === "Final Checkpoint");
 check("shows Final Checkpoint", (await msg(page)) === "Final Checkpoint");
 check("progress shows checkpoint 1 done", await page.locator('#steps li.is-done').count() === 1);
 await page.locator("#finishBtn").click();
@@ -103,7 +109,7 @@ check("Get Key → LootLabs key step 2", page.url() === "https://lootdest.org/s?
 
 console.log("\nBack from LootLabs step 2");
 await page.goto(`${AT}/getkey?step=2`, { referer: "https://links.lootlabs.gg/" });
-await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
 check("shows Your Key is Ready", (await msg(page)) === "Your Key is Ready");
 await page.evaluate(() => localStorage.setItem("lucrit:human", "keep-me"));
 await page.locator("#finishBtn").click();
@@ -125,7 +131,7 @@ await page.locator("#keyActiveSection").waitFor({ state: "visible" });
 check("shows the existing key instead of starting again", (await page.locator("#keyBox").textContent()).trim() === key);
 await page.evaluate((k) => { const s = JSON.parse(localStorage.getItem("__fs_test")); s["keys/" + k].expiresAt = Date.now() - 1; localStorage.setItem("__fs_test", JSON.stringify(s)); }, key);
 await page.reload();
-await page.waitForFunction(() => document.querySelector("#messageText")?.textContent === "Checkpoint One");
+await until(page, () => document.querySelector("#messageText")?.textContent === "Checkpoint One");
 check("an expired key sends you back to checkpoint one", (await msg(page)) === "Checkpoint One");
 await ctx.close();
 
