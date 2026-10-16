@@ -1694,6 +1694,50 @@ async function handleAdminLog(request, env) {
 const GETKEY_FORMAT = /^LUCRIT-[A-HJ-NP-Z2-9]{16}$/;
 const GETKEY_MAX_MS = 8 * 3600 * 1000;
 
+/**
+ * Get Key through Linkvertise. LootLabs keys use the template's referrer check;
+ * Linkvertise steps are checked here instead — the anti-bypass hash is verified
+ * by /api/unlock/lv/<click> before a step counts, and step 2 can't be started
+ * until step 1 of the same key flow (gk) is done.
+ */
+const GK_TTL_SEC = 3 * 3600;
+
+async function handleGetKeyLvGo(request, env) {
+  const ip = clientIp(request);
+  if (!(await underLimit(env, `gklv:${ip}`, 30, 600)))
+    return bad(429, "Too many tries from this connection. Try again shortly.");
+  if (!linkvertiseFlowOn(env)) return bad(503, "Linkvertise isn't switched on yet.");
+  const body = await request.json().catch(() => ({}));
+  const step = Number(body.step) === 2 ? 2 : 1;
+  let gk = /^[a-f0-9]{32}$/.test(String(body.gk || "")) ? String(body.gk) : "";
+  if (step === 2) {
+    const state = gk ? await cacheGet(env, "gk:" + gk) : null;
+    if (!state?.s1) return bad(400, "Do checkpoint one first.", { restart: true });
+  } else {
+    gk = randomHex(16);
+    await cachePut(env, "gk:" + gk, {}, GK_TTL_SEC);
+  }
+  const clickId = randomHex(16);
+  const now = nowSec();
+  await env.DB.prepare(
+    `INSERT INTO unlock_clicks (click_id, script_id, subject, provider, done, at, expires)
+     VALUES (?, '', ?, 'linkvertise', 0, ?, ?)`
+  ).bind(clickId, `getkey:${gk}:${step}`, now, now + CLICK_TTL_SEC).run();
+  const site = env.SITE_URL || new URL(request.url).origin;
+  const url = linkvertiseLink(env, `${site}/api/unlock/lv/${clickId}`, clickId.replace(/\D/g, "").slice(0, 6) || "1");
+  return ok({ data: { url, gk, step } });
+}
+
+async function handleGetKeyLvCheck(request, env) {
+  const url = new URL(request.url);
+  const gk = String(url.searchParams.get("gk") || "");
+  const step = url.searchParams.get("step") === "2" ? 2 : 1;
+  if (!/^[a-f0-9]{32}$/.test(gk)) return ok({ data: { verified: false } });
+  const state = (await cacheGet(env, "gk:" + gk)) || {};
+  const verified = step === 2 ? Boolean(state.s1 && state.s2) : Boolean(state.s1);
+  return ok({ data: { verified, step } });
+}
+
 async function handleMyKeyGet(request, env) {
   const user = await currentUser(request, env);
   if (!user) return ok({ data: null, signedIn: false });
@@ -2131,10 +2175,11 @@ async function linkvertiseNote(env, key, info) {
 async function handleLinkvertiseReturn(request, env, { id: clickId }) {
   const url = new URL(request.url);
   const click = await env.DB.prepare(
-    `SELECT script_id, provider, done FROM unlock_clicks WHERE click_id = ? AND expires > ?`
+    `SELECT script_id, subject, provider, done FROM unlock_clicks WHERE click_id = ? AND expires > ?`
   ).bind(clickId, nowSec()).first();
   if (!click || click.provider !== "linkvertise")
     return goTo("/?lv=expired");
+  const subject = String(click.subject || "");
 
   if (!click.done && unlockProviders(env).includes("linkvertise")) {
     // `hash` normally; dig it out of the raw query too, in case it arrives
@@ -2146,6 +2191,23 @@ async function handleLinkvertiseReturn(request, env, { id: clickId }) {
         .bind(clickId).run();
     }
   }
+  // A two-step script unlock: back to its page, which checks the step itself.
+  if (subject.startsWith("flow:")) return goTo("/unlock/linkvertise");
+
+  // A Get Key checkpoint: record the step on the key flow, then back to /getkey.
+  const gk = /^getkey:([a-f0-9]{32}):([12])$/.exec(subject);
+  if (gk) {
+    const fresh = await env.DB.prepare(`SELECT done FROM unlock_clicks WHERE click_id = ?`).bind(clickId).first();
+    const state = (await cacheGet(env, "gk:" + gk[1])) || {};
+    if (fresh?.done) {
+      state["s" + gk[2]] = true;
+      await cachePut(env, "gk:" + gk[1], state, GK_TTL_SEC);
+      await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(clickId).run();
+      return goTo(`/getkey?step=${gk[2]}&lv=${gk[1]}`);
+    }
+    return goTo(`/getkey?lv=failed`);
+  }
+
   // Either way, back to the script; the claim says plainly if it failed.
   // Relative, so they stay on whichever of our domains they came in on.
   return goTo(`/?unlocked=${encodeURIComponent(click.script_id)}&click=${encodeURIComponent(clickId)}`);
@@ -2356,15 +2418,24 @@ async function flowScript(env, id) {
       WHERE s.id = ? AND s.removed = 0 AND u.banned = 0`).bind(id).first();
 }
 
+/** Linkvertise can run a flow only with dynamic links (a publisher id) + anti-bypass. */
+const linkvertiseFlowOn = (env) => unlockProviders(env).includes("linkvertise") && Boolean(env.LINKVERTISE_USER_ID);
+const FLOW_NAMES = { lootlabs: "LootLabs", linkvertise: "Linkvertise" };
+
 /** POST /api/unlock/flow { scriptId, provider } — begin at step 1. */
 async function handleFlowStart(request, env) {
   const ip = clientIp(request);
   if (!(await underLimit(env, `flow:${ip}`, 30, 600)))
     return bad(429, "Too many unlocks from this connection. Try again shortly.");
-  if (!env.LOOTLABS_TOKEN && !flowLinks(env).length)
+
+  const body = await request.json().catch(() => ({}));
+  const provider = body.provider === "linkvertise" ? "linkvertise" : "lootlabs";
+  if (provider === "linkvertise" && !linkvertiseFlowOn(env))
+    return bad(503, "Linkvertise isn't switched on yet.");
+  if (provider === "lootlabs" && !env.LOOTLABS_TOKEN && !flowLinks(env).length)
     return bad(503, "LootLabs isn't switched on yet.");
 
-  const { scriptId } = await request.json().catch(() => ({}));
+  const { scriptId } = body;
   const script = await flowScript(env, String(scriptId || ""));
   if (!script) return bad(404, "That script doesn't exist.");
 
@@ -2373,7 +2444,7 @@ async function handleFlowStart(request, env) {
   if (blocked) return bad(403, blocked.error, { discord: blocked.discord });
 
   const id = randomHex(16);
-  const flow = { s: script.id, p: "lootlabs", step: 1, total: FLOW_STEPS, click: "", at: nowSec() };
+  const flow = { s: script.id, p: provider, step: 1, total: FLOW_STEPS, click: "", at: nowSec() };
   await flowSave(env, id, flow);
   return ok({ data: flowView(id, flow, script) });
 }
@@ -2398,15 +2469,25 @@ async function handleFlowGo(request, env) {
   // be satisfied by anything but its own completion.
   const clickId = randomHex(16);
   const now = nowSec();
+  const provider = flow.p === "linkvertise" ? "linkvertise" : "lootlabs";
   await env.DB.prepare(
     `INSERT INTO unlock_clicks (click_id, script_id, subject, provider, done, at, expires)
-     VALUES (?, ?, ?, 'lootlabs', 0, ?, ?)`
-  ).bind(clickId, script.id, "flow:" + flowId, now, now + CLICK_TTL_SEC).run();
+     VALUES (?, ?, ?, ?, 0, ?, ?)`
+  ).bind(clickId, script.id, "flow:" + flowId, provider, now, now + CLICK_TTL_SEC).run();
   if (flow.click) await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ? AND done = 0`).bind(flow.click).run();
   flow.click = clickId;
   await flowSave(env, flowId, flow);
 
   const site = env.SITE_URL || new URL(request.url).origin;
+
+  // Linkvertise: a dynamic link per step that comes back through
+  // /api/unlock/lv/<click>, where the anti-bypass hash is checked on arrival.
+  if (provider === "linkvertise") {
+    if (!linkvertiseFlowOn(env)) return bad(503, "Linkvertise isn't switched on yet.");
+    const url = linkvertiseLink(env, `${site}/api/unlock/lv/${clickId}`, clickId.replace(/\D/g, "").slice(0, 6) || "1");
+    return ok({ data: { url, step: flow.step, total: flow.total } });
+  }
+
   const links = flowLinks(env);
   try {
     let base = links.length ? links[Math.min(flow.step, links.length) - 1] : "";
@@ -2452,7 +2533,7 @@ async function handleFlowCheck(request, env) {
     await flowSave(env, flowId, flow);
     return bad(400, `Step ${flow.step} expired. Press the button to do it again.`, { step: flow.step });
   }
-  if (!click.done) return bad(409, "Waiting for LootLabs to confirm this step…", { pending: true, step: flow.step });
+  if (!click.done) return bad(409, `Waiting for ${FLOW_NAMES[flow.p] || "the sponsor"} to confirm this step…`, { pending: true, step: flow.step });
 
   // This step is real. Spend its click so it can't count twice.
   await env.DB.prepare(`DELETE FROM unlock_clicks WHERE click_id = ?`).bind(flow.click).run();
@@ -2474,16 +2555,16 @@ async function handleFlowCheck(request, env) {
   const now = nowSec();
   await env.DB.prepare(
     `INSERT INTO grants (subject, script_id, provider, verified, at, expires)
-     VALUES (?, ?, 'lootlabs', 1, ?, ?)
+     VALUES (?, ?, ?, 1, ?, ?)
      ON CONFLICT(subject, script_id) DO UPDATE SET
        verified = MAX(grants.verified, excluded.verified),
        at = excluded.at,
        expires = excluded.expires`
-  ).bind(subject, script.id, now, now + grantMinutes(env) * 60).run();
+  ).bind(subject, script.id, flow.p || "lootlabs", now, now + grantMinutes(env) * 60).run();
   await env.DB.prepare(
     `INSERT INTO unlock_events (id, script_id, author_id, subject, provider, verified, at)
-     VALUES (?, ?, ?, ?, 'lootlabs', 1, ?)`
-  ).bind("e_" + randomHex(8), script.id, script.author_id, subject, now).run();
+     VALUES (?, ?, ?, ?, ?, 1, ?)`
+  ).bind("e_" + randomHex(8), script.id, script.author_id, subject, flow.p || "lootlabs", now).run();
   await env.DB.prepare(`DELETE FROM cache WHERE k = ?`).bind("flow:" + flowId).run().catch(() => {});
 
   const full = await flowScript(env, script.id);
@@ -5733,6 +5814,8 @@ const ROUTES = {
   "GET  /api/admin/log": handleAdminLog,
   "POST /api/admin/log": handleAdminLogWrite,
   "GET  /api/getkey/mine": handleMyKeyGet,
+  "POST /api/getkey/lv/go": handleGetKeyLvGo,
+  "GET  /api/getkey/lv/check": handleGetKeyLvCheck,
   "POST /api/getkey/mine": handleMyKeyPut,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
@@ -5766,6 +5849,7 @@ const ROUTES = {
       // showing a paying-looking button that earns nothing.
       unlockLive: unlockConfigured(env),
       unlockProviders: unlockProviders(env),
+      linkvertiseSteps: linkvertiseFlowOn(env),
       unlockMinutes: grantMinutes(env),
       lootlabs: env.LOOTLABS_TOKEN ? lootSettings(env) : null,
       discord: {

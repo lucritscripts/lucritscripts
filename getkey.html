@@ -48,6 +48,7 @@
       --ease: cubic-bezier(0.22, 1, 0.36, 1);
     }
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    [hidden] { display: none !important; }
     html, body { min-height: 100%; }
     body {
       background: var(--bg); color: var(--ink); font-family: var(--font);
@@ -130,7 +131,10 @@
     #messageText {
       font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--cyan);
     }
-    #captchaContainer { width: 100%; display: grid; justify-items: center; }
+    #captchaContainer { width: 100%; display: grid; justify-items: center; gap: 10px; }
+    button.lv { background: linear-gradient(135deg, #2bd99a, #12a874); box-shadow: 0 8px 30px rgba(43, 217, 154, 0.28); }
+    button.lv:hover { background: linear-gradient(135deg, #3ee6a8, #18b981); box-shadow: 0 12px 38px rgba(43, 217, 154, 0.42); }
+    .or { font-size: 0.72rem; letter-spacing: 0.18em; text-transform: uppercase; color: var(--ink-3); }
     .note { color: var(--ink-2); font-size: 0.9rem; line-height: 1.55; max-width: 40ch; }
 
     /* ---- buttons (same as .btn--primary) ---- */
@@ -200,8 +204,12 @@
        so those are allowed too. -->
   <script>
     (function () {
-      var step = new URLSearchParams(location.search).get("step");
+      var qs = new URLSearchParams(location.search);
+      var step = qs.get("step");
       if (step !== "1" && step !== "2") return;
+      // Back from Linkvertise: our server checked the anti-bypass hash; the
+      // page re-confirms it with /api/getkey/lv/check before showing the step.
+      if (/^[a-f0-9]{32}$/.test(qs.get("lv") || "")) return;
       var allowedReferrers = [
         "loot-link.com",
         "loot-links.com",
@@ -277,6 +285,7 @@
 
         <div id="captchaContainer">
           <button id="finishBtn">Get Key</button>
+          <button id="lvBtn" class="lv" hidden>Get Key with Linkvertise</button>
         </div>
 
         <div id="keyActiveSection" style="display:none;">
@@ -324,6 +333,54 @@
     const keyTimerDisplay = document.getElementById('keyTimer');
     const stepNote = document.getElementById('stepNote');
 
+    // ✅ Linkvertise route (two steps, like LootLabs). The key flow id ("gk")
+    // ties step 2 to step 1 on the server; which sponsor was picked is kept so
+    // checkpoint two continues with the same one.
+    const lvBtn = document.getElementById('lvBtn');
+    const lvParam = new URLSearchParams(location.search).get('lv') || '';
+    const VIA_KEY = 'lucrit_gk_via', GK_KEY = 'lucrit_gk';
+    let via = localStorage.getItem(VIA_KEY) || 'lootlabs';
+    let linkvertiseOn = false;
+
+    async function lvGo(step) {
+      const btn = step === 1 ? lvBtn : finishBtn;
+      btn.disabled = true; btn.textContent = 'Opening Linkvertise…';
+      try {
+        const res = await fetch('/api/getkey/lv/go', {
+          method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ step, gk: localStorage.getItem(GK_KEY) || '' }),
+        });
+        const body = await res.json();
+        if (!body.ok) {
+          if (body.restart) { localStorage.removeItem(GK_KEY); window.location.href = '/getkey'; return; }
+          throw new Error(body.error || 'Linkvertise is unavailable right now.');
+        }
+        localStorage.setItem(GK_KEY, body.data.gk);
+        localStorage.setItem(VIA_KEY, 'linkvertise');
+        window.location.href = body.data.url;
+      } catch (e) {
+        alert(e.message || "Couldn't reach Linkvertise. Try again.");
+        btn.disabled = false;
+        showNormalUI();
+      }
+    }
+
+    // Back from Linkvertise: ask the server whether this step really passed.
+    async function lvVerified() {
+      if (lvParam === 'failed') return false;
+      if (!/^[a-f0-9]{32}$/.test(lvParam)) return true;      // not a Linkvertise return
+      try {
+        const res = await fetch(`/api/getkey/lv/check?gk=${lvParam}&step=${STEP}`, { credentials: 'same-origin' });
+        const body = await res.json();
+        if (!body.ok || !body.data?.verified) return false;
+        localStorage.setItem(GK_KEY, lvParam);
+        localStorage.setItem(VIA_KEY, 'linkvertise');
+        via = 'linkvertise';
+        if (STEP === 1) localStorage.setItem('smh_cp1', Date.now().toString());
+        return true;
+      } catch { return false; }
+    }
+
     // Which checkpoint this visit is: 0 = start, 1 = back from step 1, 2 = back from step 2.
     const stepParam = new URLSearchParams(location.search).get('step');
     const STEP = stepParam === '2' ? 2 : stepParam === '1' ? 1 : 0;
@@ -366,7 +423,8 @@
     // The checkpoint screens — the old pages' text and buttons.
     function showNormalUI() {
       messageText.style.display = 'block';
-      captchaContainer.style.display = 'block';
+      captchaContainer.style.display = 'grid';
+      lvBtn.hidden = true;
       keyActiveSection.style.display = 'none';
       keyBox.textContent = '';
       finishBtn.style.display = '';
@@ -375,14 +433,24 @@
       if (STEP === 0) {
         messageText.textContent = 'Checkpoint One';
         // (the sign-in hint is added below once we know they're signed out)
-        finishBtn.textContent = 'Get Key';
-        stepNote.textContent = 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.';
-        finishBtn.onclick = () => { window.location.href = STEP_LINKS[0]; };
+        finishBtn.textContent = linkvertiseOn ? 'Get Key with LootLabs' : 'Get Key';
+        stepNote.textContent = linkvertiseOn
+          ? 'Pick LootLabs or Linkvertise — two quick steps either way, then your key.'
+          : 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.';
+        finishBtn.onclick = () => { localStorage.setItem(VIA_KEY, 'lootlabs'); window.location.href = STEP_LINKS[0]; };
+        if (linkvertiseOn) { lvBtn.hidden = false; lvBtn.disabled = false; lvBtn.textContent = 'Get Key with Linkvertise'; lvBtn.onclick = () => lvGo(1); }
       } else if (STEP === 1) {
         messageText.textContent = 'Final Checkpoint';
-        finishBtn.textContent = 'Get Key';
         stepNote.textContent = 'Checkpoint one done ✓ — one more and your key is ready.';
-        finishBtn.onclick = () => { window.location.href = STEP_LINKS[1]; };
+        if (via === 'linkvertise') {
+          finishBtn.textContent = 'Continue with Linkvertise';
+          finishBtn.classList.add('lv');
+          finishBtn.onclick = () => lvGo(2);
+        } else {
+          finishBtn.textContent = 'Get Key';
+          finishBtn.classList.remove('lv');
+          finishBtn.onclick = () => { window.location.href = STEP_LINKS[1]; };
+        }
       } else {
         messageText.textContent = 'Your Key is Ready';
         finishBtn.textContent = 'Get Your Key';
@@ -497,6 +565,7 @@
         localStorage.setItem(keyTimeStorage, expiresAt.toString());
         localStorage.setItem(sessionStart, now.toString());
         localStorage.removeItem('smh_cp1');   // the next key starts at checkpoint one again
+        localStorage.removeItem(GK_KEY);
         saveToAccount(key, expiresAt);         // so it shows on their other devices too
 
         showKeyUI(key);
@@ -550,11 +619,23 @@
     }
 
     async function main() {
+      if (lvParam === 'failed') {
+        alert("Linkvertise didn't confirm that step. Please try it again.");
+        history.replaceState(null, '', '/getkey');
+      } else if (lvParam && !(await lvVerified())) {
+        window.location.replace('/getkey');
+        return;
+      }
+      try {
+        const cfg = await fetch('/api/config', { credentials: 'same-origin' }).then((r) => r.json());
+        linkvertiseOn = Boolean(cfg?.data?.linkvertiseSteps);
+      } catch { linkvertiseOn = false; }
       const hasKey = await checkKey();
       if (!hasKey) {
         showNormalUI();
         if (!signedIn && STEP === 0) {
-          stepNote.innerHTML = 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.'
+          const base = stepNote.textContent.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+          stepNote.innerHTML = base
             + '<br><a href="/" style="color:var(--cyan)">Sign in</a> first to keep your key on all your devices.';
         }
       }
