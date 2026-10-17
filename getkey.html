@@ -275,7 +275,7 @@
       <ol class="steps" id="steps" aria-label="Progress">
         <li data-cp="0"><span>1</span><b>Checkpoint 1</b></li>
         <li class="bar" aria-hidden="true"></li>
-        <li data-cp="1"><span>2</span><b>Checkpoint 2</b></li>
+        <li data-cp="1"><span>2</span><b>Final step</b></li>
         <li class="bar" aria-hidden="true"></li>
         <li data-cp="2"><span>🔑</span><b>Key</b></li>
       </ol>
@@ -537,6 +537,17 @@
       return true;
     }
 
+    // Counts the key on the admin panel's "Paid key unlocks" tile. The server
+    // marks it Linkvertise-verified when this browser's gk flow passed both
+    // steps there; LootLabs key links are direct, so those count as made.
+    function reportKeyMade(key, gk) {
+      fetch('/api/getkey/made', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key, via, gk }),
+      }).catch(() => {});
+    }
+
     async function createNewKey() {
       finishBtn.disabled = true;
       finishBtn.textContent = "Creating Key...";
@@ -565,6 +576,7 @@
         localStorage.setItem(keyTimeStorage, expiresAt.toString());
         localStorage.setItem(sessionStart, now.toString());
         localStorage.removeItem('smh_cp1');   // the next key starts at checkpoint one again
+        reportKeyMade(key, localStorage.getItem(GK_KEY) || '');
         localStorage.removeItem(GK_KEY);
         saveToAccount(key, expiresAt);         // so it shows on their other devices too
 

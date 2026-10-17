@@ -1150,6 +1150,16 @@ async function gameNamesFor(env, id) {
   return (results || []).map((r) => r.g).filter((g) => gameIdOf(g) === id);
 }
 
+/**
+ * Staff skip the sponsor step: while the admin passcode is entered (the 30-min
+ * admin ticket), every script reads as unlocked and its code comes straight
+ * out. Cheap for everyone else — no ticket cookie, no query.
+ */
+async function staffBypass(request, env) {
+  if (!env.ADMIN_PASS_HASH || !readCookie(request, ADMIN_COOKIE)) return false;
+  try { return await adminUnlocked(request, env); } catch { return false; }
+}
+
 async function handleScriptList(request, env) {
   const url = new URL(request.url);
   const p = url.searchParams;
@@ -1239,6 +1249,7 @@ async function handleScriptList(request, env) {
   for (const g of mine.results || []) {
     if (grantOpens(env, g)) held.set(g.script_id, Math.max(0, g.expires - now));
   }
+  const staff = await staffBypass(request, env);
 
   return ok({
     total: Number(counted?.n || 0),
@@ -1247,8 +1258,8 @@ async function handleScriptList(request, env) {
       const own = user && user.id === r.author_id;
       const left = held.get(r.id);
       return publicScript(r, {
-        unlocked: Boolean(own) || left !== undefined,
-        unlockedFor: own ? null : (left ?? null),
+        unlocked: Boolean(own) || staff || left !== undefined,
+        unlockedFor: own || staff ? null : (left ?? null),
         mine: Boolean(own),
       });
     }),
@@ -1326,7 +1337,8 @@ async function handleScriptGet(request, env, { id }) {
   // anything, and it often does not: a laptop an hour fast would show an
   // unlock that expired before it started. A duration is measured entirely
   // here and stays true whatever their clock says.
-  const unlockedFor = grantOpens(env, grant)
+  const staff = await staffBypass(request, env);
+  const unlockedFor = !staff && grantOpens(env, grant)
     ? Math.max(0, grant.expires - nowSec())
     : null;
 
@@ -1341,7 +1353,7 @@ async function handleScriptGet(request, env, { id }) {
     data: publicScript(row, {
       // The author never has to unlock their own work, and so has no clock
       // running — `unlockedFor` stays null for them rather than reading zero.
-      unlocked: Boolean(mine) || grantOpens(env, grant),
+      unlocked: Boolean(mine) || staff || grantOpens(env, grant),
       unlockedFor,
       mine: Boolean(mine),
       liked: user ? Boolean(await env.DB.prepare(
@@ -1618,6 +1630,9 @@ async function handleScriptCode(request, env, { id }) {
 
   const user = await currentUser(request, env);
   if (user && user.id === row.author_id) return ok({ data: payload });
+  // Staff with the admin passcode entered: straight through, and not counted
+  // as a copy — checking a script isn't somebody using it.
+  if (await staffBypass(request, env)) return ok({ data: payload, staff: true });
 
   const subject = await grantSubject(request, env, user);
   const grant = await env.DB.prepare(
@@ -1725,6 +1740,13 @@ function ensureAdminSchema(env) {
          target TEXT NOT NULL DEFAULT '',
          detail TEXT NOT NULL DEFAULT ''
        )`).run();
+    await env.DB.prepare(
+      `CREATE TABLE IF NOT EXISTS key_events (
+         key_hash TEXT PRIMARY KEY,
+         at       INTEGER NOT NULL,
+         via      TEXT NOT NULL DEFAULT 'lootlabs',
+         verified INTEGER NOT NULL DEFAULT 0
+       )`).run();
     // Paging indexes for the library at scale (migrations/2026-10-library-scale.sql).
     // Best-effort: a missing index is slower, never wrong, so it can't fail a page.
     for (const sql of [
@@ -1750,6 +1772,19 @@ async function adminLog(env, action, target = "", detail = "") {
         `DELETE FROM admin_log WHERE id NOT IN (SELECT id FROM admin_log ORDER BY id DESC LIMIT 1000)`).run();
     }
   } catch { /* the log is a convenience, never a reason to refuse */ }
+}
+
+/**
+ * GET /api/admin/scripts/:id/code — the code and link of any script, taken
+ * down or not, with no sponsor step. Staff-only (admin passcode); not counted
+ * as a copy or a view.
+ */
+async function handleAdminScriptCode(request, env, { id }) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  const row = await env.DB.prepare(`SELECT id, title, code, link FROM scripts WHERE id = ?`).bind(id).first();
+  if (!row) return bad(404, "That script doesn't exist.");
+  return ok({ data: { id: row.id, title: row.title, code: row.code || "", link: row.link || "" } });
 }
 
 /** POST /api/admin/scripts/:id/labels  { labels: [...], note: "" } */
@@ -1858,6 +1893,38 @@ async function handleGetKeyLvCheck(request, env) {
   const state = (await cacheGet(env, "gk:" + gk)) || {};
   const verified = step === 2 ? Boolean(state.s1 && state.s2) : Boolean(state.s1);
   return ok({ data: { verified, step } });
+}
+
+/**
+ * POST /api/getkey/made { key, via, gk } — /getkey reports a key it just made
+ * after both sponsor steps, for the admin panel's "Paid key unlocks" tile.
+ *
+ * Counted once per key (by hash — the key itself isn't stored here). A
+ * Linkvertise key is `verified` only if its gk flow passed BOTH steps on this
+ * server's anti-bypass check. LootLabs key links are direct links with a
+ * referrer check, so those are counted but not server-verified. Rate limited
+ * per IP so the number can't be pumped from a console.
+ */
+async function handleGetKeyMade(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const key = String(body.key || "");
+  if (!GETKEY_FORMAT.test(key)) return bad(400, "That isn't a Lucrit key.");
+  if (!(await underLimit(env, "keymade:" + clientIp(request), 6, 3600))) return ok({ counted: false });
+  const via = body.via === "linkvertise" ? "linkvertise" : "lootlabs";
+  let verified = 0;
+  const gk = String(body.gk || "");
+  if (via === "linkvertise" && /^[a-f0-9]{32}$/.test(gk)) {
+    const state = (await cacheGet(env, "gk:" + gk)) || {};
+    verified = state.s1 && state.s2 ? 1 : 0;
+  }
+  await ensureAdminSchema(env);
+  const hash = await sha256Hex("lucrit-key:" + key);
+  const seen = await env.DB.prepare(`SELECT 1 AS x FROM key_events WHERE key_hash = ?`).bind(hash).first();
+  if (seen) return ok({ counted: false, verified: Boolean(verified) });
+  await env.DB.prepare(
+    `INSERT OR IGNORE INTO key_events (key_hash, at, via, verified) VALUES (?, ?, ?, ?)`
+  ).bind(hash, nowSec(), via, verified).run();
+  return ok({ counted: true, verified: Boolean(verified) });
 }
 
 async function handleMyKeyGet(request, env) {
@@ -3015,6 +3082,9 @@ async function handleAdminOverview(request, env) {
       removed: await one(`SELECT COUNT(*) AS n FROM scripts WHERE removed = 1`),
       unlocks: await one(`SELECT COUNT(*) AS n FROM unlock_events`),
       verified: await one(`SELECT COUNT(*) AS n FROM unlock_events WHERE verified = 1`),
+      keyUnlocks: await one(`SELECT COUNT(*) AS n FROM key_events`),
+      keyUnlocksToday: await one(`SELECT COUNT(*) AS n FROM key_events WHERE at > ?`, now - 86400),
+      keyUnlocksWeek: await one(`SELECT COUNT(*) AS n FROM key_events WHERE at > ?`, now - 7 * 86400),
       reports: await one(`SELECT COUNT(*) AS n FROM reports`),
     },
   });
@@ -5895,6 +5965,7 @@ const PATTERNS = [
   ["GET", /^\/api\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorGet],
   ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/verify$/, handleScriptVerify],
   ["POST", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/labels$/, handleAdminScriptLabels],
+  ["GET", /^\/api\/admin\/scripts\/([A-Za-z0-9_-]{1,40})\/code$/, handleAdminScriptCode],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})\/state$/, handleAdminExecutorState],
   ["POST", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorUpdate],
   ["DELETE", /^\/api\/admin\/executors\/([A-Za-z0-9_-]{1,40})$/, handleExecutorDelete],
@@ -5915,6 +5986,7 @@ const PATTERNS = [
 const ROUTES = {
   "GET  /api/scripts": handleScriptList,
   "GET  /api/scripts/summary": handleScriptSummary,
+  "POST /api/getkey/made": handleGetKeyMade,
   "GET  /api/auth/discord/start": handleDiscordStart,
   "GET  /api/auth/discord/callback": handleDiscordCallback,
   "GET  /api/discord": handleDiscordStats,
