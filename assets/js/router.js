@@ -111,7 +111,7 @@ export function parse(pathname = location.pathname) {
  * what it is. Everything used to be "Lucrit Script" no matter where you were.
  */
 export function setTitle(text) {
-  document.title = text ? `${text} · Lucrit Script` : "Lucrit Script — 3D Roblox script library";
+  document.title = text ? `${text} · Lucrit Script` : "Lucrit Script — The Ultimate Roblox Script Library";
 }
 
 /**
