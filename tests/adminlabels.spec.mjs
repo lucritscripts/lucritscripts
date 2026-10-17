@@ -145,10 +145,10 @@ await page.locator("#admin [name=passcode]").fill("open-sesame");
 await page.locator("#admin [data-passform] button[type=submit]").click();
 await page.locator('#admin [data-admintab="scripts"]').waitFor({ timeout: 30000 });
 check("new overview tiles", /Marked risky/.test(await page.locator("#admin .stats").textContent()));
-check("Paid key unlocks tile sits right after Paid unlocks", await page.evaluate(() => {
+check("Keys made tile sits right after Paid unlocks", await page.evaluate(() => {
   const t = [...document.querySelectorAll("#admin .stats > *")].map((e) => e.textContent.replace(/\s+/g, " ").trim());
   const i = t.findIndex((x) => x.startsWith("Paid unlocks"));
-  return i >= 0 && /^Paid key unlocks 0/.test(t[i + 1] || "");
+  return i >= 0 && /^Keys made 0/.test(t[i + 1] || "");
 }));
 check("Activity tab exists", await page.locator('#admin [data-admintab="activity"]').count() === 1);
 await page.locator('#admin [data-admintab="scripts"]').click();
