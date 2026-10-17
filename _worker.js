@@ -6077,6 +6077,115 @@ const APP_ROUTES = [
   /^\/unlock\/[a-z]+\/?$/,
 ];
 
+/* ───────────────────────────────────────────── search engines (Oct 2026) ── */
+
+const attr = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+  .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const siteOf = (env) => String(env.SITE_URL || "https://lucritscripts.site").replace(/\/+$/, "");
+
+/** Pages that are yours alone or mid-flow: never in search results. */
+const NOINDEX = [/^\/admin\/?$/, /^\/dashboard(\/|$)/, /^\/unlock\//];
+
+/**
+ * Every app route is served the same index.html, so without this a search
+ * engine sees one page a thousand times — the homepage's title, and a
+ * canonical tag saying "I am the homepage". The shell is small (~4 KB), so
+ * it's rewritten as text: its own canonical URL on every route, and on a
+ * script or creator page that page's own title, description and image, read
+ * from D1. The browser still sets the title itself once the app runs.
+ */
+async function seoShell(response, url, env) {
+  const type = response.headers.get("Content-Type") || "";
+  if (!response.ok || !type.includes("text/html")) return response;
+  let html = await response.text();
+  const site = siteOf(env);
+  const path = url.pathname === "/" ? "/" : url.pathname.replace(/\/+$/, "");
+  const canon = site + path;
+  const set = (re, value) => { html = html.replace(re, value); };
+
+  set(/<link rel="canonical" href="[^"]*">/, `<link rel="canonical" href="${attr(canon)}">`);
+  set(/<meta property="og:url" content="[^"]*">/, `<meta property="og:url" content="${attr(canon)}">`);
+
+  let meta = null;
+  try {
+    const sm = path.match(/^\/creations\/([^/]+)\/([^/]+)$/);
+    const cm = path.match(/^\/creators\/([^/]+)$/);
+    if (sm) {
+      const id = "s_" + decodeURIComponent(sm[2]).replace(/^s_/, "");
+      const row = await env.DB.prepare(
+        `SELECT s.id, s.title, s.game, s.descr, ${"CASE WHEN s.thumbnail LIKE 'data:%' THEN 'thumb:' || length(s.thumbnail) || ':' || substr(s.thumbnail, -40) ELSE s.thumbnail END"} AS thumbnail,
+                u.username AS author
+           FROM scripts s JOIN users u ON u.id = s.author_id
+          WHERE s.id = ? AND s.removed = 0 AND u.banned = 0`).bind(id).first();
+      if (row) {
+        const desc = String(row.descr || "").replace(/\s+/g, " ").trim();
+        meta = {
+          title: `${row.title}${row.game ? ` — ${row.game} Script` : ""} | Lucrit Script`,
+          description: (desc.length > 155 ? desc.slice(0, 152).replace(/\s+\S*$/, "") + "…" : desc)
+            || `${row.title}, a Roblox script by @${row.author} on Lucrit Script.`,
+          image: thumbAbsolute(env, row),
+        };
+      }
+    } else if (cm) {
+      const name = decodeURIComponent(cm[1]).slice(0, 40);
+      const u = await env.DB.prepare(`SELECT username FROM users WHERE username_lower = ? AND banned = 0`)
+        .bind(name.toLowerCase()).first();
+      if (u) meta = {
+        title: `@${u.username} — Roblox scripts | Lucrit Script`,
+        description: `Every Roblox script published by @${u.username} on Lucrit Script.`,
+      };
+    } else if (/^\/executors(\/|$)/.test(path)) {
+      meta = { title: "Roblox Executors — Status & Downloads | Lucrit Script",
+        description: "Which Roblox executors are working right now, on PC and mobile — kept up to date on Lucrit Script." };
+    }
+  } catch { meta = null; }   // a database hiccup must never break the page itself
+
+  if (meta) {
+    set(/<title>[^<]*<\/title>/, `<title>${attr(meta.title)}</title>`);
+    set(/<meta name="description" content="[^"]*">/, `<meta name="description" content="${attr(meta.description)}">`);
+    set(/<meta property="og:title" content="[^"]*">/, `<meta property="og:title" content="${attr(meta.title)}">`);
+    set(/<meta property="og:description" content="[^"]*">/, `<meta property="og:description" content="${attr(meta.description)}">`);
+    if (meta.image) set(/<meta property="og:image" content="[^"]*">/, `<meta property="og:image" content="${attr(meta.image)}">`);
+  }
+  if (NOINDEX.some((re) => re.test(path))) html = html.replace("</head>", `<meta name="robots" content="noindex">\n</head>`);
+
+  const headers = new Headers(response.headers);
+  headers.delete("Content-Length");
+  headers.delete("ETag");
+  return new Response(html, { status: response.status, headers });
+}
+
+/** GET /sitemap.xml — the homepage, the fixed pages, every live script and creator. */
+async function handleSitemap(env) {
+  const site = siteOf(env);
+  const enc = encodeURIComponent;
+  const urls = [
+    { loc: `${site}/`, pri: "1.0" },
+    { loc: `${site}/getkey`, pri: "0.6" },
+    { loc: `${site}/executors`, pri: "0.6" },
+  ];
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT s.id, s.created_at, u.username FROM scripts s JOIN users u ON u.id = s.author_id
+        WHERE s.removed = 0 AND u.banned = 0 ORDER BY s.created_at DESC LIMIT 45000`).all();
+    const creators = new Set();
+    for (const r of results || []) {
+      urls.push({ loc: `${site}/creations/${enc(r.username)}/${enc(String(r.id).replace(/^s_/, ""))}`,
+        mod: String(r.created_at || "").slice(0, 10), pri: "0.8" });
+      creators.add(r.username);
+    }
+    for (const c of creators) urls.push({ loc: `${site}/creators/${enc(c)}`, pri: "0.5" });
+  } catch { /* still serve the fixed pages */ }
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${
+    urls.map((u) => `  <url><loc>${attr(u.loc)}</loc>${u.mod ? `<lastmod>${u.mod}</lastmod>` : ""}<priority>${u.pri}</priority></url>`).join("\n")
+  }\n</urlset>\n`;
+  return new Response(xml, { headers: {
+    "Content-Type": "application/xml; charset=utf-8",
+    "Cache-Control": "public, max-age=3600",
+    "X-Content-Type-Options": "nosniff",
+  } });
+}
+
 /** Headers GitHub Pages could never send us. */
 function harden(response) {
   const out = new Response(response.body, response);
@@ -6138,9 +6247,18 @@ export default {
       // Ask for "/" rather than "/index.html": Pages canonicalises the latter
       // with a 308 back to "/", which the browser follows — so /admin bounced
       // to the home page before any script ran.
+      if (url.pathname === "/sitemap.xml") return handleSitemap(env);
       const spa = APP_ROUTES.some((re) => re.test(url.pathname));
-      const asset = harden(await env.ASSETS.fetch(
-        spa ? new Request(new URL("/", url), request) : request));
+      let raw = await env.ASSETS.fetch(spa ? new Request(new URL("/", url), request) : request);
+      if (spa || url.pathname === "/" || url.pathname === "/index.html") raw = await seoShell(raw, url, env);
+      // A missing file under a real extension (an icon, a script) comes back
+      // from Pages as index.html with a 200. Cached as an image for a day, that
+      // is how /favicon.ico ended up being a web page in Google's eyes. Say 404.
+      else if (/\.(ico|png|jpe?g|gif|webp|svg|js|mjs|css|json|xml|txt|webmanifest|woff2?)$/i.test(url.pathname)
+               && (raw.headers.get("Content-Type") || "").includes("text/html")) {
+        raw = new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain", "Cache-Control": "no-store" } });
+      }
+      const asset = harden(raw);
       const cache = cacheFor(url.pathname);
       if (cache) asset.headers.set("Cache-Control", cache);
       return asset;

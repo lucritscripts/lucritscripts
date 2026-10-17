@@ -23,13 +23,59 @@
   connect-src 'self' https://accounts.google.com https://lucrit-assistant.lucritscripts.workers.dev https://firestore.googleapis.com;
   frame-src https://accounts.google.com https://challenges.cloudflare.com;
 ">
-<title>Lucrit Script — the ultimate Roblox script library</title>
-<meta name="description" content="Discover, explore, and build with thousands of Roblox scripts. A searchable library of readable, production-grade Luau modules.">
+<title>Lucrit Script — The Ultimate Roblox Script Library</title>
+<meta name="description" content="Find working Roblox scripts for Blox Fruits, Da Hood, Grow a Garden, Pet Simulator and more. Search the Lucrit Script library, read every script's code, and get keyless scripts for free.">
+<link rel="canonical" href="https://lucritscripts.site/">
 
+<!-- What Google, Discord and other link previews show (Oct 2026). og:site_name
+     plus the WebSite data below is how search results learn to say
+     "Lucrit Script" instead of the bare domain. -->
 <meta property="og:type" content="website">
-<meta property="og:title" content="Lucrit Script">
-<meta property="og:description" content="Discover, explore, and build with thousands of Roblox scripts.">
+<meta property="og:site_name" content="Lucrit Script">
+<meta property="og:url" content="https://lucritscripts.site/">
+<meta property="og:title" content="Lucrit Script — The Ultimate Roblox Script Library">
+<meta property="og:description" content="Find working Roblox scripts, read the code, and get keyless scripts for free.">
+<meta property="og:image" content="https://lucritscripts.site/assets/img/logo.png">
+<meta name="twitter:card" content="summary">
+<meta name="application-name" content="Lucrit Script">
+<meta name="apple-mobile-web-app-title" content="Lucrit Script">
 <meta name="theme-color" content="#05060a">
+
+<!-- Icons: a square, solid-background badge so the mark reads in Google's
+     small round favicon slot (the old one was transparent and came out as a
+     blue smudge). Google wants a multiple of 48px. -->
+<link rel="icon" type="image/png" sizes="48x48" href="/assets/img/icon-48.png">
+<link rel="icon" type="image/png" sizes="96x96" href="/assets/img/icon-96.png">
+<link rel="icon" type="image/png" sizes="192x192" href="/assets/img/icon-192.png">
+<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
+<link rel="shortcut icon" href="/favicon.ico?v=2">
+<link rel="manifest" href="/site.webmanifest">
+
+<!-- Structured data. A data block, not a script: the CSP doesn't run it and
+     doesn't need to. -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "WebSite",
+      "@id": "https://lucritscripts.site/#website",
+      "name": "Lucrit Script",
+      "alternateName": ["Lucrit Scripts", "Lucrit", "lucritscripts.site"],
+      "url": "https://lucritscripts.site/",
+      "publisher": { "@id": "https://lucritscripts.site/#org" }
+    },
+    {
+      "@type": "Organization",
+      "@id": "https://lucritscripts.site/#org",
+      "name": "Lucrit Script",
+      "url": "https://lucritscripts.site/",
+      "logo": "https://lucritscripts.site/assets/img/icon-512.png",
+      "sameAs": ["https://discord.gg/JUSmn4ZYe"]
+    }
+  ]
+}
+</script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -43,9 +89,6 @@
      looking for /creations/lucrit/assets/css/app.css and found a 404. Real
      URLs mean real paths. -->
 <link rel="stylesheet" href="/assets/css/app.css">
-<link rel="icon" type="image/png" sizes="64x64" href="/assets/img/favicon-64.png">
-<link rel="apple-touch-icon" href="/assets/img/apple-touch-icon.png">
-<meta property="og:image" content="https://lucritscripts.site/assets/img/logo.png">
 </head>
 
 <body>
@@ -61,8 +104,9 @@
               border:1px solid rgba(140,175,225,.28);border-radius:18px;background:rgba(10,15,26,.9)">
     <h1 style="margin:0 0 10px;font:600 1.6rem/1.1 system-ui">Lucrit Script</h1>
     <p style="margin:0;color:#a8b6cd;font:400 1rem/1.6 system-ui">
-      This library needs JavaScript to search and display scripts. Enable it, or browse the
-      source directly on GitHub.
+      The ultimate Roblox script library — find working scripts for Blox Fruits, Da Hood,
+      Grow a Garden and more, read the code, and get keyless scripts free.
+      Turn on JavaScript to search and open scripts.
     </p>
   </div>
 </noscript>
