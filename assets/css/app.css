@@ -2996,3 +2996,12 @@ html.reduced-motion .chapter__stage { transition: none; }
   .library__sortpick { flex: 1 1 35%; }
   .library__game, .library__sort { padding: 9px 30px 9px 12px; font-size: 0.86rem; }
 }
+
+/* Admin: make a key instantly; a script's code under its row (17 Oct 2026). */
+.adm__make { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; margin: 0 0 14px;
+  padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 12px; background: rgba(61, 155, 255, 0.06); }
+.adm__make > .muted { flex: 1 1 260px; font-size: 0.85rem; }
+.adm__made { display: inline-flex; align-items: center; gap: 6px; }
+.adm__code { max-height: 340px; overflow: auto; margin: 8px 0 0; padding: 12px 14px; border-radius: 10px;
+  background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line);
+  font: 0.8rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; color: var(--ink); }
