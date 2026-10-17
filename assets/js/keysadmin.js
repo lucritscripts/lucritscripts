@@ -105,3 +105,33 @@ export async function deleteMany(ids, onProgress) {
 /** "Expired" here means "the loader would reject it": past expiry, no expiry, or valid !== true. */
 export const isExpired = (k, now = Date.now()) =>
   typeof k.expiresAt !== "number" || k.expiresAt <= now || k.valid === false;
+
+/**
+ * Makes a key straight away, no sponsor steps — the admin panel's "Make key".
+ * Same document shape /getkey writes (valid, expiresAt, inUse, boundTo,
+ * lastPing), so the Roblox loader treats it like any other key. Fails if that
+ * id somehow already exists rather than overwriting it.
+ */
+export async function makeKey(hours = 8) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  const rnd = new Uint32Array(16);
+  crypto.getRandomValues(rnd);
+  let id = "LUCRIT-";
+  for (let i = 0; i < 16; i++) id += chars.charAt(rnd[i] % chars.length);
+  const now = Date.now();
+  const expiresAt = now + Math.round(hours * 3600000);
+  await fsFetch(`${BASE}/keys?documentId=${encodeURIComponent(id)}&${KEY}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      fields: {
+        valid: { booleanValue: true },
+        expiresAt: { integerValue: String(expiresAt) },
+        inUse: { booleanValue: false },
+        boundTo: { stringValue: "admin" },
+        lastPing: { integerValue: String(now) },
+      },
+    }),
+  });
+  return { id, expiresAt };
+}

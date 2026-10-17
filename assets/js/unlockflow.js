@@ -47,7 +47,9 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
       ${Array.from({ length: total }, (_, i) => {
         const n = i + 1;
         const cls = state === "done" || n < at ? "is-done" : n === at ? "is-now" : "";
-        return `<li class="${cls}"><span>${cls === "is-done" ? "✓" : n}</span><b>Step ${n}</b></li>`;
+        // The last one is "Final step" rather than "Step 2" (Oct 2026).
+        const label = n === total && total > 1 ? "Final step" : `Step ${n}`;
+        return `<li class="${cls}"><span>${cls === "is-done" ? "✓" : n}</span><b>${label}</b></li>`;
       }).join('<li class="ufl__bar" aria-hidden="true"></li>')}
     </ol>`;
   }
@@ -58,6 +60,8 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
     const img = s?.thumbnail ? esc(safeImageSrc(s.thumbnail)) : "";
     const step = flow?.step || 1;
     const total = flow?.total || 2;
+    const last = step === total && total > 1;
+    const stepName = last ? "the final step" : `step ${step}`;
 
     let main = "";
     if (state === "loading") {
@@ -78,20 +82,20 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
       main = `
         <div class="ufl__spin" aria-hidden="true"></div>
         <p class="ufl__msg">${state === "waiting"
-          ? `Waiting for ${esc(name)} to confirm step ${step}… this can take a few seconds.`
-          : `Checking step ${step} with ${esc(name)}…`}</p>
-        <button class="btn btn--ghost btn--sm" data-ufl="retry">Didn't finish it? Do step ${step} again</button>`;
+          ? `Waiting for ${esc(name)} to confirm ${stepName}… this can take a few seconds.`
+          : `Checking ${stepName} with ${esc(name)}…`}</p>
+        <button class="btn btn--ghost btn--sm" data-ufl="retry">Didn't finish it? Do ${stepName} again</button>`;
     } else if (state === "done") {
       main = `
         <p class="ufl__msg ufl__msg--ok">All done — opening your script…</p>`;
     } else {
       main = `
-        <p class="ufl__kicker">Checkpoint ${step} of ${total}</p>
+        <p class="ufl__kicker">${last ? "Final checkpoint" : `Checkpoint ${step} of ${total}`}</p>
         ${message ? `<p class="ufl__msg ufl__msg--ok">${esc(message)}</p>` : ""}
         <p class="ufl__msg">Press the button, finish the ${esc(name)} page, and you'll come
            straight back here${step < total ? " for the next step" : " with the script unlocked"}.</p>
         <button class="btn btn--primary ufl__go" data-ufl="go" ${state === "going" ? "disabled" : ""}>
-          ${state === "going" ? "Opening…" : `Continue to step ${step}`}
+          ${state === "going" ? "Opening…" : (last ? "Continue to final step" : `Continue to step ${step}`)}
         </button>
         <p class="ufl__note">Each step is checked with ${esc(name)} — skipping it or opening this page
            directly won't unlock anything.</p>`;

@@ -15,7 +15,7 @@
 
 import { esc, fmt, toast, createOverlay } from "./pages.js";
 import { statusBadges, labelBadge, ADMIN_LABELS } from "./data/scripts.js";
-import { listKeys, deleteKey, unlockKey, deleteMany, isExpired } from "./keysadmin.js";
+import { listKeys, deleteKey, unlockKey, deleteMany, isExpired, makeKey } from "./keysadmin.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 
@@ -84,6 +84,8 @@ export function createAdminPage({ onChanged } = {}) {
   let editing = null;        // script id whose label editor is open
   const selected = new Set();
   let scriptRows = [];       // last list drawn, for bulk actions
+  let codeOpen = null;       // { id, title, code, link } — a script's code shown under its row
+  let madeKey = null;        // { id, expiresAt } — the key "Make key" just made
 
   // Keys tab state (keys live in Firebase, not D1 — see keysadmin.js).
   let keyView = "active";    // active | expired
@@ -198,6 +200,7 @@ export function createAdminPage({ onChanged } = {}) {
         ${tile("Taken down", o.removed)}
         ${tile("Unlocks today", o.unlocksToday, `${fmt(o.unlocksWeek)} this week`)}
         ${tile("Paid unlocks", o.verified)}
+        ${tile("Paid key unlocks", o.keyUnlocks ?? 0, o.keyUnlocks ? `${fmt(o.keyUnlocksToday || 0)} today · ${fmt(o.keyUnlocksWeek || 0)} this week` : "")}
         ${tile("Open reports", o.reports)}
       </div>
 
@@ -345,6 +348,24 @@ export function createAdminPage({ onChanged } = {}) {
       </tr>`;
   }
 
+  // A script's code and link, straight from the server — no unlock needed.
+  function codeRow(c) {
+    return `
+      <tr class="adm__editor" data-script="${esc(c.id)}" data-coderow>
+        <td colspan="6">
+          <p class="adm__edhead"><b>Code for “${esc(c.title || "")}”</b>
+            <span class="muted">Staff view — no sponsor step, not counted as a copy.</span></p>
+          ${c.link ? `<p style="margin:6px 0">Link: <a href="${esc(c.link)}" target="_blank" rel="noopener noreferrer">${esc(c.link)}</a></p>` : ""}
+          ${c.code ? `<pre class="adm__code" data-codebox>${esc(c.code)}</pre>` : `<p class="muted">No code saved — this script is link-only.</p>`}
+          <div class="gate__actions" style="justify-content:flex-start;margin-top:10px">
+            ${c.code ? `<button class="btn btn--primary btn--sm" data-adminact="copycode">Copy code</button>` : ""}
+            ${c.link ? `<button class="btn btn--ghost btn--sm" data-adminact="copylink">Copy link</button>` : ""}
+            <button class="btn btn--ghost btn--sm" data-adminact="closecode">Close</button>
+          </div>
+        </td>
+      </tr>`;
+  }
+
   function scriptsTable(rows) {
     scriptRows = rows;
     for (const id of [...selected]) if (!rows.some((r) => r.id === id)) selected.delete(id);
@@ -386,6 +407,7 @@ export function createAdminPage({ onChanged } = {}) {
               <td class="adm__acts">
                 ${s.removed ? "" : `<a class="btn btn--ghost btn--xs" target="_blank" rel="noopener"
                    href="/creations/${encodeURIComponent(s.author)}/${encodeURIComponent(s.slug || "")}">View ↗</a>`}
+                <button class="btn btn--primary btn--xs" data-adminact="getcode">${codeOpen?.id === s.id ? "Hide code" : "Get code"}</button>
                 <button class="btn btn--ghost btn--xs" data-adminact="labels">Labels${s.labels?.length ? ` (${s.labels.length})` : ""}</button>
                 <button class="btn btn--ghost btn--xs" data-adminact="verify"
                         data-verified="${s.verified ? "1" : "0"}">
@@ -403,7 +425,8 @@ export function createAdminPage({ onChanged } = {}) {
                 <button class="btn btn--ghost btn--xs" data-adminact="copyid">Copy ID</button>
               </td>
             </tr>
-            ${editing === s.id ? labelEditor(s) : ""}`).join("")}
+            ${editing === s.id ? labelEditor(s) : ""}
+            ${codeOpen?.id === s.id ? codeRow(codeOpen) : ""}`).join("")}
         </tbody>
       </table>
       <p class="muted">A script stays on the site until it is taken down here, or its
@@ -470,6 +493,21 @@ export function createAdminPage({ onChanged } = {}) {
         ${tile("Active keys", c.active)}
         ${tile("In use now", c.inUse)}
         ${tile("Expired", c.expired)}
+      </div>
+      <div class="adm__make" data-makekey>
+        <b>Make a key</b>
+        <span class="muted">Instantly, with no LootLabs or Linkvertise steps. It works in the loader like any other key.</span>
+        <select class="adm__select" data-keyhours aria-label="How long the key lasts">
+          <option value="8">8 hours (same as /getkey)</option>
+          <option value="24">24 hours</option>
+          <option value="168">7 days</option>
+          <option value="720">30 days</option>
+        </select>
+        <button class="btn btn--primary btn--xs" data-keyact="make">＋ Make key</button>
+        ${madeKey ? `<span class="adm__made" data-madekey>
+          <code class="adm__key">${esc(madeKey.id)}</code>
+          <button class="adm__copy" data-keyact="copymade" title="Copy key" aria-label="Copy key">⧉</button>
+          <span class="muted">${esc(LEFT(madeKey.expiresAt - Date.now()))}</span></span>` : ""}
       </div>
       <div class="adm__bar">
         <div class="adm__pills" role="group" aria-label="Which keys">
@@ -845,6 +883,25 @@ export function createAdminPage({ onChanged } = {}) {
       const kact = kb.dataset.keyact;
       const keyId = kb.closest("[data-key]")?.dataset.key;
       if (kact === "refresh") { kb.disabled = true; await refreshKeys(); kb.disabled = false; return; }
+      if (kact === "make") {
+        const hours = Number($("[data-keyhours]", sheet.body)?.value) || 8;
+        kb.disabled = true; kb.textContent = "Making…";
+        try {
+          madeKey = await makeKey(hours);
+          logKey("Key made by admin", madeKey.id, `${hours}h, no sponsor steps`);
+          try { await navigator.clipboard.writeText(madeKey.id); toast("Made and copied " + madeKey.id); }
+          catch { toast("Made " + madeKey.id); }
+          keyView = "active";
+          keyRows = await listKeys().catch(() => keyRows);
+        } catch (err) { toast(err.message || "Couldn't make a key", "warn"); }
+        panel();
+        return;
+      }
+      if (kact === "copymade") {
+        try { await navigator.clipboard.writeText(madeKey?.id || ""); toast("Copied " + madeKey?.id); }
+        catch { prompt("Key:", madeKey?.id || ""); }
+        return;
+      }
       if (kact === "copy") {
         try { await navigator.clipboard.writeText(keyId); toast("Copied " + keyId); }
         catch { prompt("Key:", keyId); }
@@ -909,6 +966,22 @@ export function createAdminPage({ onChanged } = {}) {
     // Editor open/close and clipboard don't call the server.
     if (act === "labels") { editing = editing === scriptId ? null : scriptId; panel(); return; }
     if (act === "closeeditor") { editing = null; panel(); return; }
+    if (act === "closecode") { codeOpen = null; panel(); return; }
+    if (act === "getcode") {
+      if (codeOpen?.id === scriptId) { codeOpen = null; panel(); return; }
+      btn.disabled = true; btn.textContent = "Loading…";
+      const r = await get(`/api/admin/scripts/${encodeURIComponent(scriptId)}/code`);
+      if (!r.ok) { toast(r.error || "Couldn't load the code", "warn"); btn.disabled = false; btn.textContent = "Get code"; return; }
+      codeOpen = r.data;
+      panel();
+      return;
+    }
+    if (act === "copycode" || act === "copylink") {
+      const text = act === "copycode" ? codeOpen?.code : codeOpen?.link;
+      try { await navigator.clipboard.writeText(text || ""); toast(act === "copycode" ? "Code copied" : "Link copied"); }
+      catch { prompt("Copy:", text || ""); }
+      return;
+    }
     if (act === "copyid") {
       try { await navigator.clipboard.writeText(scriptId); toast("Copied " + scriptId); }
       catch { prompt("Script ID:", scriptId); }
