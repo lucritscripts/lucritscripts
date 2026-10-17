@@ -145,7 +145,7 @@ await postback(lastLoot);
 await page.goto(`${AT}/unlock/lootlabs`);         // LootLabs sends them back
 await page.waitForTimeout(2500);
 let text = await page.locator("#unlock").textContent();
-check("back from LootLabs → step 1 ticked, step 2 up", /Step 1 complete/.test(text) && /Checkpoint 2 of 2/.test(text), text.slice(0, 200));
+check("back from LootLabs → step 1 ticked, step 2 up", /Step 1 complete/.test(text) && /Final checkpoint/.test(text) && /Final step/.test(text), text.slice(0, 200));
 
 await page.locator('#unlock [data-ufl="go"]').click();
 await page.waitForTimeout(1200);

@@ -123,6 +123,27 @@ check("…with valid:true, inUse:false, boundTo, lastPing",
 const hours = (stored.expiresAt - Date.now()) / 3600000;
 check("…expiring in 8 hours", hours > 7.9 && hours <= 8, hours.toFixed(3));
 check("timer shows", /Key valid for: 0[78]:/.test(await page.locator("#countdown").textContent()));
+
+console.log("\nPaid key unlocks (admin tile)");
+for (let i = 0; i < 30 && !env.DB._raw.prepare("SELECT 1 FROM sqlite_master WHERE name='key_events'").get(); i++) await page.waitForTimeout(100);
+const keyRows = () => env.DB._raw.prepare("SELECT * FROM key_events").all();
+for (let i = 0; i < 30 && keyRows().length < 1; i++) await page.waitForTimeout(100);
+check("making a key reports it once", keyRows().length === 1, JSON.stringify(keyRows()));
+check("…as a LootLabs key (not server-verified)", keyRows()[0]?.via === "lootlabs" && keyRows()[0]?.verified === 0);
+check("…and the key itself isn't stored", !JSON.stringify(keyRows()).includes(key));
+const made = (body) => page.evaluate(async (b) => {
+  const r = await fetch("/api/getkey/made", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(b) });
+  return { status: r.status, ...(await r.json()) };
+}, body);
+check("the same key twice counts once", (await made({ key, via: "lootlabs" })).counted === false && keyRows().length === 1);
+check("a non-Lucrit key is refused", (await made({ key: "SMH-ABC", via: "lootlabs" })).status === 400);
+const gkHex = "ab".repeat(16);
+env.DB._raw.prepare("INSERT INTO cache (k, v, expires) VALUES (?, ?, ?)").run("gk:" + gkHex, JSON.stringify({ s1: 1, s2: 1 }), Math.floor(Date.now() / 1000) + 600);
+const lvRes = await made({ key: "LUCRIT-ABCDEFGHJKLMNPQR", via: "linkvertise", gk: gkHex });
+check("a Linkvertise key whose flow passed both steps is verified", lvRes.counted && lvRes.verified, JSON.stringify(lvRes));
+const fake = await made({ key: "LUCRIT-BCDEFGHJKLMNPQRS", via: "linkvertise", gk: "cd".repeat(16) });
+check("…one that didn't pass isn't", fake.counted && !fake.verified, JSON.stringify(fake));
+env.DB._raw.prepare("DELETE FROM key_events WHERE key_hash <> ?").run(keyRows()[0].key_hash);
 check("the rest of the site's storage survives", await page.evaluate(() => localStorage.getItem("lucrit:human")) === "keep-me");
 
 console.log("\nComing back later");

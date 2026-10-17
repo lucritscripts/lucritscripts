@@ -110,7 +110,21 @@ const byViews = (await call("GET", "/api/admin/scripts?sort=views", undefined, s
 check("sort by views", byViews[0].title === "Speed Hub");
 check("rows include slug, labels and note", byViews.every((s) => s.slug && Array.isArray(s.labels)) && byViews.find((s) => s.id === a.id).staffNote === "Alt accounts only.");
 const ov = (await call("GET", "/api/admin/overview", undefined, staff)).json.data;
+check("overview has key-unlock counts", ov.keyUnlocks === 0 && ov.keyUnlocksToday === 0, JSON.stringify({ k: ov.keyUnlocks }));
 check("overview counts", ov.risky === 2 && ov.labeled === 2 && ov.verifiedScripts === 1, JSON.stringify(ov));
+console.log("\nStaff skip the unlock");
+const copiesOf = (id) => env.DB._raw.prepare("SELECT copies FROM scripts WHERE id = ?").get(id).copies;
+check("a visitor without an unlock gets 403 for the code", (await call("GET", `/api/scripts/${a.id}/code`)).status === 403);
+const c0 = copiesOf(a.id);
+r = await call("GET", `/api/scripts/${a.id}/code`, undefined, staff);
+check("staff get the code with no unlock", r.json.ok && /GetService/.test(r.json.data.code) && r.json.staff === true, JSON.stringify(r.json).slice(0, 120));
+check("…not counted as a copy", copiesOf(a.id) === c0);
+const listed = (await call("GET", "/api/scripts?limit=50", undefined, staff)).json.data;
+check("every script lists as unlocked for staff", listed.length > 0 && listed.every((x) => x.unlocked && x.unlockedFor === null));
+check("…but not for a visitor", (await call("GET", "/api/scripts?limit=50")).json.data.every((x) => !x.unlocked));
+r = await call("GET", `/api/admin/scripts/${a.id}/code`, undefined, staff);
+check("admin Get code endpoint returns code + title", r.json.ok && r.json.data.title === a.title && /GetService/.test(r.json.data.code));
+check("…and is staff-only", (await call("GET", `/api/admin/scripts/${a.id}/code`, undefined, maker)).status === 423);
 const log = (await call("GET", "/api/admin/log", undefined, staff)).json.data;
 check("activity log records labels + verify", log.some((l) => l.action === "Labels changed" && l.target === "Fly Hub")
   && log.some((l) => l.action === "Verified" && l.target === "Noclip Hub"), JSON.stringify(log.map((l) => l.action)));
@@ -131,11 +145,21 @@ await page.locator("#admin [name=passcode]").fill("open-sesame");
 await page.locator("#admin [data-passform] button[type=submit]").click();
 await page.locator('#admin [data-admintab="scripts"]').waitFor({ timeout: 30000 });
 check("new overview tiles", /Marked risky/.test(await page.locator("#admin .stats").textContent()));
+check("Paid key unlocks tile sits right after Paid unlocks", await page.evaluate(() => {
+  const t = [...document.querySelectorAll("#admin .stats > *")].map((e) => e.textContent.replace(/\s+/g, " ").trim());
+  const i = t.findIndex((x) => x.startsWith("Paid unlocks"));
+  return i >= 0 && /^Paid key unlocks 0/.test(t[i + 1] || "");
+}));
 check("Activity tab exists", await page.locator('#admin [data-admintab="activity"]').count() === 1);
 await page.locator('#admin [data-admintab="scripts"]').click();
 await page.locator("#admin [data-adminfilter]").first().waitFor();
 check("filter pills", await page.locator("#admin [data-adminfilter]").count() >= 8);
 check("rows show the same badges as the site", await page.locator(`#admin tr[data-script="${a.id}"] .badge--label[data-label="risky"]`).count() === 1);
+await page.locator(`#admin tr[data-script="${a.id}"] [data-adminact="getcode"]`).click();
+await page.locator("#admin [data-coderow] [data-codebox]").waitFor({ timeout: 15000 });
+check("Get code shows the script's code under its row", /GetService/.test(await page.locator("#admin [data-coderow] [data-codebox]").textContent()));
+await page.locator('#admin [data-adminact="closecode"]').click();
+check("…and closes", await page.locator("#admin [data-coderow]").count() === 0);
 
 // Label editor
 await page.locator(`#admin tr[data-script="${c.id}"] [data-adminact="labels"]`).click();
@@ -182,7 +206,12 @@ check("labels on the script page", await page.locator('#script .sheet__head .bad
 check("verified bubble still there", await page.locator("#script .sheet__head .badge--verified").count() === 1);
 check("warning box for a red label", await page.locator("#script .staffbox--warn").count() === 1);
 check("…showing the staff note", /Kicks on the newest update/.test(await page.locator("#script .staffbox").textContent()));
-const red = await page.locator('#script .badge--label[data-label="banrisk"]').evaluate((el) => getComputedStyle(el).backgroundColor);
+// Read after the sheet's open transition settles; mid-fade the colour is still blending.
+let red = "";
+for (let i = 0; i < 20 && !/rgb\(229, 57, 75\)/.test(red); i++) {
+  red = await page.locator('#script .badge--label[data-label="banrisk"]').evaluate((el) => getComputedStyle(el).backgroundColor);
+  if (!/rgb\(229, 57, 75\)/.test(red)) await page.waitForTimeout(100);
+}
 check("risk labels are filled red", /rgb\(229, 57, 75\)/.test(red), red);
 await open({ slug: String(b.id).replace(/^s_/, "") });
 check("Patched also warns (no note → its own tip)", /no longer works/.test(await page.locator("#script .staffbox--warn").textContent()));

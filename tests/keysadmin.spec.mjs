@@ -49,6 +49,12 @@ await ctx.route("https://firestore.googleapis.com/**", async (route) => {
   const id = m[1] && decodeURIComponent(m[1]);
   if (req.method() === "GET" && !id) return ok({ documents: [...store.keys()].map(doc) });
   if (req.method() === "DELETE") { store.delete(id); return ok({}); }
+  if (req.method() === "POST" && !id) {
+    const newId = url.searchParams.get("documentId");
+    if (store.has(newId)) return route.fulfill({ status: 409, contentType: "application/json", body: JSON.stringify({ error: { message: "exists" } }) });
+    store.set(newId, JSON.parse(req.postData()).fields);
+    return ok(doc(newId));
+  }
   if (req.method() === "PATCH") {
     const body = JSON.parse(req.postData());
     patches.push({ id, mask: url.searchParams.getAll("updateMask.fieldPaths"), fields: body.fields });
@@ -117,12 +123,30 @@ await page.locator('#admin tr[data-key="LUCRIT-BBBBBBBBBBBBBBBB"] [data-keyact="
 await until(() => !document.querySelector('#admin tr[data-key="LUCRIT-BBBBBBBBBBBBBBBB"]'));
 check("active key deleted (after a confirm)", !store.has("LUCRIT-BBBBBBBBBBBBBBBB"));
 
+console.log("\nMake a key instantly (no sponsor steps)");
+check("there's a Make key button", await page.locator('#admin [data-keyact="make"]').count() === 1);
+await page.locator("#admin [data-keyhours]").selectOption("24");
+const before = new Set(store.keys());
+await page.locator('#admin [data-keyact="make"]').click();
+await until(() => !!document.querySelector("#admin [data-madekey]"));
+const made = [...store.keys()].find((k) => !before.has(k));
+const mf = made && store.get(made);
+check("a new LUCRIT- key is written to Firebase", /^LUCRIT-[A-HJ-NP-Z2-9]{16}$/.test(made || ""), made);
+check("…shaped like a /getkey key (valid, not in use, bound, pinged)",
+  mf?.valid?.booleanValue === true && mf?.inUse?.booleanValue === false && mf?.boundTo?.stringValue === "admin" && Number(mf?.lastPing?.integerValue) > 0);
+const hrs = (Number(mf?.expiresAt?.integerValue) - Date.now()) / 3600e3;
+check("…lasting the picked 24 hours", hrs > 23.9 && hrs <= 24, hrs.toFixed(3));
+check("…shown in the panel", (await page.locator("#admin [data-madekey]").textContent()).includes(made));
+await until((k) => !!document.querySelector(`#admin tr[data-key="${k}"]`), made);
+check("…and in the active list", true);
+
 console.log("\nActivity log");
 await page.waitForTimeout(500);
 await page.locator('#admin [data-admintab="activity"]').click();
 await page.locator("#admin tbody tr").first().waitFor();
 const act = await page.locator("#admin tbody").textContent();
 check("unlock, clean-up and delete are logged", /Key unlocked/.test(act) && /Expired keys cleaned/.test(act) && /Key deleted \(active\)/.test(act), act.replace(/\s+/g, " ").slice(0, 300));
+check("making a key is logged", /Key made by admin/.test(act));
 
 console.log("\nThe log endpoint is locked down");
 const call = async (body, cookie) => (await worker.fetch(new Request("https://lucrit.test/api/admin/log", {
