@@ -200,7 +200,7 @@ export function createAdminPage({ onChanged } = {}) {
         ${tile("Taken down", o.removed)}
         ${tile("Unlocks today", o.unlocksToday, `${fmt(o.unlocksWeek)} this week`)}
         ${tile("Paid unlocks", o.verified)}
-        ${tile("Paid key unlocks", o.keyUnlocks ?? 0, o.keyUnlocks ? `${fmt(o.keyUnlocksToday || 0)} today · ${fmt(o.keyUnlocksWeek || 0)} this week` : "")}
+        ${tile("Keys made", o.keyUnlocks ?? 0, o.keyUnlocks ? `${fmt(o.keyUnlocksToday || 0)} today · ${fmt(o.keyUnlocksWeek || 0)} this week` : "")}
         ${tile("Open reports", o.reports)}
       </div>
 
