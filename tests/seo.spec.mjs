@@ -104,7 +104,7 @@ const { adsAllowed } = await import("../assets/js/ads.js");
 check("ads allowed on the homepage and script pages", adsAllowed("/") && adsAllowed("/creations/Maker/abc"));
 check("…not on admin, dashboards or the unlock steps", !adsAllowed("/admin") && !adsAllowed("/dashboard/Maker") && !adsAllowed("/unlock/lootlabs"));
 store["lucrit:staff"] = "1";
-check("…not in the owner's (staff) browser", !adsAllowed("/"));
+check("…and on the owner's computer too, since they asked for it (18 Oct)", adsAllowed("/"));
 delete store["lucrit:staff"];
 Object.defineProperty(globalThis, "navigator", { value: { webdriver: true }, configurable: true });
 check("…not for automated browsers", !adsAllowed("/"));

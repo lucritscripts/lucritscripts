@@ -272,7 +272,7 @@ console.log("\nSponsor tabs before the key (adgate.js)");
   const m = first.match(/\((\d)\/(\d)\)/);
   const need = m ? Number(m[2]) : 0;
   check("button shows progress before the key, e.g. 'Get Your Key (0/4)'", !!m && m[1] === "0", first);
-  check("asks for 3–5 presses", need >= 3 && need <= 5, String(need));
+  check("asks for 4–7 presses (raised 18 Oct)", need >= 4 && need <= 7, String(need));
   check("the note says how many presses are left", /Press \d more time/.test(await page.locator("#stepNote").textContent()));
   await page.locator("#finishBtn").click();
   await page.waitForTimeout(400);
