@@ -95,6 +95,23 @@ check("nothing from the URL is echoed unescaped", !/"><script>/.test(evil.text))
 const adm = await page("/admin");
 check("/admin is noindex", /<meta name="robots" content="noindex">/.test(adm.text));
 
+console.log("\nPop-under ads (ads.js)");
+const store = {};
+globalThis.localStorage = { getItem: (k) => store[k] ?? null, setItem: (k, v) => { store[k] = String(v); } };
+Object.defineProperty(globalThis, "navigator", { value: { webdriver: false }, configurable: true });
+globalThis.location = { pathname: "/" };
+const { adsAllowed } = await import("../assets/js/ads.js");
+check("ads allowed on the homepage and script pages", adsAllowed("/") && adsAllowed("/creations/Maker/abc"));
+check("…not on admin, dashboards or the unlock steps", !adsAllowed("/admin") && !adsAllowed("/dashboard/Maker") && !adsAllowed("/unlock/lootlabs"));
+store["lucrit:staff"] = "1";
+check("…not in the owner's (staff) browser", !adsAllowed("/"));
+delete store["lucrit:staff"];
+Object.defineProperty(globalThis, "navigator", { value: { webdriver: true }, configurable: true });
+check("…not for automated browsers", !adsAllowed("/"));
+check("CSP lets Monetag's tag load, and still refuses inline script",
+  /script-src 'self'[^;]*https:\/\/al5sm\.com/.test(home.text) && !/script-src[^;]*unsafe-inline/.test(home.text));
+check("getkey.html never loads ads", !fs.readFileSync(path.join(ROOT, "getkey.html"), "utf8").includes("ads.js"));
+
 console.log("\nSitemap");
 const sm = await page("/sitemap.xml");
 check("served as XML", sm.status === 200 && sm.type.includes("application/xml"));
