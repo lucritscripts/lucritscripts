@@ -10,8 +10,15 @@
 // is why this uses a Direct Link opened from the click instead: one press,
 // one tab, as many as the gate asks for.
 //
-// Skipped for: the owner's browser (admin panel opened here), a script's own
-// author, automated browsers, and whenever no link is configured.
+// Skipped for: a script's own author, automated browsers, and whenever no link
+// is configured. (The owner's browser used to be skipped too; since 18 Oct the
+// owner wants to see the ads on their computer — "the ads need to run on
+// computers". Don't click your own ads: Monetag bans for self-clicks.)
+//
+// 18 Oct, "MAXX PROFIT": the gates that come right after someone has finished
+// a task (Get Your Key, copying an unlocked script, an unlocked executor's
+// download) now take 4–7 presses (was 3–5), and browsing — opening a script
+// from a card, opening a game — opens one sponsor tab now and then (sponsorTap).
 
 /**
  * Monetag Direct Links, one per gate so their earnings show separately in
@@ -20,15 +27,16 @@
 export const SPONSOR_LINKS = {
   key: "https://uplcm.com/4/12060629",    // "Superior link" — /getkey, Get Your Key
   copy: "https://uplcm.com/4/12060633",   // "Industrious link" — a script's Copy / raw / link
+  xdl: "https://uplcm.com/4/12060633",    // an unlocked executor's Download button
+  browse: "https://uplcm.com/4/12060633", // one tab now and then while browsing
 };
 export const SPONSOR_LINK = SPONSOR_LINKS.copy;
 
-const MIN = 3;
-const MAX = 5;
+const MIN = 4;
+const MAX = 7;
 
 function exempt(link) {
   if (!link) return true;
-  try { if (localStorage.getItem("lucrit:staff") === "1") return true; } catch { /* storage blocked */ }
   // Automated browsers never open ad tabs — except a test that asks for the
   // gate explicitly (harmless for a real visitor: it only means more presses).
   if (typeof navigator !== "undefined" && navigator.webdriver) {
@@ -98,4 +106,20 @@ export function createAdGate(name, { link = SPONSOR_LINKS[String(name).split(":"
       return ` (${st.done}/${st.need})`;
     },
   };
+}
+
+/**
+ * Browsing taps: opening a script from a card or a game from the picker opens
+ * one sponsor tab — at most once every two minutes, so the site stays usable.
+ * Must run synchronously inside the click handler. Returns true if it opened.
+ */
+const TAP_GAP_MS = 2 * 60 * 1000;
+export function sponsorTap(link = SPONSOR_LINKS.browse) {
+  if (exempt(link)) return false;
+  let last = 0;
+  try { last = Number(localStorage.getItem("lucrit:tap")) || 0; } catch { /* storage blocked */ }
+  if (Date.now() - last < TAP_GAP_MS) return false;
+  try { localStorage.setItem("lucrit:tap", String(Date.now())); } catch { /* fine */ }
+  openSponsor(link);
+  return true;
 }

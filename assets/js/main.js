@@ -25,7 +25,8 @@ import { createCreatorPage } from "./creator.js";
 import { createExecutorsPage } from "./executors.js";
 import { createPublishForm } from "./publish.js";
 import { createUnlockFlowPage } from "./unlockflow.js";
-import { scheduleAds, adsLoaded } from "./ads.js";
+import { scheduleAds, adsLoaded, adsAllowed } from "./ads.js";
+import { sponsorTap } from "./adgate.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -736,6 +737,16 @@ document.documentElement.classList.add("is-ready");
 
 // Pop-under ads (see ads.js for where they're kept out).
 scheduleAds();
+
+// Browsing taps (adgate.js sponsorTap): opening a script from a card or a game
+// from the picker opens one sponsor tab, at most once every two minutes. Not
+// on the heart or an author link inside a card, and never on admin.
+document.addEventListener("click", (e) => {
+  if (!adsAllowed()) return;
+  const t = e.target;
+  if (t.closest(".card__heart, a[href^='/creators/']")) return;
+  if (t.closest(".card") || t.closest("[data-game]")) sponsorTap();
+}, true);
 
 /* -------------------------------------------------------------- discord */
 

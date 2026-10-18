@@ -28,6 +28,7 @@ import { safeHref, safeImageSrc } from "./safe.js";
 import { fetchExecutors, fetchExecutor } from "./library-api.js";
 import { pathForExecutor, setTitle } from "./router.js";
 import { account } from "./account.js";
+import { createAdGate } from "./adgate.js";
 
 // Mirrors EXECUTOR_STATUS / STATUS_LABEL in _worker.js. The server is the
 // authority on which values exist; this is only how they read on screen.
@@ -211,13 +212,26 @@ export function createExecutorsPage() {
       ${x.locked ? unlockBox(x) : ""}
 
       <div class="script__toolbar">
-        ${site ? `<a class="btn btn--primary" href="${esc(site)}" target="_blank" rel="noopener nofollow">Download ${esc(x.name)}</a>` : ""}
+        ${site ? `<a class="btn btn--primary" href="${esc(site)}" target="_blank" rel="noopener nofollow" data-xdl="${esc(x.id)}">Download ${esc(x.name)}${createAdGate("xdl:" + x.id).label()}</a>` : ""}
         ${chat ? `<a class="btn btn--discord" href="${esc(chat)}" target="_blank" rel="noopener nofollow">Their Discord</a>` : ""}
       </div>
 
       <p class="note">These links go to the developer, not to us. Lucrit Scripts does not
          host executor downloads and cannot vouch for third-party files.</p>`;
   }
+
+  // An unlocked download takes a few sponsor-tab presses first (adgate.js).
+  sheet.body.addEventListener("click", (e) => {
+    const a = e.target.closest("[data-xdl]");
+    if (!a) return;
+    const g = createAdGate("xdl:" + a.dataset.xdl);
+    if (g.press()) return;                       // all done: the link opens
+    e.preventDefault();
+    a.textContent = a.textContent.replace(/ \(\d+\/\d+\)$/, "") + g.label();
+    toast(g.left
+      ? `Sponsor tab opened — ${g.left} more press${g.left === 1 ? "" : "es"}, then the download opens`
+      : "Sponsor tabs done ✓ — press again to download");
+  }, true);
 
   sheet.body.addEventListener("click", async (e) => {
     const f = e.target.closest("[data-filter]");

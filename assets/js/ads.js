@@ -14,7 +14,8 @@
 //     LootLabs / Linkvertise, and an ad there costs sponsor completions; admin
 //     and dashboard keep a strict CSP and are opened with a full page load once
 //     ads are running, so no ad script is ever resident there);
-//   - the owner's own browser (set once the admin panel has been opened here);
+//   (the owner's own browser used to be skipped as well; since 18 Oct the
+//   owner wants the ads on their computer too — never click your own ads);
 //   - automated browsers (tests, bots) so they never count as ad traffic.
 // /getkey is a separate page and never loads this file.
 // How often each format shows is set on the zone in Monetag.
@@ -25,7 +26,6 @@ const SKIP = [/^\/admin(\/|$)/, /^\/dashboard(\/|$)/, /^\/unlock\//];
 
 export function adsAllowed(path = location.pathname) {
   if (SKIP.some((re) => re.test(path))) return false;
-  try { if (localStorage.getItem("lucrit:staff") === "1") return false; } catch { /* storage blocked */ }
   if (navigator.webdriver) return false;
   return true;
 }
