@@ -25,7 +25,7 @@ import { createCreatorPage } from "./creator.js";
 import { createExecutorsPage } from "./executors.js";
 import { createPublishForm } from "./publish.js";
 import { createUnlockFlowPage } from "./unlockflow.js";
-import { scheduleAds } from "./ads.js";
+import { scheduleAds, adsLoaded } from "./ads.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -206,9 +206,21 @@ function openScript(script) {
   scriptPage.open(script);
 }
 
+/**
+ * Admin and the dashboard keep a strict CSP and never run alongside the ad
+ * script. If ads are already loaded in this page, go there with a full page
+ * load instead of opening the panel in place (see ads.js / adsCsp).
+ */
+function cleanLoad(path) {
+  if (!adsLoaded()) return false;
+  location.assign(path);
+  return true;
+}
+
 /** Opens your own dashboard at /dashboard/<you>. */
 function openDashboard(tab = "stats") {
   if (!account.isSignedIn) { auth.open("signup"); return; }
+  if (cleanLoad(pathForDashboard(account.session.username))) return;
   closeRoutedPages("dashboard");
   router.setPath(pathForDashboard(account.session.username));
   setTitle("Dashboard");
@@ -285,6 +297,7 @@ const router = createRouter({
   },
 
   admin() {
+    if (cleanLoad(location.pathname)) return;
     closeRoutedPages("admin");
     adminPage.open();
     setTitle("Admin");
@@ -346,6 +359,7 @@ const router = createRouter({
       return;
     }
 
+    if (cleanLoad(location.pathname)) return;
     closeRoutedPages("dashboard");
     router.correct(pathForDashboard(me));
     setTitle("Dashboard");
