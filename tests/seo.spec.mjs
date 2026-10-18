@@ -108,8 +108,32 @@ check("…not in the owner's (staff) browser", !adsAllowed("/"));
 delete store["lucrit:staff"];
 Object.defineProperty(globalThis, "navigator", { value: { webdriver: true }, configurable: true });
 check("…not for automated browsers", !adsAllowed("/"));
-check("CSP lets Monetag's tag load, and still refuses inline script",
-  /script-src 'self'[^;]*https:\/\/al5sm\.com/.test(home.text) && !/script-src[^;]*unsafe-inline/.test(home.text));
+const cspOf = (t) => (t.match(/Content-Security-Policy" content="([^"]*)"/) || [])[1] || "";
+const dir = (csp, d) => ((csp.match(new RegExp("\\b" + d + " ([^;]*);")) || [])[1] || "").trim();
+const homeCsp = cspOf(home.text);
+check("public pages: CSP lets the Monetag Multitag load (any https host)",
+  / https:$/.test(dir(homeCsp, "script-src")) && / https:/.test(dir(homeCsp, "connect-src")) && /https:/.test(dir(homeCsp, "frame-src")), dir(homeCsp, "script-src"));
+check("…and still refuses inline script and eval",
+  !/unsafe-inline|unsafe-eval/.test(dir(homeCsp, "script-src")), dir(homeCsp, "script-src"));
+const dashPage = await page("/dashboard/Maker"), unlockPg = await page("/unlock/lootlabs");
+for (const [name, t] of [["/admin", adm.text], ["/dashboard", dashPage.text], ["/unlock", unlockPg.text]]) {
+  const sc = dir(cspOf(t), "script-src");
+  check(`${name} keeps the strict CSP (fixed host list, no blanket https:)`, !!sc && !/ https:$/.test(sc) && sc.includes("https://"), sc);
+}
+check("index.html itself ships the strict policy (the fail-safe)",
+  !/script-src 'self' https:;/.test(fs.readFileSync(path.join(ROOT, "index.html"), "utf8")));
+const adsSrc = fs.readFileSync(path.join(ROOT, "assets/js/ads.js"), "utf8");
+check("ads.js loads the Multitag (zone 297797), not the old OnClick zone too",
+  adsSrc.includes("quge5.com/88/tag.min.js") && adsSrc.includes('"297797"') && !adsSrc.includes("al5sm.com/tag"));
+const sw = await page("/sw.js");
+check("/sw.js (push ads) is served from the site root as JavaScript",
+  sw.status === 200 && /javascript/.test(sw.type) && sw.text.includes("12062755"), `${sw.status} ${sw.type}`);
+const rep1 = await call("POST", "/api/csp", { d: "script-src-elem", h: "ads.example.com" });
+await call("POST", "/api/csp", { d: "script-src-elem", h: "ads.example.com" });
+const row = await env.DB.prepare("SELECT v FROM cache WHERE k = 'cspv:script-src-elem:ads.example.com'").first();
+check("blocked ad hosts are counted (directive + host only)", rep1.res.status === 200 && row && JSON.parse(row.v).n === 2, row && row.v);
+const csp403 = await call("GET", "/api/admin/csp");
+check("…and only staff can read them", csp403.res.status >= 400, String(csp403.res.status));
 check("getkey.html never loads ads", !fs.readFileSync(path.join(ROOT, "getkey.html"), "utf8").includes("ads.js"));
 
 console.log("\nSitemap");
