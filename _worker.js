@@ -6255,6 +6255,68 @@ async function handleAdminCsp(request, env) {
   return ok({ data: rows });
 }
 
+/**
+ * How a script page looks in Google (18 Oct 2026). The owner pointed at
+ * ScriptBlox and cheater.fun results: "Steal An Egg Script for Roblox: CRZHub
+ * keyless", a description that says what it is, where and when it was
+ * uploaded and whether it works, a breadcrumb ("scriptblox.com › Steal An
+ * Egg") and a date. So:
+ *   title        "<Game> Script for Roblox: <Title> (Keyless)"
+ *   description  "<Title> is a keyless <Game> script for Roblox, uploaded to
+ *                 Lucrit Script on <date> by @<author>. Working ✓ … <desc>"
+ *   JSON-LD      WebPage (datePublished — Google's date line) with the
+ *                script as SoftwareSourceCode (Luau), and a BreadcrumbList
+ *                Lucrit Script › <Game>.
+ * Everything here is visible on the page anyway; the code is never included.
+ */
+function scriptSearchLook(row, canon, site) {
+  const clip = (t, n) => (t.length > n ? t.slice(0, n - 1).replace(/\s+\S*$/, "") + "…" : t);
+  const title = String(row.title || "Script").trim();
+  const game = String(row.game || "").trim();
+  const keyless = Number(row.keyless) === 1;
+  let labels = [];
+  try { labels = JSON.parse(row.labels || "[]"); } catch { labels = []; }
+  const when = new Date(row.created_at || Date.now());
+  const ok = !isNaN(when);
+  const day = ok ? when.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" }) : "";
+  const status = labels.includes("patched") ? "Patched — may not work right now."
+    : labels.includes("working") || Number(row.verified) === 1 ? "Working ✓ — checked by Lucrit staff."
+    : "";
+  const desc = String(row.descr || "").replace(/\s+/g, " ").trim();
+  const lead = `${title} is a ${keyless ? "keyless " : ""}${game ? game + " " : ""}script for Roblox, uploaded to Lucrit Script${day ? " on " + day : ""} by @${row.author}.`;
+  const pageTitle = clip(`${game ? game + " Script for Roblox: " : "Roblox Script: "}${title}${keyless ? " (Keyless)" : ""}`, 70);
+  const description = clip([lead, status, desc].filter(Boolean).join(" "), 160);
+  const iso = ok ? when.toISOString() : undefined;
+  const graph = {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "WebPage", "@id": canon + "#page", url: canon, name: pageTitle, description,
+        datePublished: iso, dateModified: iso, inLanguage: "en",
+        isPartOf: { "@id": site + "/#website" },
+        breadcrumb: { "@id": canon + "#crumbs" },
+        mainEntity: {
+          "@type": "SoftwareSourceCode", name: title, description: clip(desc || lead, 300),
+          programmingLanguage: "Luau", runtimePlatform: "Roblox",
+          author: { "@type": "Person", name: "@" + row.author, url: `${site}/creators/${encodeURIComponent(row.author)}` },
+          datePublished: iso, keywords: [game, "Roblox script", keyless ? "keyless" : ""].filter(Boolean).join(", "),
+        },
+      },
+      {
+        "@type": "BreadcrumbList", "@id": canon + "#crumbs",
+        itemListElement: [
+          { "@type": "ListItem", position: 1, name: "Lucrit Script", item: site + "/" },
+          { "@type": "ListItem", position: 2, name: game || title, item: canon },
+        ],
+      },
+    ],
+  };
+  // A data block inside <script>: user text must not be able to close it.
+  const ld = JSON.stringify(graph).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  return { title: pageTitle, description, published: iso, ld };
+}
+
 async function seoShell(response, url, env) {
   const type = response.headers.get("Content-Type") || "";
   if (!response.ok || !type.includes("text/html")) return response;
@@ -6268,7 +6330,7 @@ async function seoShell(response, url, env) {
   set(/<link rel="canonical" href="[^"]*">/, `<link rel="canonical" href="${attr(canon)}">`);
   set(/<meta property="og:url" content="[^"]*">/, `<meta property="og:url" content="${attr(canon)}">`);
 
-  let meta = null;
+  let meta = null, ld = null;
   try {
     const sm = path.match(/^\/creations\/([^/]+)\/([^/]+)$/);
     const cm = path.match(/^\/creators\/([^/]+)$/);
@@ -6276,17 +6338,13 @@ async function seoShell(response, url, env) {
       const id = "s_" + decodeURIComponent(sm[2]).replace(/^s_/, "");
       const row = await env.DB.prepare(
         `SELECT s.id, s.title, s.game, s.descr, ${"CASE WHEN s.thumbnail LIKE 'data:%' THEN 'thumb:' || length(s.thumbnail) || ':' || substr(s.thumbnail, -40) ELSE s.thumbnail END"} AS thumbnail,
-                u.username AS author
+                s.keyless, s.verified, s.labels, s.created_at, u.username AS author
            FROM scripts s JOIN users u ON u.id = s.author_id
           WHERE s.id = ? AND s.removed = 0 AND u.banned = 0`).bind(id).first();
       if (row) {
-        const desc = String(row.descr || "").replace(/\s+/g, " ").trim();
-        meta = {
-          title: `${row.title}${row.game ? ` — ${row.game} Script` : ""} | Lucrit Script`,
-          description: (desc.length > 155 ? desc.slice(0, 152).replace(/\s+\S*$/, "") + "…" : desc)
-            || `${row.title}, a Roblox script by @${row.author} on Lucrit Script.`,
-          image: thumbAbsolute(env, row),
-        };
+        const g = scriptSearchLook(row, canon, site);
+        meta = { title: g.title, description: g.description, image: thumbAbsolute(env, row), published: g.published };
+        ld = g.ld;
       }
     } else if (cm) {
       const name = decodeURIComponent(cm[1]).slice(0, 40);
@@ -6308,7 +6366,9 @@ async function seoShell(response, url, env) {
     set(/<meta property="og:title" content="[^"]*">/, `<meta property="og:title" content="${attr(meta.title)}">`);
     set(/<meta property="og:description" content="[^"]*">/, `<meta property="og:description" content="${attr(meta.description)}">`);
     if (meta.image) set(/<meta property="og:image" content="[^"]*">/, `<meta property="og:image" content="${attr(meta.image)}">`);
+    if (meta.published) html = html.replace("</head>", `<meta property="article:published_time" content="${attr(meta.published)}">\n</head>`);
   }
+  if (ld) html = html.replace("</head>", `<script type="application/ld+json">${ld}</script>\n</head>`);
   if (NOINDEX.some((re) => re.test(path))) html = html.replace("</head>", `<meta name="robots" content="noindex">\n</head>`);
 
   const headers = new Headers(response.headers);

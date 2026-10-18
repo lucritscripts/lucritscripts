@@ -319,7 +319,7 @@
     import {
       doc, setDoc, getDoc
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
-    import { createAdGate } from "/assets/js/adgate.js";
+    import { createAdGate, sponsorTransfer } from "/assets/js/adgate.js";
 
     // Once both checkpoints are done, "Get Your Key" first asks for a few
     // presses that each open one sponsor tab; then the next press makes the key
@@ -363,6 +363,8 @@
     let linkvertiseOn = false;
 
     async function lvGo(step) {
+      // One sponsor tab on the press, then a 5-second transfer screen (adgate.js).
+      const transfer = sponsorTransfer('Linkvertise');
       const btn = step === 1 ? lvBtn : finishBtn;
       btn.disabled = true; btn.textContent = 'Opening Linkvertise…';
       try {
@@ -372,13 +374,14 @@
         });
         const body = await res.json();
         if (!body.ok) {
-          if (body.restart) { localStorage.removeItem(GK_KEY); window.location.href = '/getkey'; return; }
+          if (body.restart) { transfer.cancel(); localStorage.removeItem(GK_KEY); window.location.href = '/getkey'; return; }
           throw new Error(body.error || 'Linkvertise is unavailable right now.');
         }
         localStorage.setItem(GK_KEY, body.data.gk);
         localStorage.setItem(VIA_KEY, 'linkvertise');
-        window.location.href = body.data.url;
+        transfer.go(body.data.url);
       } catch (e) {
+        transfer.cancel();
         alert(e.message || "Couldn't reach Linkvertise. Try again.");
         btn.disabled = false;
         showNormalUI();
@@ -483,7 +486,7 @@
         stepNote.textContent = linkvertiseOn
           ? 'Pick LootLabs or Linkvertise — two quick steps either way, then your key.'
           : 'Finish the LootLabs page and you\'ll come straight back here for checkpoint two.';
-        finishBtn.onclick = () => { localStorage.setItem(VIA_KEY, 'lootlabs'); window.location.href = STEP_LINKS[0]; };
+        finishBtn.onclick = () => { localStorage.setItem(VIA_KEY, 'lootlabs'); sponsorTransfer('LootLabs').go(STEP_LINKS[0]); };
         if (linkvertiseOn) { lvBtn.hidden = false; lvBtn.disabled = false; lvBtn.textContent = 'Get Key with Linkvertise'; lvBtn.onclick = () => lvGo(1); }
       } else if (STEP === 1) {
         messageText.textContent = 'Final Checkpoint';
@@ -495,7 +498,7 @@
         } else {
           finishBtn.textContent = 'Get Key';
           finishBtn.classList.remove('lv');
-          finishBtn.onclick = () => { window.location.href = STEP_LINKS[1]; };
+          finishBtn.onclick = () => { sponsorTransfer('LootLabs').go(STEP_LINKS[1]); };
         }
       } else {
         messageText.textContent = 'Your Key is Ready';
