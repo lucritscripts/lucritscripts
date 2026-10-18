@@ -3005,3 +3005,21 @@ html.reduced-motion .chapter__stage { transition: none; }
 .adm__code { max-height: 340px; overflow: auto; margin: 8px 0 0; padding: 12px 14px; border-radius: 10px;
   background: rgba(0, 0, 0, 0.35); border: 1px solid var(--line);
   font: 0.8rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; color: var(--ink); }
+
+/* Simple background (18 Oct 2026, replaces the 3D world by default).
+   The glow is painted once by CSS; the canvas only draws dots and a grid on
+   top. The film-grain layer is dropped here: a full-screen overlay blend over
+   a moving canvas re-composites every frame, which was a big part of the lag. */
+html.simple-bg #scene {
+  background:
+    radial-gradient(ellipse 80% 55% at 50% -6%, rgba(61, 155, 255, 0.26), transparent 64%),
+    radial-gradient(ellipse 62% 46% at 12% 78%, rgba(154, 107, 255, 0.18), transparent 62%),
+    radial-gradient(ellipse 64% 46% at 90% 58%, rgba(72, 229, 255, 0.14), transparent 62%),
+    var(--bg);
+}
+html.simple-bg #grain { display: none; }
+
+/* Executor library on the front page (18 Oct 2026). Reuses the /executors cards. */
+.xlib__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.xlib__more { display: flex; justify-content: center; margin-top: 16px; }
+@media (max-width: 560px) { .xlib__grid { grid-template-columns: 1fr; gap: 9px; } }
