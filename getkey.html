@@ -308,6 +308,15 @@
     import {
       doc, setDoc, getDoc
     } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+    import { createAdGate } from "/assets/js/adgate.js";
+
+    // Once both checkpoints are done, "Get Your Key" first asks for a few
+    // presses that each open one sponsor tab; then the next press makes the key
+    // (adgate.js). The button and note always say how many are left.
+    const keyGate = createAdGate('key');
+    const keyGateNote = () => keyGate.left
+      ? `Press ${keyGate.left} more time${keyGate.left === 1 ? '' : 's'} — each opens a sponsor tab — then your key is made.`
+      : 'Both checkpoints done ✓';
 
     // ✅ The two LootLabs key links (Creator's Panel, 15 Oct 2026).
     const STEP_LINKS = {
@@ -453,9 +462,16 @@
         }
       } else {
         messageText.textContent = 'Your Key is Ready';
-        finishBtn.textContent = 'Get Your Key';
-        stepNote.textContent = 'Both checkpoints done ✓';
-        finishBtn.onclick = createNewKey;
+        finishBtn.textContent = 'Get Your Key' + keyGate.label();
+        stepNote.textContent = keyGate.left ? 'Both checkpoints done ✓ ' + keyGateNote() : keyGateNote();
+        finishBtn.onclick = () => {
+          if (!keyGate.press()) {
+            finishBtn.textContent = 'Get Your Key' + keyGate.label();
+            stepNote.textContent = keyGateNote();
+            return;
+          }
+          createNewKey();
+        };
       }
     }
 
@@ -577,6 +593,7 @@
         localStorage.setItem(sessionStart, now.toString());
         localStorage.removeItem('smh_cp1');   // the next key starts at checkpoint one again
         reportKeyMade(key, localStorage.getItem(GK_KEY) || '');
+        keyGate.reset();                       // the next key asks for its own presses
         localStorage.removeItem(GK_KEY);
         saveToAccount(key, expiresAt);         // so it shows on their other devices too
 
