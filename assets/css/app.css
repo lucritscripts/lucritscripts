@@ -3023,3 +3023,25 @@ html.simple-bg #grain { display: none; }
 .xlib__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
 .xlib__more { display: flex; justify-content: center; margin-top: 16px; }
 @media (max-width: 560px) { .xlib__grid { grid-template-columns: 1fr; gap: 9px; } }
+
+/* Tighter front page (18 Oct 2026): "everything is so spacey when you scroll,
+   scoot everything up a little." Sections used to be at least one full screen
+   tall with their content centred, so a short section (Executors, Publish)
+   sat in ~400px of empty space. Now each section is as tall as its content,
+   starts at the top, and sections are separated by a modest gap. The hero
+   stays most of a screen so the page still opens on it. */
+.chapter { min-height: 0; }
+.chapter__stage { min-height: 0; justify-content: flex-start; padding: 64px 0 36px; }
+#ch-hero, #ch-hero .chapter__stage { min-height: 84vh; min-height: 84svh; }
+#ch-hero .chapter__stage { padding-top: 84px; padding-bottom: 124px; justify-content: center; }
+.chapter__tag { margin-bottom: 14px; }
+@media (max-width: 820px) {
+  .chapter__stage { padding: 44px 0 20px; }
+  #ch-hero, #ch-hero .chapter__stage { min-height: 100vh; min-height: 100svh; }
+  #ch-hero .chapter__stage { justify-content: flex-start; padding-top: 74px; }
+}
+/* The last section is a closing screen, tall enough that the section dots and
+   "Publish a Script" can still bring the Publish section to the top. */
+@media (min-width: 821px) {
+  #ch-finale .chapter__stage { min-height: 72vh; justify-content: center; }
+}
