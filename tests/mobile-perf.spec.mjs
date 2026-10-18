@@ -1,22 +1,19 @@
-// Phones: the site has to scroll smoothly on a mid-range phone.
+// The background has to stay cheap on phones and on computers.
 //
-// It didn't. Profiling an emulated phone (390x844 @3x, 4x CPU throttle) put
-// the page at ~4 fps idle and while scrolling. Hiding the 3D canvas alone took
-// it to 60 fps idle — the WebGL backdrop was ~95% of the cost, rendered at
-// 1.35x CSS pixels with a 4-pass blur every frame. Second was backdrop-filter:
-// fourteen frosted-glass rules re-blurring a canvas that repaints every frame.
-//
-// The fix has several parts and each one can be undone by an innocent edit, so
-// each has its own check:
-//   - phones render the world well below CSS resolution, capped at 30 fps;
-//   - a watchdog steps a phone down (lower res, then a frozen frame) when it
-//     still can't keep up — this sandbox renders WebGL in software, so it is
-//     exactly that weak phone, and must end up scrolling smoothly;
-//   - no backdrop-filter anywhere on phones;
-//   - the canvas doesn't resize (and reallocate its render targets) when the
-//     address bar slides away;
-//   - nothing is drawn while a full-screen sheet covers the canvas;
-//   - desktop is capped at 30 fps / 1x, trickles when unfocused, never freezes.
+// History: the 3D WebGL world (depth of field, bloom, a 4-pass blur) put an
+// emulated mid-range phone at ~4 fps and made computers lag. On 18 Oct 2026 it
+// was replaced by a plain 2D canvas (engine/simplebg.js): a CSS glow painted
+// once, plus a faint grid and a few dozen dots, drawn at 20 fps on computers
+// and 15 on phones. Each part of that budget can be undone by an innocent edit,
+// so each has its own check:
+//   - no WebGL context is created by default (?world=3d still opts in);
+//   - frame caps: <= ~20 fps desktop, <= ~15 fps phone, still animating;
+//   - resolution: 1x CSS pixels on desktop, 0.75x on phones;
+//   - nothing is drawn while a sheet covers the page or the window is blurred;
+//   - no backdrop-filter anywhere (it re-blurs the page every frame);
+//   - no full-screen grain overlay;
+//   - the canvas is pinned to the large viewport (100lvh);
+//   - a throttled phone still scrolls smoothly.
 import { chromium } from "playwright";
 import worker from "../_worker.js";
 import { CHROME, freshEnv, serve, counter } from "./harness.mjs";
@@ -33,18 +30,25 @@ const PHONE = {
   viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true,
 };
 
-// Counts instanced draws (two per rendered frame: boxes + shards).
+// Counts background frames (each draw starts with one clearRect) and any
+// WebGL context creation.
 function instrument() {
   localStorage.setItem("lucrit:human", JSON.stringify({ at: Date.now(), v: 1 }));
-  window.__draws = 0;
-  const orig = WebGL2RenderingContext.prototype.drawArraysInstanced;
-  WebGL2RenderingContext.prototype.drawArraysInstanced = function (...a) {
-    window.__draws++;
-    return orig.apply(this, a);
+  window.__frames = 0;
+  window.__webgl = 0;
+  const clear = CanvasRenderingContext2D.prototype.clearRect;
+  CanvasRenderingContext2D.prototype.clearRect = function (...a) {
+    if (this.canvas && this.canvas.id === "scene") window.__frames++;
+    return clear.apply(this, a);
+  };
+  const getContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = function (kind, ...rest) {
+    if (/webgl/i.test(String(kind))) window.__webgl++;
+    return getContext.call(this, kind, ...rest);
   };
 }
 
-async function open(opts, { throttle = 0 } = {}) {
+async function open(opts, { throttle = 0, path = "/" } = {}) {
   const ctx = await browser.newContext(opts);
   const page = await ctx.newPage();
   const errors = [];
@@ -54,22 +58,27 @@ async function open(opts, { throttle = 0 } = {}) {
     const cdp = await ctx.newCDPSession(page);
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: throttle });
   }
-  await page.goto(AT + "/", { waitUntil: "load" });
+  await page.goto(AT + path, { waitUntil: "load" });
   await page.waitForTimeout(800);
   return { ctx, page, errors };
 }
 
 const framesOver = (page, ms) => page.evaluate(async (ms) => {
-  const a = window.__draws;
+  const a = window.__frames;
   await new Promise((r) => setTimeout(r, ms));
-  return (window.__draws - a) / 2;
+  return window.__frames - a;
 }, ms);
 
-const canvasInfo = (page) => page.evaluate(() => {
+const info = (page) => page.evaluate(() => {
   const c = document.getElementById("scene");
-  return { w: c.width, h: c.height, cw: c.clientWidth, ch: c.clientHeight,
-           fx: document.documentElement.dataset.fx,
-           mobile: "mobile" in document.documentElement.dataset };
+  const g = document.getElementById("grain");
+  return {
+    w: c.width, cw: c.clientWidth, hidden: c.hidden,
+    simple: document.documentElement.classList.contains("simple-bg"),
+    mobile: "mobile" in document.documentElement.dataset,
+    webgl: window.__webgl,
+    grain: g ? getComputedStyle(g).display : "none",
+  };
 });
 
 const blurred = (page) => page.evaluate(() => {
@@ -82,20 +91,37 @@ const blurred = (page) => page.evaluate(() => {
   return hits;
 });
 
+async function pauses(page) {
+  await page.evaluate(() => document.documentElement.classList.add("is-locked"));
+  await page.waitForTimeout(150);
+  const covered = await framesOver(page, 800);
+  check("nothing is drawn while a sheet covers the page", covered === 0, String(covered));
+  await page.evaluate(() => document.documentElement.classList.remove("is-locked"));
+  check("drawing resumes when the sheet closes", (await framesOver(page, 800)) >= 1);
+
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await page.waitForTimeout(150);
+  const away = await framesOver(page, 800);
+  check("nothing is drawn while the window is in the background", away === 0, String(away));
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  check("drawing resumes when the window is focused again", (await framesOver(page, 800)) >= 1);
+}
+
 /* ------------------------------------------------------------- phone */
 
-console.log("Phone: lightweight backdrop");
+console.log("Phone: simple background");
 {
   const { ctx, page, errors } = await open(PHONE);
-  const c = await canvasInfo(page);
+  const c = await info(page);
   check("phone is detected", c.mobile === true);
-  check("starts on the top rung", c.fx === "0", c.fx);
-  check("world renders below CSS resolution (was 1.35x)", c.w <= c.cw * 0.75 && c.w > 0,
-    `${c.w}px for ${c.cw} css px`);
+  check("simple background is on", c.simple && !c.hidden);
+  check("no WebGL context is created", c.webgl === 0, String(c.webgl));
+  check("no full-screen grain overlay", c.grain === "none", c.grain);
+  check("canvas renders at 0.75x CSS pixels (not 3x)", c.w > 0 && c.w <= c.cw * 0.76, `${c.w}px for ${c.cw} css px`);
 
   const fps = (await framesOver(page, 2000)) / 2;
-  check("world is capped at ~30 fps", fps <= 32, fps.toFixed(1));
-  check("world is still animating", fps >= 1, fps.toFixed(1));
+  check("capped at ~15 fps", fps <= 17, fps.toFixed(1));
+  check("still animating", fps >= 3, fps.toFixed(1));
 
   console.log("\nPhone: no frosted glass");
   await page.evaluate(() => window.scrollTo(0, 600));
@@ -104,8 +130,6 @@ console.log("Phone: lightweight backdrop");
   check("no element uses backdrop-filter", hits.length === 0, hits.slice(0, 5).join(", "));
 
   console.log("\nPhone: address bar sliding away");
-  // Emulation has no real address bar (resizing the viewport resizes lvh too),
-  // so this checks the rule that pins the canvas to the large viewport is live.
   const pinned = await page.evaluate(() => {
     for (const sheet of document.styleSheets) {
       let rules; try { rules = sheet.cssRules; } catch { continue; }
@@ -119,34 +143,15 @@ console.log("Phone: lightweight backdrop");
   });
   check("canvas height is pinned to the large viewport (100lvh)", pinned);
 
-  console.log("\nCovered by a sheet");
-  await page.evaluate(() => document.documentElement.classList.add("is-locked"));
-  await page.waitForTimeout(150);
-  const covered = await framesOver(page, 800);
-  check("nothing is drawn while a sheet covers the canvas", covered === 0, String(covered));
-  await page.evaluate(() => document.documentElement.classList.remove("is-locked"));
-  const back = await framesOver(page, 800);
-  check("drawing resumes when the sheet closes", back >= 1, String(back));
-
+  console.log("\nPhone: pauses");
+  await pauses(page);
   check("no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }
 
-console.log("\nWeak phone: watchdog steps down until scrolling is smooth");
+console.log("\nWeak phone (4x CPU throttle) still scrolls smoothly");
 {
-  // Software WebGL + 4x CPU throttle: the weakest phone we can make.
   const { ctx, page, errors } = await open(PHONE, { throttle: 4 });
-  let fx = "0";
-  for (let i = 0; i < 40 && fx !== "2"; i++) {
-    await page.waitForTimeout(500);
-    fx = (await canvasInfo(page)).fx;
-  }
-  check("reaches the frozen rung", fx === "2", fx);
-  const c = await canvasInfo(page);
-  check("dropped resolution on the way down", c.w <= c.cw * 0.55, `${c.w}/${c.cw}`);
-  const frozen = await framesOver(page, 1000);
-  check("frozen means no more drawing", frozen === 0, String(frozen));
-
   const fps = await page.evaluate(() => new Promise((res) => {
     const max = document.documentElement.scrollHeight - innerHeight;
     let y = 0, n = 0; const t0 = performance.now();
@@ -156,7 +161,7 @@ console.log("\nWeak phone: watchdog steps down until scrolling is smooth");
     }
     requestAnimationFrame(s);
   }));
-  // Was ~4 fps on this setup before the fix.
+  // Was ~4 fps on this setup with the 3D world.
   check("scrolling runs at a usable frame rate", fps >= 30, fps.toFixed(1));
   check("no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
@@ -164,31 +169,41 @@ console.log("\nWeak phone: watchdog steps down until scrolling is smooth");
 
 /* ----------------------------------------------------------- desktop */
 
-console.log("\nDesktop: on a budget too (it used to draw at full refresh, up to 2x res)");
+console.log("\nDesktop: simple background");
 {
   const { ctx, page, errors } = await open({ viewport: { width: 1280, height: 800 } });
-  const c = await canvasInfo(page);
+  const c = await info(page);
   check("desktop is not treated as a phone", c.mobile === false);
-  check("desktop renders at no more than 1x CSS pixels", c.w > 0 && c.w <= c.cw, `${c.w}/${c.cw}`);
-  const lite = () => page.evaluate(() => "lite" in document.documentElement.dataset);
+  check("simple background is on", c.simple && !c.hidden);
+  check("no WebGL context is created", c.webgl === 0, String(c.webgl));
+  check("no full-screen grain overlay", c.grain === "none", c.grain);
+  check("canvas renders at 1x CSS pixels", c.w > 0 && c.w <= c.cw, `${c.w}/${c.cw}`);
   const hits = await blurred(page);
-  check("frosted glass is on unless the watchdog stepped down",
-    (await lite()) ? hits.length === 0 : hits.length > 0, `${hits.length} / lite=${await lite()}`);
+  check("no element uses backdrop-filter", hits.length === 0, hits.slice(0, 5).join(", "));
 
   const fps = (await framesOver(page, 2000)) / 2;
-  check("desktop world is capped at ~30 fps", fps <= 32, fps.toFixed(1));
-  check("desktop world is still animating", fps >= 1, fps.toFixed(1));
+  check("capped at ~20 fps (was 30, and full refresh before that)", fps <= 22, fps.toFixed(1));
+  check("still animating", fps >= 5, fps.toFixed(1));
 
-  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
-  const bg = (await framesOver(page, 2500)) / 2.5;
-  check("unfocused window drops to a trickle (~8 fps)", bg <= 10 && bg >= 1, bg.toFixed(1));
-  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  console.log("\nDesktop: pauses");
+  await pauses(page);
+  check("no page errors", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
 
-  await page.waitForTimeout(3500);
-  const after = await canvasInfo(page);
-  check("desktop never freezes (no rung past 2)", Number(after.fx) <= 2, after.fx);
-  check("…and keeps animating", (await framesOver(page, 1500)) >= 1);
-  if (Number(after.fx) >= 1) check("a stepped-down desktop drops the frosted glass", (await blurred(page)).length === 0);
+console.log("\nReduced motion: one still frame");
+{
+  const { ctx, page, errors } = await open({ viewport: { width: 1280, height: 800 }, reducedMotion: "reduce" });
+  check("no frames after the first", (await framesOver(page, 1200)) === 0);
+  check("no page errors", errors.length === 0, errors.join(" | "));
+  await ctx.close();
+}
+
+console.log("\nThe old 3D world is still there behind ?world=3d");
+{
+  const { ctx, page, errors } = await open({ viewport: { width: 1280, height: 800 } }, { path: "/?world=3d" });
+  const c = await info(page);
+  check("opting in creates the WebGL world", c.webgl >= 1 && !c.simple, JSON.stringify(c));
   check("no page errors", errors.length === 0, errors.join(" | "));
   await ctx.close();
 }

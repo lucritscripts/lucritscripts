@@ -116,7 +116,7 @@ console.log("\nDesktop");
   check("the wheel moves the page", a > 0, String(a));
 
   // Section dots.
-  check("section dots for all eight sections (the vault is gone)", await page.locator(".sectiondots button").count() === 8);
+  check("section dots for all nine sections (executors added, the vault is gone)", await page.locator(".sectiondots button").count() === 9);
   check("no vault section", await page.locator("#ch-vault").count() === 0);
   await page.locator('.sectiondots [data-jump="submit"]').click();
   await page.waitForTimeout(2800);
