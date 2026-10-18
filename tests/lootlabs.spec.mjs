@@ -119,6 +119,34 @@ for (let i = 0; i < 30 && !opened; i++) {
 }
 check("the page keeps asking and opens the script once LootLabs confirms", opened);
 
+console.log("\nSponsor tabs before the code comes out (adgate.js)");
+{
+  const vp = visitor.page;
+  let sponsor = 0;
+  await visitor.ctx.grantPermissions(["clipboard-read", "clipboard-write"], { origin: AT });
+  await visitor.ctx.route(/^https:\/\/uplcm\.com\//, (r) => r.fulfill({ contentType: "text/html", body: "<title>sponsor</title>" }));
+  visitor.ctx.on("page", (p) => { if (p !== vp) sponsor++; });
+  await vp.evaluate(() => localStorage.setItem("lucrit:adtest", "1"));
+  const copyBtn = vp.locator('#script [data-act="copy"]');
+  await copyBtn.click();
+  await vp.waitForTimeout(400);
+  const lbl = await copyBtn.textContent();
+  const need = Number((lbl.match(/\(1\/(\d)\)/) || [])[1] || 0);
+  check("first Copy press opens one sponsor tab and copies nothing yet", sponsor === 1 && need >= 3 && need <= 5, `${sponsor} tabs, label "${lbl}"`);
+  check("…with a toast saying how many are left", /more press/.test(await vp.locator(".toast").last().textContent().catch(() => "")));
+  for (let i = 1; i < need; i++) { await vp.locator('#script [data-act="raw"]').click(); await vp.waitForTimeout(250); }
+  check("Open raw shares the same count (no raw tab yet, only sponsor tabs)", sponsor === need, String(sponsor));
+  check("the Copy button is plain again", (await copyBtn.textContent()).trim() === "Copy code");
+  await vp.evaluate(() => navigator.clipboard.writeText(""));
+  await copyBtn.click();
+  await vp.waitForTimeout(500);
+  const clip = await vp.evaluate(() => navigator.clipboard.readText());
+  check("the next press really copies the script", clip.length > 10 && sponsor === need, `${clip.length} chars, ${sponsor} tabs`);
+  await copyBtn.click();
+  await vp.waitForTimeout(300);
+  check("copying again is free for this script", sponsor === need, String(sponsor));
+}
+
 await browser.close();
 server.close();
 globalThis.fetch = realFetch;

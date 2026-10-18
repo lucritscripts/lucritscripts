@@ -253,6 +253,41 @@ const key2 = boxes.find((b) => /Get Key/.test(b.t));
 check("phone: Get Key fits on screen", key2 && key2.right <= 390 && key2.left >= 0);
 await phone.close();
 
+console.log("\nSponsor tabs before the key (adgate.js)");
+{
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  await ctx.addInitScript(() => localStorage.setItem("lucrit:adtest", "1"));
+  const page = await routes(ctx);
+  let sponsor = 0;
+  await ctx.route(/^https:\/\/uplcm\.com\//, (r) => r.fulfill({ contentType: "text/html", body: "<title>sponsor</title>" }));
+  ctx.on("page", (p) => { if (/uplcm\.com/.test(p.url()) || p !== page) sponsor++; });
+  await page.goto(`${AT}/getkey?step=1`, { referer: "https://lootdest.org/" });
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Final Checkpoint");
+  await page.goto(`${AT}/getkey?step=2`, { referer: "https://links.lootlabs.gg/" });
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  const first = await page.locator("#finishBtn").textContent();
+  const m = first.match(/\((\d)\/(\d)\)/);
+  const need = m ? Number(m[2]) : 0;
+  check("button shows progress before the key, e.g. 'Get Your Key (0/4)'", !!m && m[1] === "0", first);
+  check("asks for 3–5 presses", need >= 3 && need <= 5, String(need));
+  check("the note says how many presses are left", /Press \d more time/.test(await page.locator("#stepNote").textContent()));
+  await page.locator("#finishBtn").click();
+  await page.waitForTimeout(400);
+  check("one press = one sponsor tab, and no key yet", sponsor === 1 && await page.locator("#keyActiveSection").isHidden(), String(sponsor));
+  check("…and the count goes up", (await page.locator("#finishBtn").textContent()).includes(`(1/${need})`));
+  await page.reload();
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  check("a refresh keeps the presses already done", (await page.locator("#finishBtn").textContent()).includes(`(1/${need})`));
+  for (let i = 1; i < need; i++) { await page.locator("#finishBtn").click(); await page.waitForTimeout(250); }
+  check(`${need} presses opened ${need} sponsor tabs, still no key`, sponsor === need && await page.locator("#keyActiveSection").isHidden(), String(sponsor));
+  check("the button is plain again", (await page.locator("#finishBtn").textContent()).trim() === "Get Your Key");
+  await page.locator("#finishBtn").click();
+  await page.locator("#keyActiveSection").waitFor({ state: "visible" });
+  check("the next press makes the key, with no extra tab", sponsor === need, String(sponsor));
+  check("the count starts over for the next key", await page.evaluate(() => sessionStorage.getItem("lucrit:gate:key") === null));
+  await ctx.close();
+}
+
 check("no page errors", errors.length === 0, errors.join(" | "));
 await browser.close();
 server.close();
