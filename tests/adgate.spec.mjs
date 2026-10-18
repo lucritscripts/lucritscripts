@@ -32,6 +32,34 @@ check("…but not again within two minutes", sponsorTap() === false && opened.le
 store["lucrit:tap"] = String(Date.now() - 3 * 60 * 1000);
 check("…and again after that", sponsorTap() === true && opened.length === 2);
 
+opened.length = 0;
+const { sponsorPop, sponsorTransfer } = await import("../assets/js/adgate.js");
+check("an unlock button press opens a sponsor tab every time", sponsorPop() && sponsorPop() && opened.length === 2);
+
+// The transfer screen: a tab on the press, a 5-second countdown, then the sponsor.
+const nodes = [];
+globalThis.location = { href: "https://lucritscripts.site/unlock/lootlabs" };
+globalThis.document = {
+  body: { appendChild: (n) => nodes.push(n) },
+  createElement: () => {
+    const el = { style: {}, attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, remove() { el.gone = true; },
+      _q: {}, querySelector(sel) { return (el._q[sel] ||= { textContent: "" }); } };
+    Object.defineProperty(el, "innerHTML", { set() {}, get() { return ""; } });
+    return el;
+  },
+};
+opened.length = 0;
+const tr = sponsorTransfer("LootLabs");
+tr.go("https://loot-link.com/s?x");
+check("transfer: one sponsor tab on the press", opened.length === 1);
+check("transfer: shows 'Taking you to LootLabs in 5…'", nodes.length === 1 && nodes[0]._q["[data-t]"].textContent === "Taking you to LootLabs in 5…", nodes[0]?._q["[data-t]"]?.textContent);
+check("transfer: hasn't left yet", location.href.includes("lucritscripts.site"));
+await new Promise((r) => setTimeout(r, 5300));
+check("transfer: goes to the sponsor after 5 seconds", location.href === "https://loot-link.com/s?x", location.href);
+const tr2 = sponsorTransfer("Linkvertise");
+tr2.cancel();
+check("transfer: a failed link closes the screen", nodes[1].gone === true);
+
 Object.defineProperty(globalThis, "navigator", { value: { webdriver: true }, configurable: true });
 store["lucrit:tap"] = "0";
 check("automated browsers never open sponsor tabs", sponsorTap() === false && createAdGate("bot").left === 0);

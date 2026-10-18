@@ -80,12 +80,31 @@ const s = pubBody.data;
 if (!s) console.log(JSON.stringify(pubBody));
 check("published a script", !!s?.id);
 const sp = await page(`/creations/Maker/${s.slug}`);
-check("script page: its own title", tag(sp.text, /<title>([^<]*)<\/title>/) === "Auto Farm Hub — Blox Fruits Script | Lucrit Script", tag(sp.text, /<title>([^<]*)<\/title>/));
-check("…its own description, trimmed", /^Auto farm every island/.test(tag(sp.text, /<meta name="description" content="([^"]*)">/) || "")
-  && tag(sp.text, /<meta name="description" content="([^"]*)">/).length <= 160);
+// Google look (18 Oct): like ScriptBlox — "<Game> Script for Roblox: <Title> (Keyless)".
+check("script page: Google-style title", tag(sp.text, /<title>([^<]*)<\/title>/) === "Blox Fruits Script for Roblox: Auto Farm Hub (Keyless)", tag(sp.text, /<title>([^<]*)<\/title>/));
+const spDesc = tag(sp.text, /<meta name="description" content="([^"]*)">/) || "";
+check("…description says what it is, where, when and who", /^Auto Farm Hub is a keyless Blox Fruits script for Roblox, uploaded to Lucrit Script on [A-Z][a-z]{2} \d{1,2}, \d{4} by @Maker\. Auto farm/.test(spDesc) && spDesc.length <= 160, spDesc);
+const ldRaw = tag(sp.text, /<script type="application\/ld\+json">([^<]*)<\/script>\s*<\/head>/);
+let spLd = null; try { spLd = JSON.parse(ldRaw); } catch { spLd = null; }
+const pageNode = spLd?.["@graph"]?.find((n) => n["@type"] === "WebPage");
+const crumbs = spLd?.["@graph"]?.find((n) => n["@type"] === "BreadcrumbList");
+check("…structured data with the upload date (Google's date line)", !!pageNode?.datePublished && pageNode.mainEntity?.["@type"] === "SoftwareSourceCode", ldRaw?.slice(0, 120));
+check("…breadcrumb Lucrit Script › Blox Fruits", crumbs?.itemListElement?.map((i) => i.name).join(" › ") === "Lucrit Script › Blox Fruits");
+check("…and never the script's code", !ldRaw.includes("GetService"));
+check("…published time meta", /<meta property="article:published_time" content="\d{4}-\d\d-\d\dT/.test(sp.text));
 check("…its own canonical URL", tag(sp.text, /<link rel="canonical" href="([^"]*)">/) === `https://lucritscripts.site/creations/Maker/${s.slug}`);
 check("…its thumbnail as the preview image", tag(sp.text, /<meta property="og:image" content="([^"]*)">/) === "https://tr.rbxcdn.com/abc/768/432/Image/Png");
 check("…still the app shell", /\/assets\/js\/main\.js/.test(sp.text) && sp.type.includes("text/html"));
+env.DB._raw.prepare("DELETE FROM ratelimits").run();
+const pub2 = await call("POST", "/api/scripts", { title: "Hub </script><script>alert(1)</script>", game: "Da Hood", category: "combat",
+  desc: "Locks on </script><img src=x onerror=alert(1)> and more. " + LONG, keyless: false, captcha: true, tags: [],
+  code: 'local P = game:GetService("Players")\nprint(P.LocalPlayer)', thumbnail: "https://tr.rbxcdn.com/abc/768/432/Image/Png" }, up.cookie);
+const pub2Body = await pub2.res.json(); const s2 = pub2Body.data; if (!s2) console.log("pub2:", JSON.stringify(pub2Body).slice(0, 300));
+if (s2) {
+  const sp2 = await page(`/creations/Maker/${s2.slug}`);
+  const ldBlock = sp2.text.split('<script type="application/ld+json">')[1]?.split("</script>")[0] || "";
+  check("structured data can't be broken out of by a script's title or description", !/<\/script>|<img|<script/i.test(ldBlock) && JSON.parse(ldBlock));
+} else check("published the second script", false);
 const cp = await page("/creators/maker");
 check("creator page: its own title", tag(cp.text, /<title>([^<]*)<\/title>/) === "@Maker — Roblox scripts | Lucrit Script");
 const gone = await page("/creations/Maker/ffffffff");

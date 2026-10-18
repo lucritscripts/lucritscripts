@@ -132,7 +132,7 @@ console.log("\nSponsor tabs before the code comes out (adgate.js)");
   await vp.waitForTimeout(400);
   const lbl = await copyBtn.textContent();
   const need = Number((lbl.match(/\(1\/(\d)\)/) || [])[1] || 0);
-  check("first Copy press opens one sponsor tab and copies nothing yet", sponsor === 1 && need >= 3 && need <= 5, `${sponsor} tabs, label "${lbl}"`);
+  check("first Copy press opens one sponsor tab and copies nothing yet", sponsor === 1 && need >= 4 && need <= 7, `${sponsor} tabs, label "${lbl}"`);
   check("…with a toast saying how many are left", /more press/.test(await vp.locator(".toast").last().textContent().catch(() => "")));
   for (let i = 1; i < need; i++) { await vp.locator('#script [data-act="raw"]').click(); await vp.waitForTimeout(250); }
   check("Open raw shares the same count (no raw tab yet, only sponsor tabs)", sponsor === need, String(sponsor));
