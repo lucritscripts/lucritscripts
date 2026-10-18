@@ -8,6 +8,7 @@ import { account, STAT_WINDOWS } from "./account.js";
 import * as stats from "./stats.js";
 import { CATEGORIES, BOARDS, categoryOf, statusBadges, ADMIN_LABELS } from "./data/scripts.js";
 import { renderCodeBlock } from "./engine/highlight.js";
+import { createAdGate } from "./adgate.js";
 
 /* ------------------------------------------------------------------ util */
 
@@ -1278,7 +1279,7 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
               <button class="btn btn--ghost btn--sm" data-act="preview-visitor">See what visitors see</button>
             </div>` : clockChip(s.id)}
           <div class="getpanel__acts">
-            <button class="btn btn--primary" data-act="copy" ${code ? "" : "disabled"}>Copy code</button>
+            <button class="btn btn--primary" data-act="copy" ${code ? "" : "disabled"}>Copy code${owner ? "" : createAdGate("copy:" + s.id).label()}</button>
             <button class="btn btn--ghost" data-act="raw" ${code ? "" : "disabled"}>Open raw</button>
           </div>
           ${payloadLink ? `
@@ -1287,7 +1288,7 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
                 <b>Script link</b>
                 <span>${esc(payloadLink)}</span>
               </div>
-              <a class="btn btn--primary btn--sm" href="${esc(safeHref(payloadLink))}"
+              <a class="btn btn--primary btn--sm" href="${esc(safeHref(payloadLink))}" data-gated-link
                  target="_blank" rel="noopener nofollow">Open link</a>
             </div>
             <p class="note">This link goes to the publisher, not to us. We don't host it
@@ -1393,6 +1394,34 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
     img.replaceWith(ph);
   }, true);
 
+  /*
+   * Sponsor-tab gate (adgate.js, 18 Oct 2026). Once a script is unlocked,
+   * getting the code out — Copy, Open raw, the publisher's link, or Ctrl+C on
+   * the code itself — first takes a few presses that each open one sponsor
+   * tab. The Copy button shows "(2/4)" progress and a toast says how many are
+   * left. One gate per script per tab session; the script's author is exempt.
+   */
+  function gatePress() {
+    if (!current || isOwner(current)) return true;
+    const g = createAdGate("copy:" + current.id);
+    if (g.press()) return true;
+    const b = sheet.body.querySelector('[data-act="copy"]');
+    if (b) b.textContent = "Copy code" + g.label();
+    toast(g.left
+      ? `Sponsor tab opened — ${g.left} more press${g.left === 1 ? "" : "es"}, then it's yours`
+      : "Sponsor tabs done ✓ — press again to get the script");
+    return false;
+  }
+  sheet.body.addEventListener("click", (e) => {
+    if (e.target.closest("[data-gated-link]") && !gatePress()) e.preventDefault();
+  }, true);
+  sheet.body.addEventListener("copy", (e) => {
+    const n = document.getSelection()?.anchorNode;
+    const el = n && (n.nodeType === 1 ? n : n.parentElement);
+    if (!el?.closest?.(".script__code")) return;
+    if (!gatePress()) e.preventDefault();
+  });
+
   sheet.body.addEventListener("click", async (e) => {
     // A suggested script: open it in this same sheet, at its own address.
     const pick = e.target.closest("[data-suggest]")?.dataset.suggest;
@@ -1414,6 +1443,9 @@ export function createScriptPage({ onRequireAuth, getLibrary = () => [], onOpenS
       toast("Preview — on your own script this does nothing. Visitors go to the sponsor step.", "warn");
       return;
     }
+
+    // Copy, raw and the publisher's link share one sponsor-tab gate per script.
+    if ((act === "copy" || act === "raw") && !gatePress()) return;
 
     if (act === "copy") {
       const ok = await copyText(code || "");
