@@ -2664,12 +2664,23 @@ function flowView(id, flow, script) {
     out: Boolean(flow.click),
     script: script ? {
       id: script.id, title: script.title, author: script.author || "",
-      slug: String(script.id).replace(/^s_/, ""), thumbnail: thumbPublic(script),
+      kind: script.kind || "script",
+      slug: String(script.id).replace(/^[sx]_/, ""),
+      thumbnail: script.kind === "executor" ? (/^https:\/\//i.test(script.thumbnail || "") ? script.thumbnail : "") : thumbPublic(script),
     } : null,
   };
 }
 
 async function flowScript(env, id) {
+  // Executors go through the same two sponsor steps (18 Oct 2026): what the
+  // grant unlocks for them is the download link. Shaped like a script so the
+  // rest of the flow doesn't care which it is.
+  if (String(id).startsWith("x_")) {
+    const x = await env.DB.prepare(
+      `SELECT id, name AS title, developer AS author, logo AS thumbnail FROM executors WHERE id = ? AND removed = 0`
+    ).bind(id).first();
+    return x ? { ...x, author_id: "executor", kind: "executor" } : null;
+  }
   // The thumbnail as a short marker rather than the whole data: URL — the
   // page only needs its /api/thumbs address, never the bytes.
   return env.DB.prepare(
@@ -2700,7 +2711,7 @@ async function handleFlowStart(request, env) {
 
   const { scriptId } = body;
   const script = await flowScript(env, String(scriptId || ""));
-  if (!script) return bad(404, "That script doesn't exist.");
+  if (!script) return bad(404, script === null && String(scriptId || "").startsWith("x_") ? "That executor doesn't exist." : "That script doesn't exist.");
 
   const user = await currentUser(request, env);
   const blocked = await discordBlock(env, user);
@@ -2810,8 +2821,10 @@ async function handleFlowCheck(request, env) {
   }
 
   // All steps done: the same grant and event the one-step claim writes.
-  const script = await env.DB.prepare(`SELECT id, author_id, title FROM scripts WHERE id = ? AND removed = 0`)
-    .bind(flow.s).first();
+  const script = String(flow.s).startsWith("x_")
+    ? await flowScript(env, flow.s)
+    : await env.DB.prepare(`SELECT id, author_id, title FROM scripts WHERE id = ? AND removed = 0`)
+      .bind(flow.s).first();
   if (!script) return bad(404, "That script doesn't exist.");
   const user = await currentUser(request, env);
   const subject = await grantSubject(request, env, user);
@@ -5665,6 +5678,27 @@ function readExecutor(body) {
 
 /* --------------------------------------------------------------- public */
 
+/**
+ * Whether this visitor may see an executor's download link: a live grant for
+ * it (the two sponsor steps, same as a script), staff, or no sponsor set up
+ * at all. Without one the link is withheld — `locked: true` tells the page to
+ * show the unlock button instead.
+ */
+async function executorUnlocked(request, env, id) {
+  if (unlockProviders(env).length === 0) return { open: true, left: null };
+  if (await staffBypass(request, env)) return { open: true, left: null };
+  const user = await currentUser(request, env);
+  const subject = await grantSubject(request, env, user);
+  const grant = await env.DB.prepare(
+    `SELECT verified, expires FROM grants WHERE subject = ? AND script_id = ? AND expires > ?`
+  ).bind(subject, id, nowSec()).first();
+  return grantOpens(env, grant) ? { open: true, left: Math.max(0, grant.expires - nowSec()) } : { open: false, left: null };
+}
+function lockExecutor(x, open, left = null) {
+  const hasDownload = Boolean(x.website);
+  return { ...x, website: open ? x.website : "", hasDownload, locked: hasDownload && !open, unlockedFor: open ? left : null };
+}
+
 async function handleExecutorList(request, env) {
   const url = new URL(request.url);
   const status = String(url.searchParams.get("status") || "");
@@ -5676,7 +5710,8 @@ async function handleExecutorList(request, env) {
     `SELECT * FROM executors WHERE ${where.join(" AND ")} ORDER BY updated_at DESC LIMIT 200`
   ).bind(...binds).all();
 
-  return ok({ data: (results || []).map(publicExecutor) });
+  // The listing never carries download links — only whether one exists.
+  return ok({ data: (results || []).map((r) => lockExecutor(publicExecutor(r), false)) });
 }
 
 async function handleExecutorGet(request, env, { id }) {
@@ -5684,7 +5719,8 @@ async function handleExecutorGet(request, env, { id }) {
     `SELECT * FROM executors WHERE id = ? AND removed = 0`
   ).bind("x_" + String(id).replace(/^x_/, "")).first();
   if (!row) return bad(404, "No such executor.");
-  return ok({ data: publicExecutor(row) });
+  const { open, left } = await executorUnlocked(request, env, row.id);
+  return ok({ data: lockExecutor(publicExecutor(row), open, left) });
 }
 
 /* ---------------------------------------------------------- staff only */
