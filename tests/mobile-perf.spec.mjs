@@ -8,6 +8,7 @@
 // so each has its own check:
 //   - no WebGL context is created by default (?world=3d still opts in);
 //   - frame caps: <= ~20 fps desktop, <= ~15 fps phone, still animating;
+//     while scrolling (the background follows the page) <= ~30 / ~24 fps;
 //   - resolution: 1x CSS pixels on desktop, 0.75x on phones;
 //   - nothing is drawn while a sheet covers the page or the window is blurred;
 //   - no backdrop-filter anywhere (it re-blurs the page every frame);
@@ -91,6 +92,18 @@ const blurred = (page) => page.evaluate(() => {
   return hits;
 });
 
+// Frames per second while the page is being scrolled (the background follows
+// the scroll, so it is allowed a little more while it moves).
+const scrollFps = (page) => page.evaluate(async () => {
+  const a = window.__frames, t0 = performance.now();
+  for (let i = 0; i < 40; i++) {
+    window.scrollBy(0, 40);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  const s = (performance.now() - t0) / 1000;
+  return (window.__frames - a) / s;
+});
+
 async function pauses(page) {
   await page.evaluate(() => document.documentElement.classList.add("is-locked"));
   await page.waitForTimeout(150);
@@ -122,6 +135,9 @@ console.log("Phone: simple background");
   const fps = (await framesOver(page, 2000)) / 2;
   check("capped at ~15 fps", fps <= 17, fps.toFixed(1));
   check("still animating", fps >= 3, fps.toFixed(1));
+  const sf = await scrollFps(page);
+  check("follows the scroll at no more than ~24 fps", sf <= 26 && sf >= 3, sf.toFixed(1));
+  await page.evaluate(() => window.scrollTo(0, 0));
 
   console.log("\nPhone: no frosted glass");
   await page.evaluate(() => window.scrollTo(0, 600));
@@ -184,6 +200,12 @@ console.log("\nDesktop: simple background");
   const fps = (await framesOver(page, 2000)) / 2;
   check("capped at ~20 fps (was 30, and full refresh before that)", fps <= 22, fps.toFixed(1));
   check("still animating", fps >= 5, fps.toFixed(1));
+  const sf = await scrollFps(page);
+  check("follows the scroll at no more than ~30 fps", sf <= 32 && sf >= 5, sf.toFixed(1));
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await page.waitForTimeout(1200);
+  const settled = (await framesOver(page, 2000)) / 2;
+  check("drops back to ~20 fps once scrolling stops", settled <= 22, settled.toFixed(1));
 
   console.log("\nDesktop: pauses");
   await pauses(page);

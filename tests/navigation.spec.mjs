@@ -137,8 +137,11 @@ console.log("\nDesktop");
   check("…which takes you straight to the publish form", Math.abs(viaHero) < 40, String(viaHero));
 
   // The animation is kept: a section further down starts hidden and glides in.
+  // (Fresh load, since sections reveal once and the jumps above showed them.)
   await page.evaluate(() => window.scrollTo(0, 0));
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(300);
+  await page.reload({ waitUntil: "load" });
+  await page.waitForTimeout(800);
   const before = await page.evaluate(() => getComputedStyle(document.querySelector("#ch-finale .chapter__stage")).opacity);
   await page.evaluate(() => document.getElementById("ch-finale").scrollIntoView());
   await page.waitForTimeout(2600);
