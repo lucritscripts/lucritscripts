@@ -17,7 +17,8 @@ export const BANDS = {
   universe:  [0.087, 0.196],
   // The vault section was removed (Oct 2026); search takes over its stretch
   // of the journey so the camera path itself is unchanged.
-  search:    [0.196, 0.457],
+  search:    [0.196, 0.330],
+  executors: [0.330, 0.457],
   categories:[0.457, 0.652],
   featured:  [0.652, 0.761],
   community: [0.761, 0.870],
