@@ -9,6 +9,26 @@
 // and the local list turns into the offline fallback — nothing else changes.
 
 export const POPULAR_GAMES = [
+  // ── added 18 Oct 2026 from the live most-played and trending charts ──
+  // trending now (Oct 2026 most-played charts)
+  "Steal An Egg", "Dress To Impress", "+1 Speed Keyboard Escape", "+1 Speed Monkey Escape",
+  "Jujutsu Shenanigans", "Dandy's World", "Forsaken", "Huss Valley", "Break and Steal an Egg",
+  "Murderers VS Sheriffs", "Sell Fries!", "Fish It!", "Illegal Soccer", "Chop A Forest",
+  "Animal Hospital (Anomaly)", "LifeTogether RP", "Ride A Pet", "Anime Dice", "Cat Battles", "Slayers 2",
+  "Violence District", "Ball VS Ball", "Grow a Garden 2", "Emergency Hamburg", "STAND OUT",
+  "Tap Simulator REBORN", "Dreamville RP", "Fling Things and People", "Bunker vs Verity",
+  "Legends Battlegrounds", "Hypershot", "BlockSpin", "Bubble Gum Simulator INFINITY",
+  "Your Bizarre Adventure", "Creatures of Sonaria", "Squid Game X", "Survive a Million Monkeys",
+  // rising & new releases (fall 2026)
+  "+1 Stone Skipping", "+1 Loot To Forge", "7 Days Cat-Sitting", "Facecard: Makeup Showdown", "Kukirin Life",
+  "Ride a Dino", "Climb For Animals Eggs", "Swing For Eggs", "Paint to Get Rich", "Peel the Potato",
+  "Wash the Car", "Realistic Street Soccer", "Blackhawk Rescue Mission 5", "Conquer The World WW2",
+  "Lethal Ape Experience", "Dubai RP", "My Movie", "My Avatar!", "RoFront", "NFL Universe Football",
+  "Tribes 3v3", "Ghost Driver", "Storage Hunters: Open World", "BloxStrike", "Search For The Needle",
+  "Southern Mudding OffRoading", "One Tap", "Monster in the Mansion", "GOAT Football League", "Nemesis",
+  "Fossil Force", "Prime Heroes", "Starforged", "Scrapbook Saga", "Restaurant Tycoon 3",
+  "Rebirth Champions: Ultimate", "Warfare Tycoon", "Knife VS Gun Duels", "Emote RNG", "Zoo Tycoon",
+  "Dovedale Railway", "Multicrew Tank Combat",
   // simulators & incremental
   "Grow a Garden", "Pet Simulator 99", "Pet Simulator X", "Bee Swarm Simulator",
   "Mining Simulator 2", "Anime Fighting Simulator", "Muscle Legends", "Ninja Legends",
