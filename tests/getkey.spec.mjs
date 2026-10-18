@@ -183,7 +183,7 @@ console.log("\nYour key on every device (signed in)");
   await a.locator("#keyActiveSection").waitFor({ state: "visible" });
   const k1 = (await a.locator("#keyBox").textContent()).trim();
   await a.waitForTimeout(600);
-  const saved = env.DB._raw.prepare("SELECT v FROM cache WHERE k LIKE 'getkey:%'").all().map((r) => JSON.parse(r.v));
+  const saved = env.DB._raw.prepare("SELECT v FROM cache WHERE k LIKE 'getkey:%' AND k NOT LIKE 'getkey:dev:%'").all().map((r) => JSON.parse(r.v));
   check("the new key is saved on the account", saved.length === 1 && saved[0].key === k1, JSON.stringify(saved));
   const fsStore = await a.evaluate(() => localStorage.getItem("__fs_test"));
 
@@ -223,8 +223,11 @@ console.log("\nYour key on every device (signed in)");
     method, headers: { "Content-Type": "application/json", ...(cookie ? { Cookie: cookie } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   }), env, { waitUntil() {} }));
-  check("saving needs an account (401)", (await api("POST", { key: k1, expiresAt: Date.now() + 3600e3 })).status === 401);
-  check("signed-out GET just says no key", (await (await api("GET")).json()).data === null);
+  const anonSave = await api("POST", { key: k1, expiresAt: Date.now() + 3600e3 });
+  const devCookie = (anonSave.headers.getSetCookie?.() || []).map((c) => c.split(";")[0]).find((c) => c.startsWith("__Host-lucrit-dev=")) || "";
+  check("signed out, a key is saved on the device instead (device cookie set)", anonSave.status === 200 && /^__Host-lucrit-dev=[a-f0-9]{32}$/.test(devCookie), devCookie);
+  check("…and that device gets it back", (await (await api("GET", null, devCookie)).json()).data?.key === k1);
+  check("a different device gets nothing", (await (await api("GET")).json()).data === null);
 }
 
 console.log("\nHome screen button");
@@ -284,7 +287,63 @@ console.log("\nSponsor tabs before the key (adgate.js)");
   await page.locator("#finishBtn").click();
   await page.locator("#keyActiveSection").waitFor({ state: "visible" });
   check("the next press makes the key, with no extra tab", sponsor === need, String(sponsor));
-  check("the count starts over for the next key", await page.evaluate(() => sessionStorage.getItem("lucrit:gate:key") === null));
+  check("the count starts over for the next key", await page.evaluate(() => localStorage.getItem("lucrit:gate:key") === null && localStorage.getItem("lucrit_gk_progress") === null));
+  await ctx.close();
+}
+
+console.log("\nComing back mid-way, no account (remembered on this device)");
+{
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  await ctx.addInitScript(() => localStorage.setItem("lucrit:adtest", "1"));
+  const page = await routes(ctx);
+  await ctx.route(/^https:\/\/uplcm\.com\//, (r) => r.fulfill({ contentType: "text/html", body: "<title>sponsor</title>" }));
+  await page.goto(`${AT}/getkey?step=1`, { referer: "https://lootdest.org/" });
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Final Checkpoint");
+  await page.goto(`${AT}/getkey?step=2`, { referer: "https://links.lootlabs.gg/" });
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  await page.locator("#finishBtn").click();       // 1st sponsor press
+  await page.waitForTimeout(400);
+  const need = Number(((await page.locator("#finishBtn").textContent()).match(/\(1\/(\d)\)/) || [])[1] || 0);
+  check("pressed once: (1/N) on the button", need >= 3, await page.locator("#finishBtn").textContent());
+
+  // Back to the plain page — no LootLabs referrer, no ?step. Used to land on checkpoint one.
+  await page.goto(`${AT}/getkey`);
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  check("plain /getkey resumes at 'Your Key is Ready'", (await msg(page)) === "Your Key is Ready");
+  check("…with the presses already done kept", (await page.locator("#finishBtn").textContent()).includes(`(1/${need})`));
+  await page.goto(`${AT}/getkey?step=2`);           // a reload of the old URL, referrer gone
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  check("reloading ?step=2 without the referrer no longer bounces to checkpoint one", page.url().includes("step=2"));
+
+  // A new tab of the same browser (sessionStorage gone) still knows.
+  const tab2 = await ctx.newPage();
+  await tab2.goto(`${AT}/getkey`);
+  await until(tab2, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  check("a new tab in the same browser resumes too", (await tab2.locator("#finishBtn").textContent()).includes(`(1/${need})`));
+  await tab2.close();
+
+  // The page's storage cleared (but the device cookie kept): the server remembers.
+  const wipe = () => page.evaluate(() => ["lucrit_gk_progress", "smh_cp1", "lucrit:gate:key", "smh_key", "smh_keyTime"].forEach((k) => localStorage.removeItem(k)));
+  await wipe();
+  await page.goto(`${AT}/getkey`);
+  await until(page, () => document.querySelector("#messageText")?.textContent === "Your Key is Ready");
+  check("storage wiped → the device cookie still restores checkpoint progress", (await msg(page)) === "Your Key is Ready");
+
+  for (let i = 0; i < 8 && await page.locator("#keyActiveSection").isHidden(); i++) { await page.locator("#finishBtn").click(); await page.waitForTimeout(300); }
+  await page.locator("#keyActiveSection").waitFor({ state: "visible" });
+  const key = (await page.locator("#keyBox").textContent()).trim();
+  check("…and the key gets made", /^LUCRIT-/.test(key));
+  await page.waitForTimeout(500);
+  await wipe();
+  await page.goto(`${AT}/getkey`);
+  await page.locator("#keyActiveSection").waitFor({ state: "visible" });
+  check("storage wiped after the key → this device gets its key back, no account", (await page.locator("#keyBox").textContent()).trim() === key);
+  check("…and says the device remembered it", /this device remembered/.test(await page.locator("#stepNote").textContent()));
+  const other = await newPage();
+  await other.page.goto(`${AT}/getkey`);
+  await until(other.page, () => document.querySelector("#messageText")?.textContent === "Checkpoint One");
+  check("a different browser starts at checkpoint one (nothing leaks between devices)", (await msg(other.page)) === "Checkpoint One");
+  await other.ctx.close();
   await ctx.close();
 }
 
