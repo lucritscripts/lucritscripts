@@ -210,6 +210,12 @@
       // Back from Linkvertise: our server checked the anti-bypass hash; the
       // page re-confirms it with /api/getkey/lv/check before showing the step.
       if (/^[a-f0-9]{32}$/.test(qs.get("lv") || "")) return;
+      // Already got this far on this device in the last 3 hours? Then coming
+      // back here — from a sponsor tab, a reload, or a bookmark — is fine.
+      try {
+        var prog = JSON.parse(localStorage.getItem("lucrit_gk_progress") || "null");
+        if (prog && prog.cp >= Number(step) && Date.now() - prog.at < 3 * 60 * 60 * 1000) { window.__gkStepOK = true; return; }
+      } catch (e) { /* no storage — fall through to the referrer check */ }
       var allowedReferrers = [
         "loot-link.com",
         "loot-links.com",
@@ -230,8 +236,13 @@
         if (step === "1") localStorage.setItem("smh_cp1", Date.now().toString());
         if (step === "2") {
           var cp1 = parseInt(localStorage.getItem("smh_cp1"), 10);
-          if (!cp1 || Date.now() - cp1 > 3 * 60 * 60 * 1000) window.location.replace("/getkey");
+          if (!cp1 || Date.now() - cp1 > 3 * 60 * 60 * 1000) { window.location.replace("/getkey"); return; }
         }
+        // Remember the checkpoint on this device (the page also tells the server).
+        window.__gkStepOK = true;
+        var had = JSON.parse(localStorage.getItem("lucrit_gk_progress") || "null");
+        if (!had || had.cp < Number(step) || Date.now() - had.at >= 3 * 60 * 60 * 1000)
+          localStorage.setItem("lucrit_gk_progress", JSON.stringify({ cp: Number(step), at: Date.now() }));
       } catch (e) { /* private mode — referrer check still applies */ }
     })();
   </script>
@@ -313,7 +324,7 @@
     // Once both checkpoints are done, "Get Your Key" first asks for a few
     // presses that each open one sponsor tab; then the next press makes the key
     // (adgate.js). The button and note always say how many are left.
-    const keyGate = createAdGate('key');
+    const keyGate = createAdGate('key', { persist: 'local' });
     const keyGateNote = () => keyGate.left
       ? `Press ${keyGate.left} more time${keyGate.left === 1 ? '' : 's'} — each opens a sponsor tab — then your key is made.`
       : 'Both checkpoints done ✓';
@@ -392,7 +403,33 @@
 
     // Which checkpoint this visit is: 0 = start, 1 = back from step 1, 2 = back from step 2.
     const stepParam = new URLSearchParams(location.search).get('step');
-    const STEP = stepParam === '2' ? 2 : stepParam === '1' ? 1 : 0;
+    let STEP = stepParam === '2' ? 2 : stepParam === '1' ? 1 : 0;
+
+    // Checkpoint progress remembered on this device (3-hour session). Coming
+    // back to plain /getkey after a sponsor tab, a reload or a closed tab picks
+    // up where you left off instead of starting at checkpoint one.
+    const PROGRESS = 'lucrit_gk_progress';
+    const PROGRESS_MS = 3 * 60 * 60 * 1000;
+    function savedProgress() {
+      try {
+        const p = JSON.parse(localStorage.getItem(PROGRESS) || 'null');
+        return p && [1, 2].includes(p.cp) && Date.now() - p.at < PROGRESS_MS ? p : null;
+      } catch { return null; }
+    }
+    function rememberProgress(cp) {
+      const had = savedProgress();
+      if (!had || had.cp < cp) {
+        try { localStorage.setItem(PROGRESS, JSON.stringify({ cp, at: had?.at && had.cp ? had.at : Date.now() })); } catch { /* fine */ }
+      }
+      fetch('/api/getkey/progress', {
+        method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cp, via: localStorage.getItem(VIA_KEY) || 'lootlabs' }),
+      }).catch(() => {});
+    }
+    function forgetProgress() {
+      try { localStorage.removeItem(PROGRESS); } catch { /* fine */ }
+    }
+    if (STEP === 0 && savedProgress()) STEP = savedProgress().cp;
 
     // TODO: Replace this with the actual Roblox user ID somehow
     // For example, after player login, fetch or input their UserId here:
@@ -501,16 +538,18 @@
     // their Lucrit account (/api/getkey/mine), so it shows again here even on
     // another phone/PC or after clearing the browser.
     let signedIn = false;
+    let serverProgress = null;
     async function accountKey() {
       try {
         const res = await fetch('/api/getkey/mine', { credentials: 'same-origin' });
         const body = await res.json();
         signedIn = Boolean(body.signedIn);
+        serverProgress = body.ok ? body.progress || null : null;
         return body.ok && body.data ? body.data : null;
       } catch { return null; }
     }
+    // Saved on the account if signed in, and on this device either way.
     function saveToAccount(key, expiresAt) {
-      if (!signedIn) return;
       fetch('/api/getkey/mine', {
         method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
@@ -545,7 +584,9 @@
       }
 
       showKeyUI(key);
-      if (restored) stepNote.textContent = 'Restored from your Lucrit account.';
+      if (restored) stepNote.textContent = fromAccount.from === 'device'
+        ? 'Restored — this device remembered your key.'
+        : 'Restored from your Lucrit account.';
       // Made while signed out, or on another device? Keep it on the account too.
       if (!fromAccount || fromAccount.key !== key) {
         saveToAccount(key, parseInt(localStorage.getItem(keyTimeStorage), 10));
@@ -594,6 +635,7 @@
         localStorage.removeItem('smh_cp1');   // the next key starts at checkpoint one again
         reportKeyMade(key, localStorage.getItem(GK_KEY) || '');
         keyGate.reset();                       // the next key asks for its own presses
+        forgetProgress();                      // …and starts again at checkpoint one
         localStorage.removeItem(GK_KEY);
         saveToAccount(key, expiresAt);         // so it shows on their other devices too
 
@@ -631,7 +673,7 @@
         countdown.textContent = `Session valid for: ${formatTime(sessionRemaining)}`;
       } else {
         countdown.textContent = "Session expired. Restarting...";
-        ['smh_key', 'smh_keyTime', 'smh_sessionStart', 'smh_cp1'].forEach((k) => localStorage.removeItem(k));
+        ['smh_key', 'smh_keyTime', 'smh_sessionStart', 'smh_cp1', PROGRESS].forEach((k) => localStorage.removeItem(k));
         setTimeout(() => window.location.href = "/getkey", 1500);
       }
     }
@@ -655,12 +697,24 @@
         window.location.replace('/getkey');
         return;
       }
+      // A checkpoint that really passed (LootLabs referrer, or Linkvertise's
+      // server check) is remembered on this device and on the server.
+      const passedHere = stepParam === '1' || stepParam === '2';
+      if (passedHere && (window.__gkStepOK || /^[a-f0-9]{32}$/.test(lvParam))) rememberProgress(Number(stepParam));
       try {
         const cfg = await fetch('/api/config', { credentials: 'same-origin' }).then((r) => r.json());
         linkvertiseOn = Boolean(cfg?.data?.linkvertiseSteps);
       } catch { linkvertiseOn = false; }
       const hasKey = await checkKey();
       if (!hasKey) {
+        // The page's own storage was cleared but the server remembers this
+        // device (or account) got further — pick up from there.
+        if (serverProgress && serverProgress.cp > STEP) {
+          STEP = serverProgress.cp;
+          try { localStorage.setItem(PROGRESS, JSON.stringify({ cp: STEP, at: serverProgress.at || Date.now() })); } catch { /* fine */ }
+          if (STEP >= 1) { try { localStorage.setItem('smh_cp1', String(serverProgress.at || Date.now())); } catch { /* fine */ } }
+          if (serverProgress.via) via = serverProgress.via;
+        }
         showNormalUI();
         if (!signedIn && STEP === 0) {
           const base = stepNote.textContent.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));

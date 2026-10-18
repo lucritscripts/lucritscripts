@@ -1927,25 +1927,99 @@ async function handleGetKeyMade(request, env) {
   return ok({ counted: true, verified: Boolean(verified) });
 }
 
-async function handleMyKeyGet(request, env) {
+/*
+ * Your key, remembered — with or without an account (18 Oct 2026).
+ *
+ * Signed in, it follows the account to every device (getkey:<userId>).
+ * Signed out, this device gets a random, httpOnly device cookie and the key is
+ * kept under that (getkey:dev:<id>) — so someone without an account can close
+ * the tab, come back later in the same browser and still have their key, even
+ * if the page's own storage was cleared.
+ *
+ * The same goes for checkpoint progress (gkp:…): finishing checkpoint one or
+ * two is remembered for the 3-hour session, so leaving for a sponsor tab and
+ * coming back doesn't drop anyone to checkpoint one.
+ */
+const DEVICE_COOKIE = "__Host-lucrit-dev";
+const DEVICE_DAYS = 400;
+const GETKEY_PROGRESS_SEC = 3 * 3600;
+
+function deviceOf(request) {
+  const id = readCookie(request, DEVICE_COOKIE);
+  return /^[a-f0-9]{32}$/.test(id || "") ? id : null;
+}
+function newDeviceId() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+}
+
+/** Where this visitor's key and progress live: the account if signed in, else the device. */
+async function keyOwners(request, env) {
   const user = await currentUser(request, env);
-  if (!user) return ok({ data: null, signedIn: false });
-  const saved = await cacheGet(env, `getkey:${user.id}`);
-  const live = saved && GETKEY_FORMAT.test(saved.key) && Number(saved.expiresAt) > Date.now();
-  return ok({ data: live ? { key: saved.key, expiresAt: Number(saved.expiresAt) } : null, signedIn: true });
+  let device = deviceOf(request);
+  let setCookie = null;
+  if (!device) { device = newDeviceId(); setCookie = cookieHeader(device, DEVICE_DAYS * 86400, DEVICE_COOKIE); }
+  const slots = [`dev:${device}`];
+  if (user) slots.unshift(user.id);
+  return { user, slots, setCookie };
+}
+const withDevice = (res, setCookie) => {
+  if (setCookie) res.headers.append("Set-Cookie", setCookie);
+  return res;
+};
+
+async function handleMyKeyGet(request, env) {
+  const { user, slots, setCookie } = await keyOwners(request, env);
+  let data = null;
+  for (const slot of slots) {
+    const saved = await cacheGet(env, `getkey:${slot}`);
+    if (saved && GETKEY_FORMAT.test(saved.key) && Number(saved.expiresAt) > Date.now()) {
+      data = { key: saved.key, expiresAt: Number(saved.expiresAt), from: slot.startsWith("dev:") ? "device" : "account" };
+      break;
+    }
+  }
+  let progress = null;
+  for (const slot of slots) {
+    const p = await cacheGet(env, `gkp:${slot}`);
+    if (p && [1, 2].includes(p.cp) && (!progress || p.cp > progress.cp)) progress = p;
+  }
+  return withDevice(ok({ data, progress, signedIn: Boolean(user) }), setCookie);
 }
 
 async function handleMyKeyPut(request, env) {
-  const user = await currentUser(request, env);
-  if (!user) return bad(401, "Sign in to keep your key on every device.");
+  const { slots, setCookie } = await keyOwners(request, env);
   const body = await request.json().catch(() => ({}));
   const key = String(body.key || "");
   const expiresAt = Math.floor(Number(body.expiresAt) || 0);
   const left = expiresAt - Date.now();
   if (!GETKEY_FORMAT.test(key)) return bad(400, "That isn't a Lucrit key.");
   if (left <= 0 || left > GETKEY_MAX_MS + 60_000) return bad(400, "That key's expiry doesn't look right.");
-  await cachePut(env, `getkey:${user.id}`, { key, expiresAt }, Math.ceil(left / 1000));
-  return ok({ data: { key, expiresAt } });
+  for (const slot of slots) {
+    await cachePut(env, `getkey:${slot}`, { key, expiresAt }, Math.ceil(left / 1000));
+    await env.DB.prepare(`DELETE FROM cache WHERE k = ?`).bind(`gkp:${slot}`).run().catch(() => {});
+  }
+  return withDevice(ok({ data: { key, expiresAt } }), setCookie);
+}
+
+/**
+ * POST /api/getkey/progress { cp: 1|2, via } — "this visitor finished checkpoint
+ * <cp>", kept for the 3-hour key session on the device (and account, if any).
+ * Never goes backwards: reporting 1 after 2 keeps 2.
+ */
+async function handleGetKeyProgress(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const cp = Number(body.cp);
+  if (![1, 2].includes(cp)) return bad(400, "cp must be 1 or 2.");
+  if (!(await underLimit(env, "gkp:" + clientIp(request), 30, 3600))) return ok({ saved: false });
+  const via = body.via === "linkvertise" ? "linkvertise" : "lootlabs";
+  const { slots, setCookie } = await keyOwners(request, env);
+  for (const slot of slots) {
+    const had = await cacheGet(env, `gkp:${slot}`);
+    if (had && had.cp >= cp) continue;
+    await cachePut(env, `gkp:${slot}`, { cp, via, at: Date.now() }, GETKEY_PROGRESS_SEC);
+  }
+  return withDevice(ok({ saved: true }), setCookie);
 }
 
 /**
@@ -6012,6 +6086,7 @@ const ROUTES = {
   "POST /api/getkey/lv/go": handleGetKeyLvGo,
   "GET  /api/getkey/lv/check": handleGetKeyLvCheck,
   "POST /api/getkey/mine": handleMyKeyPut,
+  "POST /api/getkey/progress": handleGetKeyProgress,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,
