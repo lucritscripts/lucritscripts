@@ -53,13 +53,21 @@ function openSponsor(link) {
  * refresh doesn't make someone start the presses again, and once a script's
  * copy gate is done, copying it again is free.
  */
-export function createAdGate(name, { link = SPONSOR_LINKS[String(name).split(":")[0]] ?? SPONSOR_LINK } = {}) {
+export function createAdGate(name, { link = SPONSOR_LINKS[String(name).split(":")[0]] ?? SPONSOR_LINK, persist = "session" } = {}) {
   const exempt_ = () => exempt(link);
   const key = "lucrit:gate:" + name;
+  // "local" keeps the count when the tab is closed (3 hours, same as the key
+  // session) — someone who leaves for a sponsor tab and comes back later
+  // doesn't start the presses over. "session" is per browser tab.
+  const store = () => (persist === "local" ? localStorage : sessionStorage);
+  const TTL = 3 * 60 * 60 * 1000;
   let st = null;
-  try { st = JSON.parse(sessionStorage.getItem(key) || "null"); } catch { st = null; }
+  try { st = JSON.parse(store().getItem(key) || "null"); } catch { st = null; }
+  if (st && st.exp && st.exp < Date.now()) st = null;
   if (!st || !Number.isInteger(st.need) || !Number.isInteger(st.done)) st = { need: roll(), done: 0 };
-  const save = () => { try { sessionStorage.setItem(key, JSON.stringify(st)); } catch { /* fine */ } };
+  const save = () => {
+    try { store().setItem(key, JSON.stringify(persist === "local" ? { ...st, exp: Date.now() + TTL } : st)); } catch { /* fine */ }
+  };
 
   return {
     /** Presses still needed (0 = the action is free). */
@@ -82,7 +90,7 @@ export function createAdGate(name, { link = SPONSOR_LINKS[String(name).split(":"
     /** Start over with a fresh count — e.g. after a key is made, for the next one. */
     reset() {
       st = { need: roll(), done: 0 };
-      try { sessionStorage.removeItem(key); } catch { /* fine */ }
+      try { store().removeItem(key); } catch { /* fine */ }
     },
     /** "(2/4)"-style progress for a button label, or "" when there's nothing to show. */
     label() {
