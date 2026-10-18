@@ -26,7 +26,7 @@ import { createExecutorsPage } from "./executors.js";
 import { createPublishForm } from "./publish.js";
 import { createUnlockFlowPage } from "./unlockflow.js";
 import { scheduleAds, adsLoaded, adsAllowed } from "./ads.js";
-import { sponsorTap } from "./adgate.js";
+import { sponsorTap, sponsorPop } from "./adgate.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -744,6 +744,10 @@ scheduleAds();
 document.addEventListener("click", (e) => {
   if (!adsAllowed()) return;
   const t = e.target;
+  // "Unlock with LootLabs / Linkvertise" (a script's gate, an executor's
+  // gate): one sponsor tab on every press. The step buttons on /unlock and
+  // /getkey add a 5-second transfer screen too (sponsorTransfer).
+  if (t.closest('[data-act="lootlabs"], [data-act="linkvertise"], [data-xunlock], a[href^="/getkey"]')) { sponsorPop(); return; }
   if (t.closest(".card__heart, a[href^='/creators/']")) return;
   if (t.closest(".card") || t.closest("[data-game]")) sponsorTap();
 }, true);

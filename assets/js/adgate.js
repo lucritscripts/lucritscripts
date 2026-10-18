@@ -29,6 +29,7 @@ export const SPONSOR_LINKS = {
   copy: "https://uplcm.com/4/12060633",   // "Industrious link" — a script's Copy / raw / link
   xdl: "https://uplcm.com/4/12060633",    // an unlocked executor's Download button
   browse: "https://uplcm.com/4/12060633", // one tab now and then while browsing
+  transfer: "https://uplcm.com/4/12060629", // every button that heads to LootLabs / Linkvertise
 };
 export const SPONSOR_LINK = SPONSOR_LINKS.copy;
 
@@ -122,4 +123,51 @@ export function sponsorTap(link = SPONSOR_LINKS.browse) {
   try { localStorage.setItem("lucrit:tap", String(Date.now())); } catch { /* fine */ }
   openSponsor(link);
   return true;
+}
+
+/**
+ * Sponsor buttons (18 Oct 2026): "every time I click a button that's supposed
+ * to take me to Linkvertise or LootLabs, there should be a popup, or a transfer
+ * ad (start off with one)". Every such press opens one sponsor tab on the
+ * click itself. A popup can only open on a click (browsers block the rest),
+ * so it's one per press, never on a timer.
+ */
+export function sponsorPop(link = SPONSOR_LINKS.transfer) {
+  if (exempt(link)) return false;
+  openSponsor(link);
+  return true;
+}
+
+/**
+ * The press that actually leaves for LootLabs / Linkvertise: one sponsor tab
+ * on the click, then a 5-second "Taking you to …" transfer screen in this tab,
+ * then the sponsor. Call synchronously in the click handler; then hand the
+ * destination to .go(url) whenever it's known (it waits out the countdown),
+ * or .cancel() if getting the link failed.
+ */
+export function sponsorTransfer(name = "the sponsor", { seconds = 5, link = SPONSOR_LINKS.transfer } = {}) {
+  if (exempt(link) || typeof document === "undefined") {
+    return { go: (url) => { location.href = url; }, cancel() {} };
+  }
+  openSponsor(link);
+  const box = document.createElement("div");
+  box.setAttribute("role", "status");
+  box.style.cssText = "position:fixed;inset:0;z-index:2147483000;display:grid;place-items:center;" +
+    "background:rgba(3,5,10,.92);color:#eef3fb;font:600 1rem/1.5 Inter,system-ui,sans-serif;text-align:center;padding:24px";
+  box.innerHTML = '<div><div data-n style="font-size:3.2rem;font-weight:800;color:#48e5ff;line-height:1"></div>' +
+    '<p data-t style="margin:14px 0 4px"></p>' +
+    '<p style="margin:0;opacity:.6;font-weight:500;font-size:.85rem">A sponsor tab opened — thanks for supporting Lucrit.</p></div>';
+  document.body.appendChild(box);
+  let left = seconds, target = null, cancelled = false;
+  const paint = () => {
+    box.querySelector("[data-n]").textContent = String(Math.max(0, left));
+    box.querySelector("[data-t]").textContent = `Taking you to ${name} in ${Math.max(0, left)}…`;
+  };
+  paint();
+  const leave = () => { if (!cancelled && target && left <= 0) location.href = target; };
+  const timer = setInterval(() => { left -= 1; paint(); if (left <= 0) { clearInterval(timer); leave(); } }, 1000);
+  return {
+    go(url) { target = url; leave(); },
+    cancel() { cancelled = true; clearInterval(timer); box.remove(); },
+  };
 }

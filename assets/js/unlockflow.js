@@ -13,6 +13,7 @@
 import { createOverlay, esc, toast } from "./pages.js";
 import { safeImageSrc } from "./safe.js";
 import { savedFlow, rememberFlow, startFlow, getFlow, goFlow, checkFlow } from "./library-api.js";
+import { sponsorTransfer } from "./adgate.js";
 
 // The LootLabs site tag (publisher 1247178), the same one the SMH key pages
 // carried. Loaded only once someone is on an unlock page, never site-wide.
@@ -176,14 +177,17 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
     }
     if (act === "retry" && flow) { run++; state = "ready"; message = ""; render(); return; }
     if (act === "go" && flow && state === "ready") {
+      // One sponsor tab on the press, then a 5-second transfer screen (adgate.js).
+      const transfer = sponsorTransfer(NAMES[provider]);
       state = "going"; render();
       const res = await goFlow(flow.flowId);
       if (!res.ok) {
+        transfer.cancel();
         state = "ready"; render();
         toast(res.error || `Couldn't reach ${NAMES[provider]}. Try again.`, "warn");
         return;
       }
-      location.href = res.data.url;
+      transfer.go(res.data.url);
     }
   });
 
