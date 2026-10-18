@@ -44,6 +44,7 @@ const ld = JSON.parse(tag(home.text, /<script type="application\/ld\+json">([\s\
 const site = ld["@graph"].find((x) => x["@type"] === "WebSite");
 check("WebSite structured data names the site", site?.name === "Lucrit Script" && site?.url === "https://lucritscripts.site/");
 check("description is real copy", (tag(home.text, /<meta name="description" content="([^"]*)">/) || "").length > 80);
+check("Monetag ownership tag is on the homepage", /<meta name="monetag" content="091a1ecc38117d2bb82b05169c41c606">/.test(home.text));
 check("homepage is indexable", !/name="robots" content="noindex"/.test(home.text));
 
 console.log("\nIcons");
