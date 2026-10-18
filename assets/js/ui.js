@@ -1120,6 +1120,10 @@ export function createChoreography({ chrome, onCategoryIndex }) {
     for (const s of sections) {
       s.a = clamp01(s.node.offsetTop / max);
       s.b = clamp01((s.node.offsetTop + s.node.offsetHeight) / max);
+      // Unclamped, for "which section is on screen": with short sections the
+      // last ones can start past the end of the scroll range, and clamping
+      // them to 1 lit the last dot whenever the page reached the bottom.
+      s.top = s.node.offsetTop / max;
     }
   }
 
@@ -1219,7 +1223,7 @@ export function createChoreography({ chrome, onCategoryIndex }) {
     const probe = progress + (window.innerHeight * 0.35) / max;
     let active = 0;
     sections.forEach((s, i) => {
-      if (probe >= s.a) active = i;
+      if (probe >= (s.top ?? s.a)) active = i;
       const live = i === active;
       if (s._live !== live) { s._live = live; s.node.classList.toggle("is-live", live); }
     });
