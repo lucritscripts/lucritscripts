@@ -6123,6 +6123,8 @@ const ROUTES = {
   "GET  /api/getkey/lv/check": handleGetKeyLvCheck,
   "POST /api/getkey/mine": handleMyKeyPut,
   "POST /api/getkey/progress": handleGetKeyProgress,
+  "POST /api/csp": handleCspReport,
+  "GET /api/admin/csp": handleAdminCsp,
   "POST /api/scripts": handleScriptPublish,
   "POST /api/unlock/start": handleUnlockStart,
   "GET  /api/unlock/postback": handleUnlockPostback,
@@ -6205,12 +6207,61 @@ const NOINDEX = [/^\/admin\/?$/, /^\/dashboard(\/|$)/, /^\/unlock\//];
  * script or creator page that page's own title, description and image, read
  * from D1. The browser still sets the title itself once the app runs.
  */
+/**
+ * Ads on public pages (18 Oct 2026). The owner chose Monetag's Multitag (one
+ * script for popunder, in-page push, vignette and push ads) for maximum pay.
+ * Multitag fetches from domains that keep changing, so a fixed host list in the
+ * CSP blocks it. index.html ships the STRICT policy (the fail-safe), and the
+ * shell is relaxed here — scripts, connections and frames from any https
+ * host — only on public pages. /admin, /dashboard and /unlock keep the strict
+ * policy, and main.js reloads into them (dropping any ad script) rather than
+ * opening them in place. 'unsafe-inline' and 'unsafe-eval' stay out of
+ * script-src either way.
+ */
+const STRICT_PATHS = /^\/(admin|dashboard|unlock)(\/|$)/;
+function adsCsp(html, path) {
+  if (STRICT_PATHS.test(path)) return html;
+  return html
+    .replace(/(\bscript-src 'self')[^;]*;/, "$1 https:;")
+    .replace(/(\bconnect-src 'self')[^;]*;/, "$1 https: wss:;")
+    .replace(/\bframe-src [^;]*;/, "frame-src https:;");
+}
+
+/**
+ * POST /api/csp { d: directive, h: host } — the page reports what the CSP
+ * blocked, so a broken ad format shows up as data instead of silence. Only
+ * counts are kept (per directive + host, a week), never URLs or visitors.
+ * GET /api/admin/csp — staff read-out.
+ */
+async function handleCspReport(request, env) {
+  const body = await request.json().catch(() => ({}));
+  const d = String(body.d || "").replace(/[^a-z-]/g, "").slice(0, 30);
+  const h = String(body.h || "").toLowerCase().replace(/[^a-z0-9.:'-]/g, "").slice(0, 80);
+  if (!d || !h) return ok({ saved: false });
+  if (!(await underLimit(env, "csp:" + clientIp(request), 20, 3600))) return ok({ saved: false });
+  const key = `cspv:${d}:${h}`;
+  const had = await cacheGet(env, key);
+  await cachePut(env, key, { d, h, n: (had?.n || 0) + 1, last: Date.now() }, 7 * 86400);
+  return ok({ saved: true });
+}
+
+async function handleAdminCsp(request, env) {
+  const admin = await requireAdmin(request, env);
+  if (admin instanceof Response) return admin;
+  const { results } = await env.DB.prepare(
+    `SELECT v FROM cache WHERE k LIKE 'cspv:%' AND expires > ? ORDER BY expires DESC LIMIT 200`).bind(nowSec()).all();
+  const rows = (results || []).map((r) => { try { return JSON.parse(r.v); } catch { return null; } }).filter(Boolean);
+  rows.sort((a, b) => b.n - a.n);
+  return ok({ data: rows });
+}
+
 async function seoShell(response, url, env) {
   const type = response.headers.get("Content-Type") || "";
   if (!response.ok || !type.includes("text/html")) return response;
   let html = await response.text();
   const site = siteOf(env);
   const path = url.pathname === "/" ? "/" : url.pathname.replace(/\/+$/, "");
+  html = adsCsp(html, path);
   const canon = site + path;
   const set = (re, value) => { html = html.replace(re, value); };
 
