@@ -24,6 +24,7 @@ import { createCreatorPage } from "./creator.js";
 import { createExecutorsPage } from "./executors.js";
 import { createPublishForm } from "./publish.js";
 import { createUnlockFlowPage } from "./unlockflow.js";
+import { scheduleAds } from "./ads.js";
 import { paintDiscord, readDiscordReturn, watchDiscord } from "./discord.js";
 import {
   createRouter, pathForScript, pathForCreator, pathForDashboard, setTitle,
@@ -697,6 +698,9 @@ requestAnimationFrame(frame);
 /* ------------------------------------------------------------ startup */
 
 document.documentElement.classList.add("is-ready");
+
+// Pop-under ads (see ads.js for where they're kept out).
+scheduleAds();
 
 /* -------------------------------------------------------------- discord */
 

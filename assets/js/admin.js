@@ -121,6 +121,8 @@ export function createAdminPage({ onChanged } = {}) {
     }
     if (!gate.unlocked) return passcodeScreen();
 
+    // This browser is staff: no pop-under ads here from now on (ads.js).
+    try { localStorage.setItem("lucrit:staff", "1"); } catch { /* storage blocked */ }
     return panel();
   }
 
