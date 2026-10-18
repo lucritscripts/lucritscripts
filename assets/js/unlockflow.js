@@ -87,13 +87,13 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
         <button class="btn btn--ghost btn--sm" data-ufl="retry">Didn't finish it? Do ${stepName} again</button>`;
     } else if (state === "done") {
       main = `
-        <p class="ufl__msg ufl__msg--ok">All done — opening your script…</p>`;
+        <p class="ufl__msg ufl__msg--ok">All done — ${flow?.script?.kind === "executor" ? "opening the download…" : "opening your script…"}</p>`;
     } else {
       main = `
         <p class="ufl__kicker">${last ? "Final checkpoint" : `Checkpoint ${step} of ${total}`}</p>
         ${message ? `<p class="ufl__msg ufl__msg--ok">${esc(message)}</p>` : ""}
         <p class="ufl__msg">Press the button, finish the ${esc(name)} page, and you'll come
-           straight back here${step < total ? " for the next step" : " with the script unlocked"}.</p>
+           straight back here${step < total ? " for the next step" : (flow?.script?.kind === "executor" ? " with the download unlocked" : " with the script unlocked")}.</p>
         <button class="btn btn--primary ufl__go" data-ufl="go" ${state === "going" ? "disabled" : ""}>
           ${state === "going" ? "Opening…" : (last ? "Continue to final step" : `Continue to step ${step}`)}
         </button>
@@ -109,7 +109,7 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
             <div>
               <p class="ufl__eyebrow">Unlocking</p>
               <h2 class="ufl__title">${esc(s.title)}</h2>
-              ${s.author ? `<p class="ufl__by">by @${esc(s.author)}</p>` : ""}
+              ${s.author ? `<p class="ufl__by">by ${s.kind === "executor" ? "" : "@"}${esc(s.author)}</p>` : ""}
             </div>
           </header>` : `<h2 class="ufl__title">Unlock a script</h2>`}
         ${state === "none" ? "" : stepsHtml()}
@@ -150,7 +150,7 @@ export function createUnlockFlowPage({ onDone, onExit } = {}) {
     if (res.data.done) {
       state = "done"; render();
       rememberFlow(null);
-      toast("Unlocked — here's the script");
+      toast(flow?.script?.kind === "executor" ? "Unlocked — here's the download" : "Unlocked — here's the script");
       setTimeout(() => onDone?.(flow.script, res.data.unlockedFor), 600);
       return;
     }

@@ -15,6 +15,8 @@ import {
 import { libraryOnline, fetchScripts, fetchBoard, searchLibrary, fetchSummary } from "./library-api.js";
 import { noteWindow, secondsLeft, clockChip, onExpire } from "./unlockclock.js";
 import { pathForCreator } from "./router.js";
+import { cardMarkup as executorCard } from "./executors.js";
+import { fetchExecutors } from "./library-api.js";
 
 
 /** A /getkey key still saved in this browser (same localStorage keys getkey.html uses). */
@@ -627,6 +629,7 @@ export const CHAPTERS = [
   { key: "hero",       label: "Origin",     len: 170 },
   { key: "universe",   label: "The Library",len: 213 },
   { key: "search",     label: "Search",     len: 190 },
+  { key: "executors",  label: "Executors",  len: 150 },
   { key: "categories", label: "Worlds",     len: 381 },
   { key: "featured",   label: "Trending",   len: 213 },
   { key: "community",  label: "Community",  len: 213 },
@@ -715,13 +718,23 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         </header>
       </div>`),
 
-    chapter("categories", "04 / Worlds", CHAPTERS[3].len, `
+    chapter("executors", "04 / Executors", CHAPTERS[3].len, `
+      <div class="panel panel--wide xlib">
+        <header class="panel__head">
+          <h2>Executor library</h2>
+          <p>The Roblox executors people use to run these scripts — PC and mobile, with whether each one is working right now.</p>
+        </header>
+        <div class="xlib__grid" data-xlib></div>
+        <div class="xlib__more"><a class="btn btn--ghost" href="/executors" data-xlib-all>See every executor</a></div>
+      </div>`),
+
+    chapter("categories", "05 / Worlds", CHAPTERS[4].len, `
       <div class="worlds">
         <div class="worlds__rail" role="tablist" aria-label="Script categories"></div>
         <div class="worlds__stage"></div>
       </div>`),
 
-    chapter("featured", "05 / Trending", CHAPTERS[4].len, `
+    chapter("featured", "06 / Trending", CHAPTERS[5].len, `
       <div class="panel">
         <header class="panel__head">
           <h2>Trending this week</h2>
@@ -730,7 +743,7 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         <div class="featured__grid" data-grid="featured"></div>
       </div>`),
 
-    chapter("community", "06 / Community", CHAPTERS[5].len, `
+    chapter("community", "07 / Community", CHAPTERS[6].len, `
       <div class="panel panel--wide">
         <header class="panel__head">
           <h2>The leaderboard</h2>
@@ -739,10 +752,10 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         <div id="board-mount"></div>
       </div>`),
 
-    chapter("submit", "07 / Publish", CHAPTERS[6].len, `
+    chapter("submit", "08 / Publish", CHAPTERS[7].len, `
       <div class="panel panel--wide" id="publish-mount"></div>`),
 
-    chapter("finale", "08 / Begin", CHAPTERS[7].len, `
+    chapter("finale", "09 / Begin", CHAPTERS[8].len, `
       <div class="finale">
         <h2 class="finale__title">Build something great.</h2>
         <p class="finale__sub">Your next Roblox game starts here.</p>
@@ -822,6 +835,22 @@ export function buildChapters({ libraryPanel, publishForm, onOpenScript, onJump,
         ? emptyBlock("No trending scripts yet.", "Once scripts start getting unlocked, the most popular show up here.")
         : "";
   }
+
+  /* ---- executor library: the newest working ones, from /api/executors ---- */
+  const xlib = $("[data-xlib]", content);
+  const XLIB_MAX = 6;
+  const XORDER = { working: 0, updating: 1, unavailable: 2 };
+  async function paintExecutors() {
+    let list = [];
+    try { if (await libraryOnline()) list = await fetchExecutors(); } catch { list = []; }
+    list = (list || []).slice().sort((a, b) => (XORDER[a.status] ?? 3) - (XORDER[b.status] ?? 3));
+    xlib.innerHTML = list.length
+      ? list.slice(0, XLIB_MAX).map(executorCard).join("")
+      : `<div class="empty"><strong>No executors listed yet.</strong><span>They show up here as soon as they're added.</span></div>`;
+    const all = $("[data-xlib-all]", content);
+    if (all) all.textContent = list.length > XLIB_MAX ? `See all ${list.length} executors` : "See every executor";
+  }
+  paintExecutors();
 
   function paintGrids() { paintStats(); paintTrending(); }
 

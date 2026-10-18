@@ -1,6 +1,7 @@
 // Entry point: capability detection, the render loop, and wiring.
 
 import { World, BANDS } from "./engine/world.js";
+import { startSimpleBackground } from "./engine/simplebg.js";
 import { SmoothScroll } from "./engine/scroll.js";
 import {
   createLibraryPanel, buildChapters, buildChrome, createChoreography,
@@ -61,20 +62,35 @@ if (caps.reducedMotion) document.documentElement.classList.add("reduced-motion")
 const canvas = document.getElementById("scene");
 let world = null;
 
-// The canvas is decorative — everything readable lives in the DOM.
-try {
-  world = new World(canvas, {
-    quality: caps.quality, reducedMotion: caps.reducedMotion, mobile: caps.mobile,
-  });
-  if (!world.init()) world = null;
-} catch (err) {
-  console.warn("[lucrit] 3D unavailable:", err);
-  world = null;
+// The 3D WebGL world is switched off (18 Oct 2026: "make the background more
+// simple and use less frames, it's lagging too much"). A light 2D background
+// takes its place — see engine/simplebg.js. The World class is kept so it can
+// come back with `?world=3d`, but nobody gets it by default.
+const want3d = new URLSearchParams(location.search).get("world") === "3d";
+if (want3d) {
+  try {
+    world = new World(canvas, {
+      quality: caps.quality, reducedMotion: caps.reducedMotion, mobile: caps.mobile,
+    });
+    if (!world.init()) world = null;
+  } catch (err) {
+    console.warn("[lucrit] 3D unavailable:", err);
+    world = null;
+  }
 }
 
 if (!world) {
-  document.documentElement.classList.add("no-webgl");
-  canvas.setAttribute("hidden", "");
+  document.documentElement.classList.add("simple-bg");
+  // Frosted glass (backdrop-filter) re-blurs the page behind every panel each
+  // time the background moves — the other half of the lag on computers. The
+  // simple background uses the same near-opaque fills phones already use.
+  document.documentElement.dataset.lite = "";
+  try {
+    if (!startSimpleBackground(canvas, { mobile: caps.mobile, reducedMotion: caps.reducedMotion })) throw new Error("no 2d");
+  } catch {
+    document.documentElement.classList.add("no-webgl");
+    canvas.setAttribute("hidden", "");
+  }
 }
 
 /* ------------------------------------------------------------- overlays */
@@ -165,6 +181,11 @@ const executorsPage = createExecutorsPage();
 const unlockPage = createUnlockFlowPage({
   onDone: (script) => {
     if (!script) { router.go("/", { replace: true }); return; }
+    // An executor's unlock goes back to that executor, download now showing.
+    if (script.kind === "executor" || String(script.id).startsWith("x_")) {
+      router.go(`/executors/${encodeURIComponent(script.slug || String(script.id).replace(/^x_/, ""))}`, { replace: true });
+      return;
+    }
     router.go(pathForScript(script), { replace: true });
   },
   onExit: () => router.go("/", { replace: true }),

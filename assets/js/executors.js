@@ -27,10 +27,11 @@ import { createOverlay, esc, toast } from "./pages.js";
 import { safeHref, safeImageSrc } from "./safe.js";
 import { fetchExecutors, fetchExecutor } from "./library-api.js";
 import { pathForExecutor, setTitle } from "./router.js";
+import { account } from "./account.js";
 
 // Mirrors EXECUTOR_STATUS / STATUS_LABEL in _worker.js. The server is the
 // authority on which values exist; this is only how they read on screen.
-const STATUS = {
+export const STATUS = {
   working:     { label: "Working",     chip: "chip--ok",   dot: "🟢" },
   updating:    { label: "Updating",    chip: "chip--warn", dot: "🟡" },
   unavailable: { label: "Unavailable", chip: "chip--hot",  dot: "🔴" },
@@ -56,7 +57,7 @@ function logo(x) {
 }
 
 /** One row in the listing. An anchor, so middle-click and "copy link" work. */
-function cardMarkup(x) {
+export function cardMarkup(x) {
   return `
     <a class="xcard" href="${esc(pathForExecutor(x))}" data-slug="${esc(x.slug)}">
       ${logo(x)}
@@ -137,6 +138,28 @@ export function createExecutorsPage() {
       </div>`;
   }
 
+  /**
+   * The download link is behind the same two sponsor steps as a script
+   * (18 Oct 2026). The buttons are plain links to /unlock/<provider>?s=<id>;
+   * the router turns them into in-app navigation, and the unlock page sends
+   * the visitor straight back here with the download showing.
+   */
+  function unlockBox(x) {
+    const live = account.unlockProviders.filter((p) => p === "lootlabs" || (p === "linkvertise" && account.linkvertiseSteps));
+    const providers = live.length ? live : ["lootlabs"];
+    const NAME = { lootlabs: "LootLabs", linkvertise: "Linkvertise" };
+    return `
+      <div class="gate xgate">
+        <h3>Get ${esc(x.name)}</h3>
+        <p>Two quick ${providers.length > 1 ? "LootLabs or Linkvertise" : esc(NAME[providers[0]])} steps unlock the download link.</p>
+        <div class="gate__actions">
+          ${providers.map((p, i) => `<a class="btn btn--primary${i ? " btn--alt" : ""}" data-xunlock="${p}"
+              href="/unlock/${p}?s=${encodeURIComponent(x.id)}">Unlock with ${esc(NAME[p])}</a>`).join("")}
+        </div>
+        <p class="gate__note">You'll come straight back here with the download link showing.</p>
+      </div>`;
+  }
+
   function renderOne(x) {
     const shots = (x.screenshots || []).map(safeImageSrc).filter(Boolean);
     const site = safeHref(x.website || "");
@@ -185,8 +208,10 @@ export function createExecutorsPage() {
            </section>`
         : ""}
 
+      ${x.locked ? unlockBox(x) : ""}
+
       <div class="script__toolbar">
-        ${site ? `<a class="btn btn--primary" href="${esc(site)}" target="_blank" rel="noopener nofollow">Official site</a>` : ""}
+        ${site ? `<a class="btn btn--primary" href="${esc(site)}" target="_blank" rel="noopener nofollow">Download ${esc(x.name)}</a>` : ""}
         ${chat ? `<a class="btn btn--discord" href="${esc(chat)}" target="_blank" rel="noopener nofollow">Their Discord</a>` : ""}
       </div>
 
