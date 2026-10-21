@@ -26,15 +26,24 @@ let presses = 0;
 while (!g.press()) presses++;
 check("executor download: one tab per press, then the download", presses === g.need && opened.length === g.need && opened.every((u) => u === SPONSOR_LINKS.xdl), `${presses}/${g.need}/${opened.length}`);
 
+// 20 Oct, "calm it down": browsing taps wait for the second card of a visit
+// and then come at most once every 10 minutes; unlock-button pops at most
+// once every 5 minutes.
 opened.length = 0;
-check("browsing tap opens one sponsor tab", sponsorTap() === true && opened.length === 1);
-check("…but not again within two minutes", sponsorTap() === false && opened.length === 1);
+check("the first card of a visit opens nothing (it only arms)", sponsorTap() === false && opened.length === 0);
+check("browsing tap opens one sponsor tab after that", sponsorTap() === true && opened.length === 1);
+check("…but not again within ten minutes", sponsorTap() === false && opened.length === 1);
 store["lucrit:tap"] = String(Date.now() - 3 * 60 * 1000);
-check("…and again after that", sponsorTap() === true && opened.length === 2);
+check("…not even three minutes later (was two)", sponsorTap() === false && opened.length === 1);
+store["lucrit:tap"] = String(Date.now() - 11 * 60 * 1000);
+check("…and again after ten", sponsorTap() === true && opened.length === 2);
 
 opened.length = 0;
 const { sponsorPop, sponsorTransfer } = await import("../assets/js/adgate.js");
-check("an unlock button press opens a sponsor tab every time", sponsorPop() && sponsorPop() && opened.length === 2);
+check("an unlock button press opens a sponsor tab", sponsorPop() === true && opened.length === 1);
+check("…but a second press within 5 minutes doesn't", sponsorPop() === false && opened.length === 1);
+store["lucrit:pop"] = String(Date.now() - 6 * 60 * 1000);
+check("…and again after 5 minutes", sponsorPop() === true && opened.length === 2);
 
 // The transfer screen: a tab on the press, a 5-second countdown, then the sponsor.
 const nodes = [];
