@@ -46,9 +46,25 @@ export function loadAds() {
   document.head.appendChild(s);
 }
 
-/** Waits until the page has settled, so the ad never slows the first paint. */
+/**
+ * Waits until the page has settled, so the ad never slows the first paint.
+ *
+ * 20 Oct 2026, "calm it down": the Multitag (popunder on tap, the full-screen
+ * vignette) no longer starts the moment the page loads. It waits until the
+ * visitor has been on the site for 30 seconds — counted across page loads in
+ * this tab, so moving between pages doesn't restart the wait. How often each
+ * format shows after that is still set on the zone in Monetag.
+ */
+export const ADS_DELAY_MS = 30 * 1000;
 export function scheduleAds() {
-  const go = () => setTimeout(loadAds, 1500);
+  let first = Date.now();
+  try {
+    const seen = Number(sessionStorage.getItem("lucrit:ads:since")) || 0;
+    if (seen && seen <= first) first = seen;
+    else sessionStorage.setItem("lucrit:ads:since", String(first));
+  } catch { /* storage blocked: wait the full delay */ }
+  const wait = Math.max(1500, ADS_DELAY_MS - (Date.now() - first));
+  const go = () => setTimeout(loadAds, wait);
   if (document.readyState === "complete") go();
   else window.addEventListener("load", go, { once: true });
 }

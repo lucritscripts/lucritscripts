@@ -739,13 +739,14 @@ document.documentElement.classList.add("is-ready");
 scheduleAds();
 
 // Browsing taps (adgate.js sponsorTap): opening a script from a card or a game
-// from the picker opens one sponsor tab, at most once every two minutes. Not
+// from the picker opens one sponsor tab, at most once every ten minutes and
+// never on the first one of a visit (20 Oct, "calm it down"). Not
 // on the heart or an author link inside a card, and never on admin.
 document.addEventListener("click", (e) => {
   if (!adsAllowed()) return;
   const t = e.target;
   // "Unlock with LootLabs / Linkvertise" (a script's gate, an executor's
-  // gate): one sponsor tab on every press. The step buttons on /unlock and
+  // gate): one sponsor tab on a press, at most once every 5 minutes. The step buttons on /unlock and
   // /getkey add a 5-second transfer screen too (sponsorTransfer).
   if (t.closest('[data-act="lootlabs"], [data-act="linkvertise"], [data-xunlock], a[href^="/getkey"]')) { sponsorPop(); return; }
   if (t.closest(".card__heart, a[href^='/creators/']")) return;

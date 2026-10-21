@@ -111,12 +111,22 @@ export function createAdGate(name, { link = SPONSOR_LINKS[String(name).split(":"
 
 /**
  * Browsing taps: opening a script from a card or a game from the picker opens
- * one sponsor tab — at most once every two minutes, so the site stays usable.
- * Must run synchronously inside the click handler. Returns true if it opened.
+ * one sponsor tab now and then. Must run synchronously inside the click
+ * handler. Returns true if it opened.
+ *
+ * 20 Oct 2026, "calm it down": the owner kept getting redirected while just
+ * moving around the site. Now at most once every 10 minutes (was 2), and never
+ * on someone's first card or game of the visit — that click only arms it.
  */
-const TAP_GAP_MS = 2 * 60 * 1000;
+export const TAP_GAP_MS = 10 * 60 * 1000;
 export function sponsorTap(link = SPONSOR_LINKS.browse) {
   if (exempt(link)) return false;
+  try {
+    if (sessionStorage.getItem("lucrit:tap:armed") !== "1") {
+      sessionStorage.setItem("lucrit:tap:armed", "1");
+      return false;
+    }
+  } catch { /* storage blocked: fall through to the time gap */ }
   let last = 0;
   try { last = Number(localStorage.getItem("lucrit:tap")) || 0; } catch { /* storage blocked */ }
   if (Date.now() - last < TAP_GAP_MS) return false;
@@ -128,12 +138,21 @@ export function sponsorTap(link = SPONSOR_LINKS.browse) {
 /**
  * Sponsor buttons (18 Oct 2026): "every time I click a button that's supposed
  * to take me to Linkvertise or LootLabs, there should be a popup, or a transfer
- * ad (start off with one)". Every such press opens one sponsor tab on the
- * click itself. A popup can only open on a click (browsers block the rest),
- * so it's one per press, never on a timer.
+ * ad (start off with one)". A press opens one sponsor tab on the click itself.
+ * A popup can only open on a click (browsers block the rest), so it's one per
+ * press, never on a timer.
+ *
+ * 20 Oct 2026, "calm it down": at most one of these every 5 minutes, so
+ * pressing around the unlock buttons doesn't keep bouncing people out.
+ * The transfer screen (sponsorTransfer) on the actual step is unchanged.
  */
+export const POP_GAP_MS = 5 * 60 * 1000;
 export function sponsorPop(link = SPONSOR_LINKS.transfer) {
   if (exempt(link)) return false;
+  let last = 0;
+  try { last = Number(localStorage.getItem("lucrit:pop")) || 0; } catch { /* storage blocked */ }
+  if (Date.now() - last < POP_GAP_MS) return false;
+  try { localStorage.setItem("lucrit:pop", String(Date.now())); } catch { /* fine */ }
   openSponsor(link);
   return true;
 }
